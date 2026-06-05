@@ -698,6 +698,280 @@ def delete_processed_files(excel_files, keep_set):
                 logger.error('删除文件「%s」失败: %s', filepath, e)
 
 
+# ──────────────────────────────────────────────
+# 流水文件变更对比
+# ──────────────────────────────────────────────
+
+DIFF_COLUMNS = [
+    '银行', '银行账号', '主体', '交易日期',
+    '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+]
+
+AMOUNT_FIELDS = ['付款', '收款', '余额']
+
+
+def _make_match_key(row):
+    transaction_id = row.get('交易流水号')
+    bank_account = _account_key(row.get('银行账号'))
+    if transaction_id is not None and str(transaction_id).strip():
+        tid = str(transaction_id).strip()
+        return f"{bank_account}::{tid}"
+    payment = row.get('付款')
+    receipt = row.get('收款')
+    trade_date = row.get('交易日期')
+    p = '' if payment is None else str(payment)
+    r = '' if receipt is None else str(receipt)
+    d = '' if trade_date is None else str(trade_date)
+    return f"{bank_account}::{d}::{p}::{r}"
+
+
+def _is_nan_or_none(value):
+    if value is None:
+        return True
+    if isinstance(value, float) and value != value:
+        return True
+    return False
+
+
+def _values_equal(val_a, val_b, field_name):
+    if field_name in AMOUNT_FIELDS:
+        fa = to_float(val_a)
+        fb = to_float(val_b)
+        if _is_nan_or_none(fa) and _is_nan_or_none(fb):
+            return True
+        if _is_nan_or_none(fa) or _is_nan_or_none(fb):
+            return False
+        return abs(fa - fb) < 0.005
+    sa = '' if _is_nan_or_none(val_a) else str(val_a).strip()
+    sb = '' if _is_nan_or_none(val_b) else str(val_b).strip()
+    return sa == sb
+
+
+@dataclass
+class DiffRecord:
+    change_type: str
+    match_key: str
+    old_row: Optional[dict] = None
+    new_row: Optional[dict] = None
+    changed_fields: Optional[List[str]] = None
+
+    def to_flat_dict(self):
+        source = self.new_row if self.new_row else self.old_row
+        result = {'变更类型': self.change_type}
+        for col in DIFF_COLUMNS:
+            result[col] = source.get(col) if source else None
+        if self.change_type == '变更' and self.changed_fields:
+            parts = []
+            for f in self.changed_fields:
+                old_v = self.old_row.get(f) if self.old_row else None
+                new_v = self.new_row.get(f) if self.new_row else None
+                parts.append(f"{f}: {old_v} → {new_v}")
+            result['变更明细'] = '; '.join(parts)
+        else:
+            result['变更明细'] = ''
+        if self.change_type == '变更':
+            for f in (self.changed_fields or []):
+                if f in AMOUNT_FIELDS:
+                    old_v = self.old_row.get(f) if self.old_row else None
+                    new_v = self.new_row.get(f) if self.new_row else None
+                    result[f'{f}(旧)'] = old_v
+                    result[f'{f}(新)'] = new_v
+        return result
+
+
+@dataclass
+class DiffResult:
+    records: List[DiffRecord] = field(default_factory=list)
+    added_count: int = 0
+    deleted_count: int = 0
+    changed_count: int = 0
+    unchanged_count: int = 0
+    output_path: Optional[str] = None
+
+
+def diff_transactions(old_df, new_df):
+    logger = get_logger()
+
+    old_keyed = {}
+    for _, row in old_df.iterrows():
+        key = _make_match_key(row)
+        old_keyed[key] = row.to_dict()
+
+    new_keyed = {}
+    for _, row in new_df.iterrows():
+        key = _make_match_key(row)
+        new_keyed[key] = row.to_dict()
+
+    all_keys = list(dict.fromkeys(list(old_keyed.keys()) + list(new_keyed.keys())))
+
+    records = []
+    added = deleted = changed = unchanged = 0
+
+    for key in all_keys:
+        in_old = key in old_keyed
+        in_new = key in new_keyed
+
+        if in_old and not in_new:
+            records.append(DiffRecord(
+                change_type='删除', match_key=key, old_row=old_keyed[key],
+            ))
+            deleted += 1
+        elif in_new and not in_old:
+            records.append(DiffRecord(
+                change_type='新增', match_key=key, new_row=new_keyed[key],
+            ))
+            added += 1
+        else:
+            old_r = old_keyed[key]
+            new_r = new_keyed[key]
+            changed_fields = []
+            for col in DIFF_COLUMNS:
+                if not _values_equal(old_r.get(col), new_r.get(col), col):
+                    changed_fields.append(col)
+            if changed_fields:
+                records.append(DiffRecord(
+                    change_type='变更', match_key=key,
+                    old_row=old_r, new_row=new_r,
+                    changed_fields=changed_fields,
+                ))
+                changed += 1
+            else:
+                records.append(DiffRecord(
+                    change_type='未变更', match_key=key,
+                    old_row=old_r, new_row=new_r,
+                ))
+                unchanged += 1
+
+    logger.info(
+        '变更对比完成: 新增 %d, 删除 %d, 变更 %d, 未变更 %d',
+        added, deleted, changed, unchanged,
+    )
+    return DiffResult(
+        records=records,
+        added_count=added,
+        deleted_count=deleted,
+        changed_count=changed,
+        unchanged_count=unchanged,
+    )
+
+
+DIFF_HIGHLIGHT_COLORS = {
+    '新增': 'C6EFCE',
+    '删除': 'FFC7CE',
+    '变更': 'FFEB9C',
+}
+
+
+def export_diff_result(diff_result, output_path):
+    logger = get_logger()
+
+    flat_rows = [r.to_flat_dict() for r in diff_result.records]
+    if not flat_rows:
+        logger.warning('无可对比结果，不生成输出文件')
+        return None
+
+    has_changes = any(r['变更明细'] for r in flat_rows)
+    extra_cols = []
+    if has_changes:
+        extra_cols.append('变更明细')
+    amount_change_cols = []
+    for f in AMOUNT_FIELDS:
+        col_old = f'{f}(旧)'
+        col_new = f'{f}(新)'
+        if any(col_old in r for r in flat_rows):
+            amount_change_cols.extend([col_old, col_new])
+    extra_cols.extend(amount_change_cols)
+
+    columns = ['变更类型'] + DIFF_COLUMNS + extra_cols
+
+    df = pd.DataFrame(flat_rows)
+    for col in columns:
+        if col not in df.columns:
+            df[col] = None
+    df = df[columns]
+
+    df.to_excel(output_path, index=False, engine='openpyxl')
+
+    wb = openpyxl.load_workbook(output_path)
+    ws = wb.active
+
+    type_col_idx = 1
+    for row_idx in range(2, ws.max_row + 1):
+        cell_type = ws.cell(row=row_idx, column=type_col_idx)
+        change_type = str(cell_type.value).strip() if cell_type.value else ''
+        fill_color = DIFF_HIGHLIGHT_COLORS.get(change_type)
+        if fill_color:
+            fill = openpyxl.styles.PatternFill(
+                start_color=fill_color, end_color=fill_color, fill_type='solid',
+            )
+            for col_idx in range(1, ws.max_column + 1):
+                ws.cell(row=row_idx, column=col_idx).fill = fill
+
+    wb.save(output_path)
+    wb.close()
+
+    logger.info('变更对比结果已输出: %s', output_path)
+    return output_path
+
+
+def run_diff(old_path, new_path, output_dir=None):
+    logger = get_logger()
+    logger.info('========== 流水变更对比开始 ==========')
+    logger.info('旧批次文件: %s', old_path)
+    logger.info('新批次文件: %s', new_path)
+
+    if not os.path.exists(old_path):
+        logger.error('旧批次总表文件不存在: %s', old_path)
+        raise FileNotFoundError(f'旧批次总表文件不存在: {old_path}')
+    if not os.path.exists(new_path):
+        logger.error('新批次总表文件不存在: %s', new_path)
+        raise FileNotFoundError(f'新批次总表文件不存在: {new_path}')
+
+    old_df = pd.read_excel(old_path, engine='openpyxl')
+    new_df = pd.read_excel(new_path, engine='openpyxl')
+
+    required_cols = ['银行账号', '交易流水号']
+    for col in required_cols:
+        if col not in old_df.columns:
+            logger.warning('旧批次总表缺少列: %s', col)
+        if col not in new_df.columns:
+            logger.warning('新批次总表缺少列: %s', col)
+
+    diff_result = diff_transactions(old_df, new_df)
+
+    if output_dir is None:
+        output_dir = get_script_dir()
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_filename = f'流水变更对比_{timestamp}.xlsx'
+    output_path = os.path.join(output_dir, output_filename)
+
+    export_diff_result(diff_result, output_path)
+    diff_result.output_path = output_path
+
+    logger.info('========== 流水变更对比结束 ==========')
+    return diff_result
+
+
+def format_diff_message(diff_result):
+    if not diff_result.records:
+        return '两份总表无数据可对比。'
+
+    total = len(diff_result.records)
+    msg = (
+        f'变更对比完成！\n\n'
+        f'总记录数：{total}\n'
+        f'新增交易：{diff_result.added_count}\n'
+        f'删除交易：{diff_result.deleted_count}\n'
+        f'金额/内容变更：{diff_result.changed_count}\n'
+        f'未变更：{diff_result.unchanged_count}'
+    )
+    if diff_result.output_path:
+        msg += f'\n\n对比结果文件：{diff_result.output_path}'
+    return msg
+
+
 def main():
     setup_logging()
     logger = get_logger()
