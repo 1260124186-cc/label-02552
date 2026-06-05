@@ -24,3 +24,5 @@ backend/bankcheck.log
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+!backend/requirements-lock.txt
