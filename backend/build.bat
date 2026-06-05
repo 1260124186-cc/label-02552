@@ -5,7 +5,13 @@ echo   银行流水检验工具 - 打包脚本
 echo ========================================
 echo.
 
-pip install -r requirements.txt
+if exist requirements-lock.txt (
+    echo [信息] 使用锁文件 (requirements-lock.txt) 安装依赖以确保可复现...
+    pip install -r requirements-lock.txt
+) else (
+    echo [信息] 未找到锁文件，使用 requirements.txt 安装依赖...
+    pip install -r requirements.txt
+)
 if %errorlevel% neq 0 (
     echo [错误] 依赖安装失败，请检查 Python 环境。
     pause

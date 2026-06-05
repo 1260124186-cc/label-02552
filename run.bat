@@ -49,7 +49,13 @@ if %errorlevel% neq 0 (
 
 REM 检测并安装依赖
 echo [信息] 正在检查并安装依赖...
-python -m pip install -r backend\requirements.txt
+if exist backend\requirements-lock.txt (
+    echo [信息] 使用锁文件 (requirements-lock.txt) 安装依赖以确保可复现...
+    python -m pip install -r backend\requirements-lock.txt
+) else (
+    echo [信息] 未找到锁文件，使用 requirements.txt 安装依赖...
+    python -m pip install -r backend\requirements.txt
+)
 if %errorlevel% neq 0 (
     echo [错误] 依赖安装失败，请检查网络连接或 Python 环境。
     pause

@@ -8,6 +8,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
 REQ_FILE="$BACKEND_DIR/requirements.txt"
+LOCK_FILE="$BACKEND_DIR/requirements-lock.txt"
 
 echo "========================================"
 echo "  银行流水检验工具 - 启动脚本"
@@ -129,7 +130,13 @@ fi
 
 # ── 安装依赖 ──
 echo "[信息] 正在检查并安装依赖..."
-$PYTHON_CMD -m pip install -r "$REQ_FILE"
+if [ -f "$LOCK_FILE" ]; then
+    echo "[信息] 使用锁文件 (requirements-lock.txt) 安装依赖以确保可复现..."
+    $PYTHON_CMD -m pip install -r "$LOCK_FILE"
+else
+    echo "[信息] 未找到锁文件，使用 requirements.txt 安装依赖..."
+    $PYTHON_CMD -m pip install -r "$REQ_FILE"
+fi
 if [ $? -ne 0 ]; then
     echo "[错误] 依赖安装失败，请检查网络连接或 Python 环境。"
     exit 1
