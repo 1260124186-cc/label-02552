@@ -18,7 +18,9 @@ import shutil
 import uuid
 import logging
 import tempfile
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import List, Optional, Tuple
 
 import openpyxl
 import pandas as pd
@@ -554,33 +556,25 @@ BANK_PROCESSORS = {
 # 主流程
 # ──────────────────────────────────────────────
 
-def main():
-    # ── 初始化日志 ──
-    setup_logging()
+@dataclass
+class ProcessingResult:
+    all_rows: List[dict] = field(default_factory=list)
+    processed_files: List[str] = field(default_factory=list)
+    unprocessed_files: List[str] = field(default_factory=list)
+    error_files: List[Tuple[str, str]] = field(default_factory=list)
+    output_path: Optional[str] = None
+    lookup_missing: bool = False
+    folder_empty: bool = False
+
+
+def run_pipeline(folder, script_dir):
     logger = get_logger()
-    logger.info('========== 银行流水检验工具启动 ==========')
 
-    # ── 选择文件夹（自动适配 GUI / 命令行） ──
-    folder = ask_directory('请选择银行流水文件夹')
-    if not folder:
-        show_info('提示', '未选择文件夹，程序退出。')
-        logger.info('用户未选择文件夹，程序退出')
-        return
-
-    logger.info('用户选择文件夹: %s', folder)
-    script_dir = get_script_dir()
-
-    # ── 查找主体映射表 ──
     lookup_file = find_lookup_file(script_dir)
-    if not lookup_file:
-        show_warning(
-            '警告',
-            '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
-            '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
-        )
+    lookup_missing = lookup_file is None
+    if lookup_missing:
         logger.warning('未找到主体查找表，"主体"列将为空')
 
-    # ── 复制文件夹 ──
     folder_name = os.path.basename(folder.rstrip('/\\'))
     parent_dir = os.path.dirname(folder.rstrip('/\\'))
     new_folder = os.path.join(parent_dir, f"{folder_name}＋检验版")
@@ -591,18 +585,15 @@ def main():
     shutil.copytree(folder, new_folder)
     logger.info('已复制文件夹为＋检验版: %s', new_folder)
 
-    # ── 扫描 Excel 文件 ──
     excel_files = scan_excel_files(new_folder)
     if not excel_files:
-        show_info('提示', '文件夹中未发现任何 Excel 文件。')
         logger.warning('检验版文件夹中未发现任何 Excel 文件')
-        return
+        return ProcessingResult(lookup_missing=lookup_missing, folder_empty=True)
 
-    # ── 逐文件处理 ──
     all_rows = []
-    processed_files = []       # 成功处理的文件
-    unprocessed_files = []     # 无法识别银行的文件 → 保留
-    error_files = []           # 识别成功但处理出错的文件 → 也需要删除
+    processed_files = []
+    unprocessed_files = []
+    error_files = []
 
     for filepath in excel_files:
         bank = identify_bank(filepath)
@@ -619,17 +610,9 @@ def main():
         else:
             unprocessed_files.append(filepath)
 
-    # ── 删除除无法识别银行外所有的文件 ──
-    # 根据要求，只要文件名前缀被识别为对应银行（无论是成功处理还是出错），均需删除
-    for filepath in excel_files:
-        if filepath not in unprocessed_files:
-            try:
-                os.remove(filepath)
-                logger.debug('已删除文件: %s', filepath)
-            except OSError as e:
-                logger.error('删除文件「%s」失败: %s', filepath, e)
+    delete_processed_files(excel_files, set(unprocessed_files))
 
-    # ── 输出总表 ──
+    output_path = None
     if all_rows:
         columns = [
             '唯一id', '银行', '银行账号', '主体', '交易日期',
@@ -639,32 +622,79 @@ def main():
         output_path = os.path.join(script_dir, '银行流水总表.xlsx')
         df.to_excel(output_path, index=False, engine='openpyxl')
         logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
+    else:
+        logger.warning('未提取到任何银行流水记录')
 
-        # ── 汇总提示 ──
+    return ProcessingResult(
+        all_rows=all_rows,
+        processed_files=processed_files,
+        unprocessed_files=unprocessed_files,
+        error_files=error_files,
+        output_path=output_path,
+        lookup_missing=lookup_missing,
+    )
+
+
+def format_result_message(result):
+    if result.folder_empty:
+        return '文件夹中未发现任何 Excel 文件。'
+
+    if result.all_rows:
         msg = (
             f'处理完成！\n\n'
-            f'已处理文件数：{len(processed_files)}\n'
-            f'提取记录数：{len(all_rows)}\n'
-            f'总表路径：{output_path}'
+            f'已处理文件数：{len(result.processed_files)}\n'
+            f'提取记录数：{len(result.all_rows)}\n'
+            f'总表路径：{result.output_path}'
         )
-        if unprocessed_files:
-            names = '\n  '.join(os.path.basename(f) for f in unprocessed_files)
-            msg += f'\n\n无法识别的文件（{len(unprocessed_files)} 个，已保留）：\n  {names}'
-        if error_files:
-            err_info = '\n  '.join(f'{os.path.basename(f)}: {e}' for f, e in error_files)
-            msg += f'\n\n处理出错的文件（{len(error_files)} 个，已保留）：\n  {err_info}'
-
-        show_info('完成', msg)
     else:
         msg = '未提取到任何银行流水记录。'
-        if unprocessed_files:
-            names = '\n  '.join(os.path.basename(f) for f in unprocessed_files)
-            msg += f'\n\n无法识别的文件（{len(unprocessed_files)} 个，已保留）：\n  {names}'
-        if error_files:
-            err_info = '\n  '.join(f'{os.path.basename(f)}: {e}' for f, e in error_files)
-            msg += f'\n\n处理出错的文件（{len(error_files)} 个，已保留）：\n  {err_info}'
-        show_info('提示', msg)
-        logger.warning('未提取到任何银行流水记录')
+
+    if result.unprocessed_files:
+        names = '\n  '.join(os.path.basename(f) for f in result.unprocessed_files)
+        msg += f'\n\n无法识别的文件（{len(result.unprocessed_files)} 个，已保留）：\n  {names}'
+    if result.error_files:
+        err_info = '\n  '.join(f'{os.path.basename(f)}: {e}' for f, e in result.error_files)
+        msg += f'\n\n处理出错的文件（{len(result.error_files)} 个，已保留）：\n  {err_info}'
+
+    return msg
+
+
+def delete_processed_files(excel_files, keep_set):
+    logger = get_logger()
+    for filepath in excel_files:
+        if filepath not in keep_set:
+            try:
+                os.remove(filepath)
+                logger.debug('已删除文件: %s', filepath)
+            except OSError as e:
+                logger.error('删除文件「%s」失败: %s', filepath, e)
+
+
+def main():
+    setup_logging()
+    logger = get_logger()
+    logger.info('========== 银行流水检验工具启动 ==========')
+
+    folder = ask_directory('请选择银行流水文件夹')
+    if not folder:
+        show_info('提示', '未选择文件夹，程序退出。')
+        logger.info('用户未选择文件夹，程序退出')
+        return
+
+    logger.info('用户选择文件夹: %s', folder)
+    script_dir = get_script_dir()
+
+    result = run_pipeline(folder, script_dir)
+
+    if result.lookup_missing:
+        show_warning(
+            '警告',
+            '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
+            '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
+        )
+
+    msg = format_result_message(result)
+    show_info('完成' if result.all_rows else '提示', msg)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 

@@ -9,7 +9,7 @@ from conftest import _create_beijing_bank_excel, _create_east_asia_bank_excel, _
 import bankcheck
 
 
-class TestMainIntegration:
+class TestRunPipeline:
     def _setup_folder(self, tmp_dir, script_dir, files=None):
         source_folder = os.path.join(tmp_dir, '流水文件夹')
         os.makedirs(source_folder, exist_ok=True)
@@ -32,76 +32,42 @@ class TestMainIntegration:
         _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
         return source_folder
 
-    def test_full_pipeline_beijing(self, tmp_dir):
+    def test_pipeline_beijing(self, tmp_dir):
         script_dir = os.path.join(tmp_dir, 'script')
         os.makedirs(script_dir, exist_ok=True)
         source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
 
-        new_folder = source + '＋检验版'
-        shutil.copytree(source, new_folder)
+        result = bankcheck.run_pipeline(source, script_dir)
 
-        lookup_file = bankcheck.find_lookup_file(script_dir)
-        excel_files = bankcheck.scan_excel_files(new_folder)
-        assert len(excel_files) == 1
+        assert len(result.all_rows) == 2
+        assert result.all_rows[0]['银行'] == '北京银行'
+        assert result.all_rows[0]['主体'] == '北京XX科技有限公司'
+        assert result.all_rows[0]['付款'] == -50000.0
+        assert len(result.processed_files) == 1
+        assert not result.folder_empty
+        assert result.output_path is not None
 
-        all_rows = []
-        processed = []
-        unprocessed = []
-        for fp in excel_files:
-            bank = bankcheck.identify_bank(fp)
-            if bank and bank in bankcheck.BANK_PROCESSORS:
-                rows = bankcheck.BANK_PROCESSORS[bank](fp, lookup_file)
-                all_rows.extend(rows)
-                processed.append(fp)
-
-        assert len(all_rows) == 2
-        assert all_rows[0]['银行'] == '北京银行'
-        assert all_rows[0]['主体'] == '北京XX科技有限公司'
-        assert all_rows[0]['付款'] == -50000.0
-
-    def test_full_pipeline_east_asia(self, tmp_dir):
+    def test_pipeline_east_asia(self, tmp_dir):
         script_dir = os.path.join(tmp_dir, 'script')
         os.makedirs(script_dir, exist_ok=True)
         source = self._setup_folder(tmp_dir, script_dir, ['东亚银行'])
 
-        new_folder = source + '＋检验版'
-        shutil.copytree(source, new_folder)
+        result = bankcheck.run_pipeline(source, script_dir)
 
-        lookup_file = bankcheck.find_lookup_file(script_dir)
-        excel_files = bankcheck.scan_excel_files(new_folder)
+        assert len(result.all_rows) == 2
+        assert result.all_rows[0]['银行'] == '东亚银行'
+        assert result.all_rows[0]['主体'] == '上海YY贸易有限公司'
 
-        all_rows = []
-        for fp in excel_files:
-            bank_name = bankcheck.identify_bank(fp)
-            if bank_name and bank_name in bankcheck.BANK_PROCESSORS:
-                rows = bankcheck.BANK_PROCESSORS[bank_name](fp, lookup_file)
-                all_rows.extend(rows)
-
-        assert len(all_rows) == 2
-        assert all_rows[0]['银行'] == '东亚银行'
-        assert all_rows[0]['主体'] == '上海YY贸易有限公司'
-
-    def test_full_pipeline_both_banks(self, tmp_dir):
+    def test_pipeline_both_banks(self, tmp_dir):
         script_dir = os.path.join(tmp_dir, 'script')
         os.makedirs(script_dir, exist_ok=True)
         source = self._setup_folder(tmp_dir, script_dir, ['北京银行', '东亚银行'])
 
-        new_folder = source + '＋检验版'
-        shutil.copytree(source, new_folder)
+        result = bankcheck.run_pipeline(source, script_dir)
 
-        lookup_file = bankcheck.find_lookup_file(script_dir)
-        excel_files = bankcheck.scan_excel_files(new_folder)
-
-        all_rows = []
-        for fp in excel_files:
-            bank_name = bankcheck.identify_bank(fp)
-            if bank_name and bank_name in bankcheck.BANK_PROCESSORS:
-                rows = bankcheck.BANK_PROCESSORS[bank_name](fp, lookup_file)
-                all_rows.extend(rows)
-
-        assert len(all_rows) == 4
-        beijing_rows = [r for r in all_rows if r['银行'] == '北京银行']
-        east_asia_rows = [r for r in all_rows if r['银行'] == '东亚银行']
+        assert len(result.all_rows) == 4
+        beijing_rows = [r for r in result.all_rows if r['银行'] == '北京银行']
+        east_asia_rows = [r for r in result.all_rows if r['银行'] == '东亚银行']
         assert len(beijing_rows) == 2
         assert len(east_asia_rows) == 2
 
@@ -110,27 +76,13 @@ class TestMainIntegration:
         os.makedirs(script_dir, exist_ok=True)
         source = self._setup_folder(tmp_dir, script_dir, ['北京银行', '东亚银行'])
 
-        new_folder = source + '＋检验版'
-        shutil.copytree(source, new_folder)
+        result = bankcheck.run_pipeline(source, script_dir)
 
-        lookup_file = bankcheck.find_lookup_file(script_dir)
-        excel_files = bankcheck.scan_excel_files(new_folder)
-
-        all_rows = []
-        for fp in excel_files:
-            bank_name = bankcheck.identify_bank(fp)
-            if bank_name and bank_name in bankcheck.BANK_PROCESSORS:
-                rows = bankcheck.BANK_PROCESSORS[bank_name](fp, lookup_file)
-                all_rows.extend(rows)
-
-        columns = ['唯一id', '银行', '银行账号', '主体', '交易日期', '付款', '收款', '摘要', '对方户名', '余额', '交易流水号']
-        df = pd.DataFrame(all_rows, columns=columns)
-        output_path = os.path.join(script_dir, '银行流水总表.xlsx')
-        df.to_excel(output_path, index=False, engine='openpyxl')
-
-        assert os.path.exists(output_path)
-        df_read = pd.read_excel(output_path, engine='openpyxl')
+        assert result.output_path is not None
+        assert os.path.exists(result.output_path)
+        df_read = pd.read_excel(result.output_path, engine='openpyxl')
         assert len(df_read) == 4
+        columns = ['唯一id', '银行', '银行账号', '主体', '交易日期', '付款', '收款', '摘要', '对方户名', '余额', '交易流水号']
         assert list(df_read.columns) == columns
 
     def test_unprocessed_files_kept(self, tmp_dir):
@@ -138,43 +90,19 @@ class TestMainIntegration:
         os.makedirs(script_dir, exist_ok=True)
         source = self._setup_folder(tmp_dir, script_dir, ['北京银行', '未知'])
 
-        new_folder = source + '＋检验版'
-        shutil.copytree(source, new_folder)
+        result = bankcheck.run_pipeline(source, script_dir)
 
-        excel_files = bankcheck.scan_excel_files(new_folder)
-        unprocessed = []
-        for fp in excel_files:
-            bank_name = bankcheck.identify_bank(fp)
-            if not bank_name or bank_name not in bankcheck.BANK_PROCESSORS:
-                unprocessed.append(fp)
-
-        assert len(unprocessed) == 1
-        assert '未知银行' in os.path.basename(unprocessed[0])
+        assert len(result.unprocessed_files) == 1
+        assert '未知银行' in os.path.basename(result.unprocessed_files[0])
 
     def test_processed_files_deleted(self, tmp_dir):
         script_dir = os.path.join(tmp_dir, 'script')
         os.makedirs(script_dir, exist_ok=True)
         source = self._setup_folder(tmp_dir, script_dir, ['北京银行', '未知'])
 
+        result = bankcheck.run_pipeline(source, script_dir)
+
         new_folder = source + '＋检验版'
-        shutil.copytree(source, new_folder)
-
-        lookup_file = bankcheck.find_lookup_file(script_dir)
-        excel_files = bankcheck.scan_excel_files(new_folder)
-
-        processed = []
-        unprocessed = []
-        for fp in excel_files:
-            bank_name = bankcheck.identify_bank(fp)
-            if bank_name and bank_name in bankcheck.BANK_PROCESSORS:
-                processed.append(fp)
-            else:
-                unprocessed.append(fp)
-
-        for fp in excel_files:
-            if fp not in unprocessed:
-                os.remove(fp)
-
         remaining = bankcheck.scan_excel_files(new_folder)
         assert len(remaining) == 1
         assert '未知银行' in os.path.basename(remaining[0])
@@ -185,12 +113,34 @@ class TestMainIntegration:
         source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
 
         original_count = len(os.listdir(source))
-
-        new_folder = source + '＋检验版'
-        shutil.copytree(source, new_folder)
+        bankcheck.run_pipeline(source, script_dir)
 
         assert len(os.listdir(source)) == original_count
         assert os.path.exists(os.path.join(source, '北京银行_流水.xlsx'))
+
+    def test_empty_folder(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = os.path.join(tmp_dir, '空文件夹')
+        os.makedirs(source, exist_ok=True)
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source, script_dir)
+
+        assert result.folder_empty is True
+        assert len(result.all_rows) == 0
+        assert result.output_path is None
+
+    def test_lookup_missing(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+        os.remove(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source, script_dir)
+
+        assert result.lookup_missing is True
+        assert result.all_rows[0]['主体'] == ''
 
     def test_bank_processors_registry(self):
         assert '北京银行' in bankcheck.BANK_PROCESSORS
@@ -220,3 +170,98 @@ class TestMainIntegration:
             rows = bankcheck.process_east_asia_bank(east_asia_sample, lookup_file)
             assert len(rows) > 0
             assert rows[0]['银行'] == '东亚银行'
+
+
+class TestFormatResultMessage:
+    def test_folder_empty(self):
+        result = bankcheck.ProcessingResult(folder_empty=True)
+        msg = bankcheck.format_result_message(result)
+        assert msg == '文件夹中未发现任何 Excel 文件。'
+
+    def test_with_records(self):
+        result = bankcheck.ProcessingResult(
+            all_rows=[{'银行': '北京银行'}, {'银行': '东亚银行'}],
+            processed_files=['/path/a.xlsx', '/path/b.xlsx'],
+            output_path='/path/to/银行流水总表.xlsx',
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '处理完成！' in msg
+        assert '已处理文件数：2' in msg
+        assert '提取记录数：2' in msg
+        assert '/path/to/银行流水总表.xlsx' in msg
+
+    def test_no_records(self):
+        result = bankcheck.ProcessingResult()
+        msg = bankcheck.format_result_message(result)
+        assert '未提取到任何银行流水记录。' in msg
+
+    def test_unprocessed_files(self):
+        result = bankcheck.ProcessingResult(
+            all_rows=[{'银行': '北京银行'}],
+            processed_files=['/path/a.xlsx'],
+            unprocessed_files=['/path/未知银行_流水.xlsx'],
+            output_path='/path/to/银行流水总表.xlsx',
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '无法识别的文件（1 个' in msg
+        assert '未知银行_流水.xlsx' in msg
+
+    def test_error_files(self):
+        result = bankcheck.ProcessingResult(
+            error_files=[('/path/北京银行_坏.xlsx', 'Bad file')],
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '处理出错的文件（1 个' in msg
+        assert '北京银行_坏.xlsx' in msg
+        assert 'Bad file' in msg
+
+    def test_unprocessed_and_error(self):
+        result = bankcheck.ProcessingResult(
+            unprocessed_files=['/path/未知.xlsx'],
+            error_files=[('/path/北京银行_坏.xlsx', 'Error')],
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '无法识别的文件' in msg
+        assert '处理出错的文件' in msg
+
+
+class TestDeleteProcessedFiles:
+    def test_deletes_non_kept_files(self, tmp_dir):
+        f1 = os.path.join(tmp_dir, 'a.xlsx')
+        f2 = os.path.join(tmp_dir, 'b.xlsx')
+        open(f1, 'w').close()
+        open(f2, 'w').close()
+
+        bankcheck.delete_processed_files([f1, f2], {f2})
+
+        assert not os.path.exists(f1)
+        assert os.path.exists(f2)
+
+    def test_keeps_all_when_all_in_keep_set(self, tmp_dir):
+        f1 = os.path.join(tmp_dir, 'a.xlsx')
+        f2 = os.path.join(tmp_dir, 'b.xlsx')
+        open(f1, 'w').close()
+        open(f2, 'w').close()
+
+        bankcheck.delete_processed_files([f1, f2], {f1, f2})
+
+        assert os.path.exists(f1)
+        assert os.path.exists(f2)
+
+    def test_deletes_all_when_keep_set_empty(self, tmp_dir):
+        f1 = os.path.join(tmp_dir, 'a.xlsx')
+        f2 = os.path.join(tmp_dir, 'b.xlsx')
+        open(f1, 'w').close()
+        open(f2, 'w').close()
+
+        bankcheck.delete_processed_files([f1, f2], set())
+
+        assert not os.path.exists(f1)
+        assert not os.path.exists(f2)
+
+    def test_empty_file_list(self, tmp_dir):
+        bankcheck.delete_processed_files([], set())
+
+    def test_nonexistent_file_handled_gracefully(self, tmp_dir):
+        nonexistent = os.path.join(tmp_dir, 'missing.xlsx')
+        bankcheck.delete_processed_files([nonexistent], set())
