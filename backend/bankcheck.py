@@ -610,7 +610,8 @@ def run_pipeline(folder, script_dir):
         else:
             unprocessed_files.append(filepath)
 
-    delete_processed_files(excel_files, set(unprocessed_files))
+    error_file_paths = {f for f, _ in error_files}
+    delete_processed_files(excel_files, set(unprocessed_files) | error_file_paths)
 
     output_path = None
     if all_rows:

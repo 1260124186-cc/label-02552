@@ -142,6 +142,60 @@ class TestRunPipeline:
         assert result.lookup_missing is True
         assert result.all_rows[0]['主体'] == ''
 
+    def test_error_files_kept_after_pipeline(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+
+        corrupt_path = os.path.join(source_folder, '北京银行_坏.xlsx')
+        with open(corrupt_path, 'wb') as f:
+            f.write(b'not a valid excel file')
+
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+
+        assert len(result.error_files) == 1
+        error_filepath = result.error_files[0][0]
+        assert '北京银行_坏' in os.path.basename(error_filepath)
+
+        new_folder = source_folder + '＋检验版'
+        remaining = bankcheck.scan_excel_files(new_folder)
+        assert len(remaining) == 1
+        assert '北京银行_坏' in os.path.basename(remaining[0])
+
+    def test_mixed_success_error_unprocessed(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+
+        _create_beijing_bank_excel(os.path.join(source_folder, '北京银行_正常.xlsx'))
+        corrupt_path = os.path.join(source_folder, '北京银行_坏.xlsx')
+        with open(corrupt_path, 'wb') as f:
+            f.write(b'corrupt')
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws['A1'] = 'unknown'
+        wb.save(os.path.join(source_folder, '未知银行_流水.xlsx'))
+        wb.close()
+
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+
+        assert len(result.processed_files) == 1
+        assert len(result.error_files) == 1
+        assert len(result.unprocessed_files) == 1
+
+        new_folder = source_folder + '＋检验版'
+        remaining = bankcheck.scan_excel_files(new_folder)
+        remaining_names = [os.path.basename(f) for f in remaining]
+        assert '北京银行_坏.xlsx' in remaining_names
+        assert '未知银行_流水.xlsx' in remaining_names
+        assert '北京银行_正常.xlsx' not in remaining_names
+
     def test_bank_processors_registry(self):
         assert '北京银行' in bankcheck.BANK_PROCESSORS
         assert '东亚银行' in bankcheck.BANK_PROCESSORS
@@ -215,6 +269,15 @@ class TestFormatResultMessage:
         assert '北京银行_坏.xlsx' in msg
         assert 'Bad file' in msg
 
+    def test_error_files_message_says_preserved(self):
+        result = bankcheck.ProcessingResult(
+            error_files=[('/path/北京银行_坏.xlsx', 'File is corrupt')],
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '处理出错的文件' in msg
+        assert '已保留' in msg
+        assert '北京银行_坏.xlsx' in msg
+
     def test_unprocessed_and_error(self):
         result = bankcheck.ProcessingResult(
             unprocessed_files=['/path/未知.xlsx'],
@@ -265,3 +328,19 @@ class TestDeleteProcessedFiles:
     def test_nonexistent_file_handled_gracefully(self, tmp_dir):
         nonexistent = os.path.join(tmp_dir, 'missing.xlsx')
         bankcheck.delete_processed_files([nonexistent], set())
+
+    def test_keeps_error_files_in_keep_set(self, tmp_dir):
+        f1 = os.path.join(tmp_dir, '北京银行_正常.xlsx')
+        f2 = os.path.join(tmp_dir, '北京银行_坏.xlsx')
+        f3 = os.path.join(tmp_dir, '未知.xlsx')
+        open(f1, 'w').close()
+        open(f2, 'w').close()
+        open(f3, 'w').close()
+
+        error_file_paths = {f2}
+        unprocessed = {f3}
+        bankcheck.delete_processed_files([f1, f2, f3], unprocessed | error_file_paths)
+
+        assert not os.path.exists(f1)
+        assert os.path.exists(f2)
+        assert os.path.exists(f3)
