@@ -337,6 +337,33 @@ def find_lookup_file(script_dir):
     return None
 
 
+def _normalize_account_str(value):
+    if value is None:
+        return ''
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value:
+            return ''
+        if value == int(value):
+            return str(int(value))
+        return str(value)
+    s = str(value).strip()
+    if '.' in s:
+        try:
+            f = float(s)
+            if f == int(f):
+                return str(int(f))
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return s
+
+
+def _account_key(value):
+    normalized = _normalize_account_str(value)
+    return normalized.lstrip('0') or '0'
+
+
 def get_subject(bank_account, lookup_file):
     """
     根据银行账号在查找表中找到对应的主体。
@@ -351,21 +378,21 @@ def get_subject(bank_account, lookup_file):
         logger.warning('银行账号为空，无法查找主体')
         return ''
 
-    target = str(bank_account).strip()
+    target_key = _account_key(bank_account)
     tmp_path = None
     try:
         wb, tmp_path = open_workbook_compat(lookup_file)
         ws = wb.active
         for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=2, max_col=2):
             cell = row[0]
-            if cell.value is not None and str(cell.value).strip() == target:
+            if cell.value is not None and _account_key(cell.value) == target_key:
                 subject = ws.cell(row=cell.row, column=1).value
                 wb.close()
                 cleanup_temp_file(tmp_path)
-                logger.debug('银行账号「%s」匹配到主体: %s', target, subject)
+                logger.debug('银行账号「%s」匹配到主体: %s', bank_account, subject)
                 return subject if subject else ''
         wb.close()
-        logger.warning('银行账号「%s」在查找表中未找到对应主体', target)
+        logger.warning('银行账号「%s」在查找表中未找到对应主体', bank_account)
     except Exception as e:
         logger.error('读取主体查找表「%s」时发生错误: %s', lookup_file, e, exc_info=True)
     finally:
