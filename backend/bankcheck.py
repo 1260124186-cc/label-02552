@@ -73,6 +73,26 @@ def cli_showwarning(title, message):
     print(f'\n[警告 - {title}] {message}')
 
 
+def cli_askfile(title='请选择文件'):
+    """命令行模式下让用户输入文件路径"""
+    print(f'\n{title}')
+    path = input('请输入文件路径: ').strip().strip('"').strip("'")
+    if path and os.path.isfile(path):
+        return path
+    return ''
+
+
+def cli_askmode():
+    """命令行模式下让用户选择运行模式"""
+    print('\n请选择运行模式：')
+    print('  1) 主流程：处理银行流水文件夹，输出总表')
+    print('  2) 变更对比：对比两次总表的差异（新增/删除/变更）')
+    choice = input('请输入选项（1 或 2，直接回车默认为 1）: ').strip()
+    if choice == '2':
+        return 'diff'
+    return 'pipeline'
+
+
 def gui_askdirectory(title='请选择银行流水文件夹'):
     """GUI 模式选择文件夹"""
     root = tk.Tk()
@@ -100,15 +120,47 @@ def gui_showwarning(title, message):
     root.destroy()
 
 
+def gui_askfile(title='请选择总表文件'):
+    """GUI 模式选择文件"""
+    root = tk.Tk()
+    root.withdraw()
+    filepath = filedialog.askopenfilename(
+        title=title,
+        filetypes=[('Excel 文件', '*.xlsx *.xls'), ('所有文件', '*.*')],
+    )
+    if not filepath:
+        messagebox.showinfo('提示', '未选择文件，程序退出。')
+    root.destroy()
+    return filepath
+
+
+def gui_askmode():
+    """GUI 模式下让用户选择运行模式"""
+    root = tk.Tk()
+    root.withdraw()
+    choice = messagebox.askyesnocancel(
+        '选择运行模式',
+        '是 = 主流程：处理流水文件夹，输出总表\n\n否 = 变更对比：对比两次总表的差异',
+    )
+    root.destroy()
+    if choice is None:
+        return None
+    return 'pipeline' if choice else 'diff'
+
+
 # 根据 tkinter 是否可用，选择交互方式
 if HAS_TKINTER:
     ask_directory = gui_askdirectory
     show_info = gui_showinfo
     show_warning = gui_showwarning
+    ask_file = gui_askfile
+    ask_mode = gui_askmode
 else:
     ask_directory = cli_askdirectory
     show_info = cli_showinfo
     show_warning = cli_showwarning
+    ask_file = cli_askfile
+    ask_mode = cli_askmode
 
 
 # ──────────────────────────────────────────────
@@ -972,10 +1024,9 @@ def format_diff_message(diff_result):
     return msg
 
 
-def main():
-    setup_logging()
+def run_pipeline_flow(script_dir):
+    """主流程：处理银行流水文件夹，输出总表"""
     logger = get_logger()
-    logger.info('========== 银行流水检验工具启动 ==========')
 
     folder = ask_directory('请选择银行流水文件夹')
     if not folder:
@@ -984,7 +1035,6 @@ def main():
         return
 
     logger.info('用户选择文件夹: %s', folder)
-    script_dir = get_script_dir()
 
     result = run_pipeline(folder, script_dir)
 
@@ -997,6 +1047,60 @@ def main():
 
     msg = format_result_message(result)
     show_info('完成' if result.all_rows else '提示', msg)
+
+
+def run_diff_flow(script_dir):
+    """变更对比流程：选择两次总表，输出对比结果"""
+    logger = get_logger()
+
+    old_path = ask_file('请选择【旧批次】银行流水总表')
+    if not old_path:
+        show_info('提示', '未选择旧批次文件，程序退出。')
+        logger.info('用户未选择旧批次文件，程序退出')
+        return
+    logger.info('用户选择旧批次文件: %s', old_path)
+
+    new_path = ask_file('请选择【新批次】银行流水总表')
+    if not new_path:
+        show_info('提示', '未选择新批次文件，程序退出。')
+        logger.info('用户未选择新批次文件，程序退出')
+        return
+    logger.info('用户选择新批次文件: %s', new_path)
+
+    try:
+        diff_result = run_diff(old_path, new_path, script_dir)
+        msg = format_diff_message(diff_result)
+
+        has_changes = (
+            diff_result.added_count > 0
+            or diff_result.deleted_count > 0
+            or diff_result.changed_count > 0
+        )
+        title = '对比完成（发现差异' if has_changes else '对比完成（无差异）'
+        show_info(title, msg)
+    except FileNotFoundError as e:
+        show_warning('错误', str(e))
+        logger.error('对比失败: %s', e)
+
+
+def main():
+    setup_logging()
+    logger = get_logger()
+    logger.info('========== 银行流水检验工具启动 ==========')
+
+    script_dir = get_script_dir()
+
+    mode = ask_mode()
+    if mode is None:
+        show_info('提示', '未选择模式，程序退出。')
+        logger.info('用户未选择模式，程序退出')
+        return
+    logger.info('用户选择模式: %s', mode)
+
+    if mode == 'pipeline':
+        run_pipeline_flow(script_dir)
+    elif mode == 'diff':
+        run_diff_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
