@@ -1,0 +1,40 @@
+# 银行流水解析规则配置文件
+# 业务人员可通过修改此文件增删银行解析规则，无需修改 Python 代码
+#
+# 配置说明：
+#   bank_name: 银行名称（用于文件前缀匹配和显示）
+#   account_cell: 银行账号所在单元格，如 "B2"
+#   start_row: 数据起始行号（从 1 开始）
+#   columns: 各字段对应的列映射（列号从 1 开始，A=1, B=2, ...）
+#     支持字段：trade_date, payment, receipt, summary, counterpart, balance, transaction_id
+#   payment_sign: 付款金额符号处理（"negative" 表示取负数，"positive" 表示保持正数）
+#   enabled: 是否启用该银行规则
+
+banks:
+  - bank_name: "北京银行"
+    account_cell: "B2"
+    start_row: 4
+    payment_sign: "negative"
+    enabled: true
+    columns:
+      trade_date: 2       # B 列 - 交易日期
+      payment: 4          # D 列 - 付款
+      receipt: 5          # E 列 - 收款
+      summary: 12         # L 列 - 摘要
+      counterpart: 7      # G 列 - 对方户名
+      balance: 6          # F 列 - 余额
+      transaction_id: 16  # P 列 - 交易流水号
+
+  - bank_name: "东亚银行"
+    account_cell: "B1"
+    start_row: 5
+    payment_sign: "negative"
+    enabled: true
+    columns:
+      trade_date: 1       # A 列 - 交易日期
+      payment: 4          # D 列 - 付款
+      receipt: 5          # E 列 - 收款
+      summary: 12         # L 列 - 摘要
+      counterpart: 12     # L 列 - 对方户名（同摘要）
+      balance: 9          # I 列 - 余额
+      transaction_id: 11  # K 列 - 交易流水号

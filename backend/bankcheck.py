@@ -9,7 +9,8 @@
   5. 生成唯一ID，合并输出总表
   6. 删除已处理的 Excel 文件，保留无法识别银行的文件
 
-当前支持的银行：北京银行、东亚银行
+银行解析规则通过 bank_rules.yaml 配置文件管理，支持热更新。
+业务人员可通过修改配置文件增删银行规则，无需修改 Python 代码。
 """
 
 import os
@@ -28,6 +29,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 import openpyxl
 import pandas as pd
+import yaml
 
 try:
     import database as db_module
@@ -486,10 +488,214 @@ def scan_excel_files(folder):
 
 
 # ──────────────────────────────────────────────
+# 银行规则配置模块
+# ──────────────────────────────────────────────
+
+BANK_RULES_CONFIG_FILE = 'bank_rules.yaml'
+
+
+@dataclass
+class BankRule:
+    """单个银行的解析规则"""
+    bank_name: str
+    account_cell: str
+    start_row: int
+    columns: Dict[str, int]
+    payment_sign: str = 'negative'
+    enabled: bool = True
+
+
+class BankRuleConfig:
+    """银行规则配置管理器 - 单例模式"""
+    _instance = None
+    _config_path = None
+    _rules: Dict[str, BankRule] = field(default_factory=dict)
+    _last_modified: float = 0.0
+
+    def __new__(cls, config_path=None):
+        if cls._instance is None:
+            cls._instance = super(BankRuleConfig, cls).__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self, config_path=None):
+        if self._initialized:
+            return
+        self._initialized = True
+        if config_path is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(script_dir, BANK_RULES_CONFIG_FILE)
+        self._config_path = config_path
+        self._rules = {}
+        self._last_modified = 0.0
+        self.load_config()
+
+    def load_config(self):
+        """加载配置文件，支持热更新"""
+        logger = get_logger()
+        if not os.path.exists(self._config_path):
+            logger.error('银行规则配置文件不存在: %s', self._config_path)
+            return False
+
+        try:
+            current_mtime = os.path.getmtime(self._config_path)
+            if current_mtime == self._last_modified and self._rules:
+                return True
+
+            with open(self._config_path, 'r', encoding='utf-8') as f:
+                config_data = yaml.safe_load(f)
+
+            self._rules = {}
+            banks_config = config_data.get('banks', [])
+            for bank_config in banks_config:
+                if not bank_config.get('enabled', True):
+                    continue
+                rule = BankRule(
+                    bank_name=bank_config['bank_name'],
+                    account_cell=bank_config['account_cell'],
+                    start_row=bank_config['start_row'],
+                    columns=bank_config['columns'],
+                    payment_sign=bank_config.get('payment_sign', 'negative'),
+                    enabled=bank_config.get('enabled', True),
+                )
+                self._rules[rule.bank_name] = rule
+
+            self._last_modified = current_mtime
+            logger.info('已加载 %d 个银行规则配置', len(self._rules))
+            return True
+        except Exception as e:
+            logger.error('加载银行规则配置失败: %s', e, exc_info=True)
+            return False
+
+    def get_rule(self, bank_name: str) -> Optional[BankRule]:
+        """根据银行名称获取规则，自动检查配置更新"""
+        self.load_config()
+        return self._rules.get(bank_name)
+
+    def get_all_bank_names(self) -> List[str]:
+        """获取所有已启用的银行名称列表，自动检查配置更新"""
+        self.load_config()
+        return list(self._rules.keys())
+
+    def get_config_path(self) -> str:
+        """获取配置文件路径"""
+        return self._config_path
+
+
+class GenericBankParser:
+    """通用银行流水解析器 - 根据配置规则动态解析 Excel"""
+
+    def __init__(self, rule: BankRule):
+        self.rule = rule
+        self.logger = get_logger()
+
+    def parse(self, filepath: str, lookup_file: str) -> List[Dict[str, Any]]:
+        """
+        根据配置规则解析银行流水 Excel 文件
+
+        Args:
+            filepath: Excel 文件路径
+            lookup_file: 主体查找表路径
+
+        Returns:
+            解析后的记录列表
+        """
+        self.logger.info('开始处理%s文件: %s', self.rule.bank_name, filepath)
+
+        wb, tmp_path = open_workbook_compat(filepath)
+        try:
+            ws = wb.active
+
+            bank_account = ws[self.rule.account_cell].value
+            if bank_account is None:
+                self.logger.warning('文件「%s」%s 单元格为空，银行账号缺失',
+                                    filepath, self.rule.account_cell)
+
+            subject = get_subject(bank_account, lookup_file)
+
+            rows = []
+            columns = self.rule.columns
+            start_row = self.rule.start_row
+
+            for row_idx in range(start_row, ws.max_row + 1):
+                trade_date = ws.cell(row=row_idx, column=columns['trade_date']).value
+                if trade_date is None:
+                    continue
+
+                payment_val = ws.cell(row=row_idx, column=columns['payment']).value
+                if is_numeric(payment_val):
+                    payment = to_float(payment_val)
+                    if self.rule.payment_sign == 'negative':
+                        payment = -abs(payment)
+                else:
+                    payment = None
+
+                receipt_val = ws.cell(row=row_idx, column=columns['receipt']).value
+                receipt = to_float(receipt_val) if is_numeric(receipt_val) else None
+
+                summary = ws.cell(row=row_idx, column=columns['summary']).value
+                counterpart = ws.cell(row=row_idx, column=columns['counterpart']).value
+                balance = ws.cell(row=row_idx, column=columns['balance']).value
+                transaction_id = ws.cell(row=row_idx, column=columns['transaction_id']).value
+
+                rows.append({
+                    '唯一id': generate_unique_id(),
+                    '银行': self.rule.bank_name,
+                    '银行账号': bank_account,
+                    '主体': subject,
+                    '交易日期': trade_date,
+                    '付款': payment,
+                    '收款': receipt,
+                    '摘要': summary,
+                    '对方户名': counterpart,
+                    '余额': balance,
+                    '交易流水号': transaction_id,
+                })
+
+            wb.close()
+            self.logger.info('%s文件处理完成，提取 %d 条记录',
+                             self.rule.bank_name, len(rows))
+            return rows
+        finally:
+            cleanup_temp_file(tmp_path)
+
+
+def _create_bank_processor(bank_name: str):
+    """创建基于配置的银行处理器函数"""
+    def processor(filepath, lookup_file):
+        config = BankRuleConfig()
+        rule = config.get_rule(bank_name)
+        if rule is None:
+            logger = get_logger()
+            logger.error('未找到银行「%s」的解析规则', bank_name)
+            return []
+        parser = GenericBankParser(rule)
+        return parser.parse(filepath, lookup_file)
+    return processor
+
+
+_bank_config_singleton = None
+
+
+def get_bank_config():
+    """获取银行规则配置单例"""
+    global _bank_config_singleton
+    if _bank_config_singleton is None:
+        _bank_config_singleton = BankRuleConfig()
+    return _bank_config_singleton
+
+
+# ──────────────────────────────────────────────
 # 银行识别
 # ──────────────────────────────────────────────
 
-BANK_PREFIXES = ['北京银行', '东亚银行']
+def _get_bank_prefixes():
+    """从配置获取银行前缀列表"""
+    config = get_bank_config()
+    return config.get_all_bank_names()
+
+
+BANK_PREFIXES = _get_bank_prefixes()
 
 
 def identify_bank(filepath):
@@ -658,144 +864,39 @@ def to_float(value):
 
 
 # ──────────────────────────────────────────────
-# 银行处理器
+# 银行处理器（基于配置动态生成）
 # ──────────────────────────────────────────────
 
-def process_beijing_bank(filepath, lookup_file):
-    """
-    处理北京银行流水 Excel 文件
-    ─────────────────────────────────
-    银行账号：B2
-    交易日期：B 列，第 4 行起
-    付款：D 列第 4 行起，有数字则取负
-    收款：E 列第 4 行起，有数字则直接填入
-    摘要：L 列第 4 行起
-    对方户名：G 列第 4 行起
-    余额：F 列第 4 行起
-    交易流水号：P 列第 4 行起
-    """
+def _build_bank_processors():
+    """从配置文件动态构建银行处理器注册表"""
+    config = get_bank_config()
+    bank_names = config.get_all_bank_names()
+    processors = {}
+    for bank_name in bank_names:
+        processors[bank_name] = _create_bank_processor(bank_name)
+    return processors
+
+
+# 银行处理器注册表（从配置动态生成）
+BANK_PROCESSORS = _build_bank_processors()
+
+
+def reload_bank_processors():
+    """重新加载银行配置并重建处理器注册表（热更新）"""
+    global BANK_PROCESSORS, BANK_PREFIXES, _bank_config_singleton
+    _bank_config_singleton = None
+    config = get_bank_config()
+    config.load_config()
+    BANK_PREFIXES = _get_bank_prefixes()
+    BANK_PROCESSORS = _build_bank_processors()
     logger = get_logger()
-    logger.info('开始处理北京银行文件: %s', filepath)
-
-    wb, tmp_path = open_workbook_compat(filepath)
-    try:
-        ws = wb.active
-
-        bank_account = ws['B2'].value
-        if bank_account is None:
-            logger.warning('文件「%s」B2 单元格为空，银行账号缺失', filepath)
-
-        subject = get_subject(bank_account, lookup_file)
-
-        rows = []
-        start_row = 4
-        for row_idx in range(start_row, ws.max_row + 1):
-            trade_date = ws.cell(row=row_idx, column=2).value  # B 列
-            if trade_date is None:
-                continue
-
-            payment_val = ws.cell(row=row_idx, column=4).value
-            payment = -abs(to_float(payment_val)) if is_numeric(payment_val) else None
-
-            receipt_val = ws.cell(row=row_idx, column=5).value
-            receipt = to_float(receipt_val) if is_numeric(receipt_val) else None
-
-            summary = ws.cell(row=row_idx, column=12).value       # L 列
-            counterpart = ws.cell(row=row_idx, column=7).value     # G 列
-            balance = ws.cell(row=row_idx, column=6).value         # F 列
-            transaction_id = ws.cell(row=row_idx, column=16).value # P 列
-
-            rows.append({
-                '唯一id': generate_unique_id(),
-                '银行': '北京银行',
-                '银行账号': bank_account,
-                '主体': subject,
-                '交易日期': trade_date,
-                '付款': payment,
-                '收款': receipt,
-                '摘要': summary,
-                '对方户名': counterpart,
-                '余额': balance,
-                '交易流水号': transaction_id,
-            })
-
-        wb.close()
-        logger.info('北京银行文件处理完成，提取 %d 条记录', len(rows))
-        return rows
-    finally:
-        cleanup_temp_file(tmp_path)
+    logger.info('已重新加载 %d 个银行处理器', len(BANK_PROCESSORS))
 
 
-def process_east_asia_bank(filepath, lookup_file):
-    """
-    处理东亚银行流水 Excel 文件
-    ─────────────────────────────────
-    银行账号：B1
-    交易日期：A 列，第 5 行起
-    付款：D 列第 5 行起，有数字则取负
-    收款：E 列第 5 行起，有数字则直接填入
-    摘要：L 列第 5 行起
-    对方户名：L 列第 5 行起
-    余额：I 列第 5 行起
-    交易流水号：K 列第 5 行起
-    """
-    logger = get_logger()
-    logger.info('开始处理东亚银行文件: %s', filepath)
-
-    wb, tmp_path = open_workbook_compat(filepath)
-    try:
-        ws = wb.active
-
-        bank_account = ws['B1'].value
-        if bank_account is None:
-            logger.warning('文件「%s」B1 单元格为空，银行账号缺失', filepath)
-
-        subject = get_subject(bank_account, lookup_file)
-
-        rows = []
-        start_row = 5
-        for row_idx in range(start_row, ws.max_row + 1):
-            trade_date = ws.cell(row=row_idx, column=1).value  # A 列
-            if trade_date is None:
-                continue
-
-            payment_val = ws.cell(row=row_idx, column=4).value
-            payment = -abs(to_float(payment_val)) if is_numeric(payment_val) else None
-
-            receipt_val = ws.cell(row=row_idx, column=5).value
-            receipt = to_float(receipt_val) if is_numeric(receipt_val) else None
-
-            summary = ws.cell(row=row_idx, column=12).value       # L 列
-            counterpart = ws.cell(row=row_idx, column=12).value    # L 列（同摘要）
-            balance = ws.cell(row=row_idx, column=9).value         # I 列
-            transaction_id = ws.cell(row=row_idx, column=11).value # K 列
-
-            rows.append({
-                '唯一id': generate_unique_id(),
-                '银行': '东亚银行',
-                '银行账号': bank_account,
-                '主体': subject,
-                '交易日期': trade_date,
-                '付款': payment,
-                '收款': receipt,
-                '摘要': summary,
-                '对方户名': counterpart,
-                '余额': balance,
-                '交易流水号': transaction_id,
-            })
-
-        wb.close()
-        logger.info('东亚银行文件处理完成，提取 %d 条记录', len(rows))
-        return rows
-    finally:
-        cleanup_temp_file(tmp_path)
-
-
-# 银行处理器注册表（方便后续扩展新银行）
-BANK_PROCESSORS = {
-    '北京银行': process_beijing_bank,
-    '东亚银行': process_east_asia_bank,
-}
+# 向后兼容：保留旧函数名作为别名，确保现有代码和测试正常运行
+# 直接从 BANK_PROCESSORS 中获取，确保是同一个函数实例
+process_beijing_bank = BANK_PROCESSORS.get('北京银行', _create_bank_processor('北京银行'))
+process_east_asia_bank = BANK_PROCESSORS.get('东亚银行', _create_bank_processor('东亚银行'))
 
 
 # ──────────────────────────────────────────────
