@@ -573,3 +573,521 @@ class TestGetClientInfo:
         assert isinstance(info, dict)
         assert 'hostname' in info
         assert 'ip' in info
+
+
+class TestReadLookupTableContent:
+    def test_read_lookup_table_content_returns_structured_data(self, audit_script_dir):
+        lookup_file = os.path.join(audit_script_dir, '主体查找表.xlsx')
+        content = bankcheck.read_lookup_table_content(lookup_file)
+
+        assert content is not None
+        assert 'file_path' in content
+        assert 'file_hash' in content
+        assert 'headers' in content
+        assert 'rows' in content
+        assert 'account_map' in content
+        assert content['file_path'] == lookup_file
+        assert len(content['file_hash']) == 64
+        assert '主体名称' in content['headers']
+        assert '银行账号' in content['headers']
+        assert len(content['rows']) >= 2
+        assert len(content['account_map']) >= 2
+
+    def test_read_lookup_table_content_nonexistent_file(self, audit_script_dir):
+        content = bankcheck.read_lookup_table_content('/nonexistent/file.xlsx')
+        assert content is None
+
+    def test_read_lookup_table_content_none(self, audit_script_dir):
+        content = bankcheck.read_lookup_table_content(None)
+        assert content is None
+
+    def test_read_lookup_table_account_mapping(self, audit_script_dir):
+        lookup_file = os.path.join(audit_script_dir, '主体查找表.xlsx')
+        content = bankcheck.read_lookup_table_content(lookup_file)
+
+        account_key = bankcheck._account_key('01090312345678901')
+        assert account_key in content['account_map']
+        row = content['account_map'][account_key]
+        assert row['主体名称'] == '北京XX科技有限公司'
+
+
+class TestLookupSnapshots:
+    def test_save_lookup_snapshot_creates_record(self, audit_script_dir):
+        lookup_file = os.path.join(audit_script_dir, '主体查找表.xlsx')
+        content = bankcheck.read_lookup_table_content(lookup_file)
+
+        snapshot_id = bankcheck._save_lookup_snapshot(content, audit_script_dir, username='snapshot_user')
+
+        assert snapshot_id.startswith('SNP')
+
+        db_path = bankcheck.get_audit_db_path(audit_script_dir)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT snapshot_id, lookup_file, created_by FROM lookup_snapshots WHERE snapshot_id = ?',
+                       (snapshot_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row[0] == snapshot_id
+        assert row[1] == lookup_file
+        assert row[2] == 'snapshot_user'
+
+    def test_get_last_lookup_snapshot_returns_latest(self, audit_script_dir):
+        lookup_file = os.path.join(audit_script_dir, '主体查找表.xlsx')
+        content = bankcheck.read_lookup_table_content(lookup_file)
+
+        bankcheck._save_lookup_snapshot(content, audit_script_dir, username='user1')
+        import time
+        time.sleep(0.1)
+        bankcheck._save_lookup_snapshot(content, audit_script_dir, username='user2')
+
+        snapshot = bankcheck._get_last_lookup_snapshot(lookup_file, audit_script_dir)
+
+        assert snapshot is not None
+        assert snapshot['created_by'] == 'user2'
+
+    def test_get_last_lookup_snapshot_no_snapshot(self, tmp_dir):
+        empty_script_dir = os.path.join(tmp_dir, 'empty')
+        os.makedirs(empty_script_dir, exist_ok=True)
+        snapshot = bankcheck._get_last_lookup_snapshot('/some/file.xlsx', empty_script_dir)
+        assert snapshot is None
+
+
+class TestDiffLookupSnapshots:
+    def test_diff_detects_add(self):
+        old_content = {
+            'rows': [{'row_num': 2, '银行账号': '111', '主体名称': '公司A'}],
+            'account_map': {'111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A'}}
+        }
+        new_content = {
+            'rows': [
+                {'row_num': 2, '银行账号': '111', '主体名称': '公司A'},
+                {'row_num': 3, '银行账号': '222', '主体名称': '公司B'}
+            ],
+            'account_map': {
+                '111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A'},
+                '222': {'row_num': 3, '银行账号': '222', '主体名称': '公司B'}
+            }
+        }
+
+        changes = bankcheck._diff_lookup_snapshots(old_content, new_content)
+
+        assert len(changes) == 1
+        assert changes[0]['change_type'] == 'add'
+        assert changes[0]['account'] == '222'
+        assert '公司B' in changes[0]['description']
+
+    def test_diff_detects_remove(self):
+        old_content = {
+            'rows': [
+                {'row_num': 2, '银行账号': '111', '主体名称': '公司A'},
+                {'row_num': 3, '银行账号': '222', '主体名称': '公司B'}
+            ],
+            'account_map': {
+                '111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A'},
+                '222': {'row_num': 3, '银行账号': '222', '主体名称': '公司B'}
+            }
+        }
+        new_content = {
+            'rows': [{'row_num': 2, '银行账号': '111', '主体名称': '公司A'}],
+            'account_map': {'111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A'}}
+        }
+
+        changes = bankcheck._diff_lookup_snapshots(old_content, new_content)
+
+        assert len(changes) == 1
+        assert changes[0]['change_type'] == 'remove'
+        assert changes[0]['account'] == '222'
+
+    def test_diff_detects_modify(self):
+        old_content = {
+            'rows': [{'row_num': 2, '银行账号': '111', '主体名称': '公司A'}],
+            'account_map': {'111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A'}}
+        }
+        new_content = {
+            'rows': [{'row_num': 2, '银行账号': '111', '主体名称': '公司A（更名）'}],
+            'account_map': {'111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A（更名）'}}
+        }
+
+        changes = bankcheck._diff_lookup_snapshots(old_content, new_content)
+
+        assert len(changes) == 1
+        assert changes[0]['change_type'] == 'modify'
+        assert changes[0]['account'] == '111'
+        assert changes[0]['field'] == '主体名称'
+        assert changes[0]['old_value'] == '公司A'
+        assert changes[0]['new_value'] == '公司A（更名）'
+
+    def test_diff_handles_none_old_content(self):
+        new_content = {
+            'rows': [{'row_num': 2, '银行账号': '111', '主体名称': '公司A'}],
+            'account_map': {'111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A'}}
+        }
+        changes = bankcheck._diff_lookup_snapshots(None, new_content)
+        assert len(changes) == 1
+        assert changes[0]['change_type'] == 'add'
+
+    def test_diff_handles_none_new_content(self):
+        old_content = {
+            'rows': [{'row_num': 2, '银行账号': '111', '主体名称': '公司A'}],
+            'account_map': {'111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A'}}
+        }
+        changes = bankcheck._diff_lookup_snapshots(old_content, None)
+        assert len(changes) == 1
+        assert changes[0]['change_type'] == 'remove'
+
+    def test_diff_both_none_returns_empty(self):
+        changes = bankcheck._diff_lookup_snapshots(None, None)
+        assert changes == []
+
+    def test_diff_no_changes_returns_empty(self):
+        content = {
+            'rows': [{'row_num': 2, '银行账号': '111', '主体名称': '公司A'}],
+            'account_map': {'111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A'}}
+        }
+        changes = bankcheck._diff_lookup_snapshots(content, content)
+        assert changes == []
+
+    def test_diff_whitespace_difference(self):
+        old_content = {
+            'rows': [{'row_num': 2, '银行账号': '111', '主体名称': '公司A '}],
+            'account_map': {'111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A '}}
+        }
+        new_content = {
+            'rows': [{'row_num': 2, '银行账号': '111', '主体名称': '公司A'}],
+            'account_map': {'111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A'}}
+        }
+        changes = bankcheck._diff_lookup_snapshots(old_content, new_content)
+        assert len(changes) == 0
+
+    def test_diff_combined_changes(self):
+        old_content = {
+            'rows': [
+                {'row_num': 2, '银行账号': '111', '主体名称': '公司A'},
+                {'row_num': 3, '银行账号': '222', '主体名称': '公司B'},
+                {'row_num': 4, '银行账号': '333', '主体名称': '公司C'},
+                {'row_num': 5, '银行账号': '555', '主体名称': '公司E'}
+            ],
+            'account_map': {
+                '111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A'},
+                '222': {'row_num': 3, '银行账号': '222', '主体名称': '公司B'},
+                '333': {'row_num': 4, '银行账号': '333', '主体名称': '公司C'},
+                '555': {'row_num': 5, '银行账号': '555', '主体名称': '公司E'}
+            }
+        }
+        new_content = {
+            'rows': [
+                {'row_num': 2, '银行账号': '111', '主体名称': '公司A（更名）'},
+                {'row_num': 3, '银行账号': '222', '主体名称': '公司B'},
+                {'row_num': 4, '银行账号': '444', '主体名称': '公司D'}
+            ],
+            'account_map': {
+                '111': {'row_num': 2, '银行账号': '111', '主体名称': '公司A（更名）'},
+                '222': {'row_num': 3, '银行账号': '222', '主体名称': '公司B'},
+                '444': {'row_num': 4, '银行账号': '444', '主体名称': '公司D'}
+            }
+        }
+
+        changes = bankcheck._diff_lookup_snapshots(old_content, new_content)
+
+        add_count = sum(1 for c in changes if c['change_type'] == 'add')
+        remove_count = sum(1 for c in changes if c['change_type'] == 'remove')
+        modify_count = sum(1 for c in changes if c['change_type'] == 'modify')
+
+        assert add_count == 1
+        assert remove_count == 2
+        assert modify_count == 1
+        assert len(changes) == 4
+
+
+class TestDetectAndRecordLookupChange:
+    def test_first_run_saves_snapshot(self, audit_script_dir):
+        result = bankcheck.detect_and_record_lookup_change(audit_script_dir, username='first_user')
+
+        assert result.has_changes is False
+        assert result.new_snapshot is not None
+
+        db_path = bankcheck.get_audit_db_path(audit_script_dir)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM lookup_snapshots')
+        count = cursor.fetchone()[0]
+        conn.close()
+
+        assert count == 1
+
+    def test_no_changes_returns_false(self, audit_script_dir):
+        bankcheck.detect_and_record_lookup_change(audit_script_dir, username='user1')
+        result = bankcheck.detect_and_record_lookup_change(audit_script_dir, username='user2')
+
+        assert result.has_changes is False
+
+        db_path = bankcheck.get_audit_db_path(audit_script_dir)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM lookup_snapshots')
+        snapshot_count = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM config_changes')
+        change_count = cursor.fetchone()[0]
+        conn.close()
+
+        assert snapshot_count == 1
+        assert change_count == 0
+
+    def test_detects_change_and_records(self, audit_script_dir):
+        bankcheck.detect_and_record_lookup_change(audit_script_dir, username='user1')
+
+        lookup_file = os.path.join(audit_script_dir, '主体查找表.xlsx')
+        wb = openpyxl.load_workbook(lookup_file)
+        ws = wb.active
+        ws.append(['新公司', '9999999999999999999'])
+        wb.save(lookup_file)
+        wb.close()
+
+        result = bankcheck.detect_and_record_lookup_change(audit_script_dir, username='user2')
+
+        assert result.has_changes is True
+        assert result.change_id is not None
+        assert result.change_id.startswith('CFG')
+        assert len(result.change_details) >= 1
+        assert any(c['change_type'] == 'add' for c in result.change_details)
+
+        db_path = bankcheck.get_audit_db_path(audit_script_dir)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM lookup_snapshots')
+        snapshot_count = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM config_changes')
+        change_count = cursor.fetchone()[0]
+        conn.close()
+
+        assert snapshot_count == 2
+        assert change_count == 1
+
+    def test_no_lookup_file_returns_no_changes(self, tmp_dir):
+        empty_script_dir = os.path.join(tmp_dir, 'no_lookup')
+        os.makedirs(empty_script_dir, exist_ok=True)
+
+        result = bankcheck.detect_and_record_lookup_change(empty_script_dir, username='test')
+
+        assert result.has_changes is False
+        assert result.change_id is None
+
+    def test_manual_record_lookup_change(self, audit_script_dir):
+        bankcheck.detect_and_record_lookup_change(audit_script_dir, username='user1')
+
+        lookup_file = os.path.join(audit_script_dir, '主体查找表.xlsx')
+        wb = openpyxl.load_workbook(lookup_file)
+        ws = wb.active
+        ws.append(['手动新增公司', '8888888888888888888'])
+        wb.save(lookup_file)
+        wb.close()
+
+        result = bankcheck.manual_record_lookup_change(
+            audit_script_dir,
+            username='manual_user',
+            change_reason='新增客户主体'
+        )
+
+        assert result.has_changes is True
+        assert result.change_id is not None
+
+        db_path = bankcheck.get_audit_db_path(audit_script_dir)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT change_reason FROM config_changes WHERE change_id = ?',
+                       (result.change_id,))
+        reason = cursor.fetchone()[0]
+        conn.close()
+
+        assert reason == '新增客户主体'
+
+
+class TestRecordConfigChangeWithDetails:
+    def test_record_change_with_details(self, audit_script_dir):
+        details = [
+            {'change_type': 'add', 'account': '111', 'description': '新增公司A'},
+            {'change_type': 'modify', 'account': '222', 'field': '主体名称', 'old_value': 'X', 'new_value': 'Y'}
+        ]
+
+        change_id = bankcheck.record_config_change(
+            'lookup_table', '主体查找表.xlsx',
+            'old_data', 'new_data',
+            change_reason='测试变更',
+            script_dir=audit_script_dir,
+            username='detail_user',
+            change_details=details
+        )
+
+        changes = bankcheck.query_config_changes(script_dir=audit_script_dir, limit=1)
+        assert len(changes) == 1
+        change = changes[0]
+
+        assert change['change_id'] == change_id
+        assert isinstance(change['change_details'], list)
+        assert len(change['change_details']) == 2
+        assert change['change_details'][0]['change_type'] == 'add'
+
+    def test_query_without_parse_details_returns_json_string(self, audit_script_dir):
+        details = [{'change_type': 'add', 'account': '111'}]
+
+        bankcheck.record_config_change(
+            'lookup_table', 'test.xlsx', 'old', 'new',
+            script_dir=audit_script_dir, username='test',
+            change_details=details
+        )
+
+        changes = bankcheck.query_config_changes(
+            script_dir=audit_script_dir,
+            parse_details=False,
+            limit=1
+        )
+        assert isinstance(changes[0]['change_details'], str)
+
+
+class TestExportConfigChangesWithDetails:
+    def test_export_config_changes_without_expand(self, tmp_dir, audit_script_dir):
+        details = [
+            {'change_type': 'add', 'account': '111', 'description': '新增'},
+            {'change_type': 'modify', 'account': '222', 'field': '名称', 'old_value': 'A', 'new_value': 'B'}
+        ]
+        bankcheck.record_config_change(
+            'lookup_table', 'test.xlsx', 'old', 'new',
+            script_dir=audit_script_dir, username='export_user',
+            change_details=details
+        )
+
+        output_path = os.path.join(tmp_dir, 'config_export.xlsx')
+        result = bankcheck.export_config_changes(output_path, script_dir=audit_script_dir)
+
+        assert result == output_path
+        df = pd.read_excel(output_path, engine='openpyxl')
+        assert len(df) == 1
+        assert 'change_details' in df.columns
+
+    def test_export_config_changes_with_expand(self, tmp_dir, audit_script_dir):
+        details = [
+            {'change_type': 'add', 'account': '111', 'description': '新增'},
+            {'change_type': 'modify', 'account': '222', 'field': '名称', 'old_value': 'A', 'new_value': 'B'}
+        ]
+        bankcheck.record_config_change(
+            'lookup_table', 'test.xlsx', 'old', 'new',
+            script_dir=audit_script_dir, username='export_user',
+            change_details=details
+        )
+
+        output_path = os.path.join(tmp_dir, 'config_expand.xlsx')
+        result = bankcheck.export_config_changes(
+            output_path,
+            script_dir=audit_script_dir,
+            expand_details=True
+        )
+
+        assert result == output_path
+        df = pd.read_excel(output_path, engine='openpyxl')
+        assert len(df) == 2
+        assert 'change_type' in df.columns
+        assert 'account' in df.columns
+        assert 'field' in df.columns
+        assert 'description' in df.columns
+        assert df.iloc[0]['change_type'] == 'add'
+        assert df.iloc[1]['change_type'] == 'modify'
+
+
+class TestConfigChangesTable:
+    def test_config_changes_has_change_details_column(self, audit_script_dir):
+        db_path = bankcheck.get_audit_db_path(audit_script_dir)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(config_changes)")
+        columns = {row[1] for row in cursor.fetchall()}
+        conn.close()
+        assert 'change_details' in columns
+
+    def test_lookup_snapshots_table_exists(self, audit_script_dir):
+        db_path = bankcheck.get_audit_db_path(audit_script_dir)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='lookup_snapshots'")
+        table = cursor.fetchone()
+        conn.close()
+        assert table is not None
+
+
+class TestIntegrationLookupChangeDetection:
+    def test_full_pipeline_with_lookup_change(self, tmp_dir, audit_script_dir):
+        bankcheck.detect_and_record_lookup_change(audit_script_dir, username='init_user')
+
+        lookup_file = os.path.join(audit_script_dir, '主体查找表.xlsx')
+        wb = openpyxl.load_workbook(lookup_file)
+        ws = wb.active
+        ws.append(['新主体公司', '7777777777777777777'])
+        wb.save(lookup_file)
+        wb.close()
+
+        source_folder = os.path.join(tmp_dir, '流水')
+        os.makedirs(source_folder, exist_ok=True)
+        _create_beijing_bank_excel(os.path.join(source_folder, '北京银行_流水.xlsx'))
+
+        change_result = bankcheck.detect_and_record_lookup_change(
+            audit_script_dir,
+            username='operator_user',
+            change_reason='新增客户主体'
+        )
+
+        result = bankcheck.run_pipeline(source_folder, audit_script_dir)
+
+        changes = bankcheck.query_config_changes(
+            script_dir=audit_script_dir,
+            config_type='lookup_table',
+            limit=1
+        )
+
+        assert len(changes) >= 1
+        change = changes[0]
+        assert change['username'] == 'operator_user'
+        assert change['change_reason'] == '新增客户主体'
+        assert isinstance(change['change_details'], list)
+        assert len(change['change_details']) >= 1
+        assert any(c['account'] == '7777777777777777777' for c in change['change_details'])
+
+
+class TestWhoChangedWhat:
+    def test_query_who_changed_what(self, audit_script_dir):
+        bankcheck.detect_and_record_lookup_change(audit_script_dir, username='user1')
+
+        lookup_file = os.path.join(audit_script_dir, '主体查找表.xlsx')
+        wb = openpyxl.load_workbook(lookup_file)
+        ws = wb.active
+        ws.append(['变更测试公司', '6666666666666666666'])
+        wb.save(lookup_file)
+        wb.close()
+
+        result = bankcheck.detect_and_record_lookup_change(
+            audit_script_dir,
+            username='operator_zhangsan',
+            change_reason='客户主体更新'
+        )
+
+        changes = bankcheck.query_config_changes(
+            script_dir=audit_script_dir,
+            username='operator_zhangsan'
+        )
+
+        assert len(changes) == 1
+        c = changes[0]
+
+        assert c['username'] == 'operator_zhangsan'
+        assert c['config_type'] == 'lookup_table'
+        assert c['change_reason'] == '客户主体更新'
+        assert isinstance(c['change_details'], list)
+        assert len(c['change_details']) == 1
+
+        detail = c['change_details'][0]
+        assert detail['change_type'] == 'add'
+        assert detail['account'] == '6666666666666666666'
+        assert '变更测试公司' in detail['description']
+        assert detail['new_value'] is not None
+        assert '变更测试公司' in str(detail['new_value'])
+

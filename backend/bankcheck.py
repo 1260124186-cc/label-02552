@@ -1104,10 +1104,11 @@ def get_audit_db_path(script_dir=None):
 def init_audit_db(db_path=None):
     """
     初始化审计数据库，创建所需表结构。
-    包含三张核心表：
+    包含四张核心表：
     - users: 用户信息表
     - audit_logs: 操作审计主表
     - config_changes: 配置变更历史表
+    - lookup_snapshots: 查找表快照表（用于自动检测变更）
     """
     if db_path is None:
         db_path = get_audit_db_path()
@@ -1170,7 +1171,20 @@ def init_audit_db(db_path=None):
             new_hash TEXT,
             change_reason TEXT,
             changed_at TEXT NOT NULL,
+            change_details TEXT,
             FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS lookup_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id TEXT NOT NULL UNIQUE,
+            lookup_file TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            content_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL
         )
     ''')
 
@@ -1178,6 +1192,8 @@ def init_audit_db(db_path=None):
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_logs_operation ON audit_logs(operation_type)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_logs_started_at ON audit_logs(started_at)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_config_changes_config ON config_changes(config_type, config_name)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_lookup_snapshots_file ON lookup_snapshots(lookup_file)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_lookup_snapshots_created ON lookup_snapshots(created_at)')
 
     conn.commit()
     conn.close()
@@ -1468,10 +1484,24 @@ class AuditLogger:
 
 
 def record_config_change(config_type, config_name, old_value, new_value,
-                         change_reason='', script_dir=None, username=None):
+                         change_reason='', script_dir=None, username=None,
+                         change_details=None):
     """
     记录配置变更历史。
     适用于查找表更新、银行配置调整等场景。
+
+    Args:
+        config_type: 配置类型（如 'lookup_table', 'bank_config'）
+        config_name: 配置名称（如 '主体查找表.xlsx'）
+        old_value: 变更前的值
+        new_value: 变更后的值
+        change_reason: 变更原因说明
+        script_dir: 脚本目录
+        username: 操作用户（默认自动获取）
+        change_details: 详细变更内容（字典或列表，描述具体变更项）
+
+    Returns:
+        change_id: 变更记录ID
     """
     if script_dir is None:
         script_dir = get_script_dir()
@@ -1490,25 +1520,421 @@ def record_config_change(config_type, config_name, old_value, new_value,
     old_str = json.dumps(old_value, ensure_ascii=False) if isinstance(old_value, (dict, list)) else str(old_value)
     new_str = json.dumps(new_value, ensure_ascii=False) if isinstance(new_value, (dict, list)) else str(new_value)
 
+    details_str = None
+    if change_details is not None:
+        details_str = json.dumps(change_details, ensure_ascii=False)
+
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO config_changes (
             change_id, user_id, username, config_type, config_name,
-            old_value, new_value, old_hash, new_hash, change_reason, changed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            old_value, new_value, old_hash, new_hash, change_reason, changed_at,
+            change_details
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         change_id, user_id, username, config_type, config_name,
-        old_str, new_str, old_hash, new_hash, change_reason, changed_at
+        old_str, new_str, old_hash, new_hash, change_reason, changed_at,
+        details_str
     ))
     conn.commit()
     conn.close()
 
     logger = get_logger()
-    logger.info('配置变更已记录 [%s] %s.%s 由 %s 修改',
-                change_id, config_type, config_name, username)
+    if change_details:
+        change_count = len(change_details) if isinstance(change_details, list) else 1
+        logger.info('配置变更已记录 [%s] %s.%s 由 %s 修改，%d 项变更',
+                    change_id, config_type, config_name, username, change_count)
+    else:
+        logger.info('配置变更已记录 [%s] %s.%s 由 %s 修改',
+                    change_id, config_type, config_name, username)
 
     return change_id
+
+
+def read_lookup_table_content(lookup_file):
+    """
+    读取查找表的完整内容（单元格级），返回结构化数据用于比对。
+
+    返回格式：
+    {
+        'file_path': '...',
+        'file_hash': '...',
+        'sheet_name': '...',
+        'headers': ['主体名称', '银行账号'],
+        'rows': [
+            {'row_num': 2, '主体名称': 'XX公司', '银行账号': '12345'},
+            {'row_num': 3, '主体名称': 'YY公司', '银行账号': '67890'}
+        ],
+        'account_map': {'12345': {'row_num': 2, '主体名称': 'XX公司'}}
+    }
+    """
+    logger = get_logger()
+    if not lookup_file or not os.path.exists(lookup_file):
+        return None
+
+    file_hash = compute_file_hash(lookup_file)
+    tmp_path = None
+    try:
+        wb, tmp_path = open_workbook_compat(lookup_file)
+        ws = wb.active
+
+        headers = []
+        for col in range(1, ws.max_column + 1):
+            val = ws.cell(row=1, column=col).value
+            headers.append(str(val) if val is not None else f'列{col}')
+
+        rows = []
+        account_map = {}
+
+        for row_num in range(2, ws.max_row + 1):
+            row_data = {'row_num': row_num}
+            for col_idx, header in enumerate(headers):
+                val = ws.cell(row=row_num, column=col_idx + 1).value
+                row_data[header] = val
+
+            account = row_data.get('银行账号') or row_data.get('账号')
+            if account:
+                account_key = _account_key(account)
+                account_map[account_key] = row_data
+
+            has_content = any(v is not None and str(v).strip() for v in row_data.values() if v != row_data['row_num'])
+            if has_content:
+                rows.append(row_data)
+
+        wb.close()
+        cleanup_temp_file(tmp_path)
+
+        result = {
+            'file_path': lookup_file,
+            'file_hash': file_hash,
+            'sheet_name': ws.title,
+            'headers': headers,
+            'rows': rows,
+            'account_map': account_map,
+        }
+
+        logger.debug('读取查找表内容完成: %s (%d 条记录)', lookup_file, len(rows))
+        return result
+
+    except Exception as e:
+        logger.error('读取查找表内容失败: %s', e)
+        cleanup_temp_file(tmp_path)
+        return None
+
+
+def _save_lookup_snapshot(lookup_content, script_dir=None, username=None):
+    """保存查找表快照到数据库"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+    init_audit_db(db_path)
+
+    username = username or get_current_user()
+    _ensure_user(username, db_path)
+
+    snapshot_id = f"SNP{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
+    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    content_json = json.dumps(lookup_content, ensure_ascii=False)
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO lookup_snapshots (
+            snapshot_id, lookup_file, file_hash, content_json,
+            created_at, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?)
+    ''', (
+        snapshot_id,
+        lookup_content.get('file_path', ''),
+        lookup_content.get('file_hash', ''),
+        content_json,
+        created_at,
+        username
+    ))
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.debug('查找表快照已保存: %s', snapshot_id)
+    return snapshot_id
+
+
+def _get_last_lookup_snapshot(lookup_file, script_dir=None):
+    """获取指定查找表的最新快照"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    if not os.path.exists(db_path):
+        return None
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM lookup_snapshots
+        WHERE lookup_file = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+    ''', (lookup_file,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        return {
+            'snapshot_id': row['snapshot_id'],
+            'lookup_file': row['lookup_file'],
+            'file_hash': row['file_hash'],
+            'content': json.loads(row['content_json']),
+            'created_at': row['created_at'],
+            'created_by': row['created_by'],
+        }
+    return None
+
+
+def _diff_lookup_snapshots(old_content, new_content):
+    """
+    比对两个查找表快照，生成详细变更列表。
+
+    返回格式：
+    [
+        {
+            'change_type': 'add' | 'remove' | 'modify',
+            'account': '银行账号',
+            'row_num': 行号,
+            'field': '变更字段',
+            'old_value': '旧值',
+            'new_value': '新值',
+            'description': '可读描述'
+        },
+        ...
+    ]
+    """
+    changes = []
+
+    if old_content is None and new_content is None:
+        return changes
+
+    if old_content is None:
+        for row in (new_content or {}).get('rows', []):
+            account = row.get('银行账号') or row.get('账号') or ''
+            changes.append({
+                'change_type': 'add',
+                'account': str(account),
+                'row_num': row.get('row_num'),
+                'field': None,
+                'old_value': None,
+                'new_value': {k: v for k, v in row.items() if k != 'row_num'},
+                'description': f'新增账号「{account}」: {row.get("主体名称") or row.get("主体") or "未命名主体"}'
+            })
+        return changes
+
+    if new_content is None:
+        for row in old_content.get('rows', []):
+            account = row.get('银行账号') or row.get('账号') or ''
+            changes.append({
+                'change_type': 'remove',
+                'account': str(account),
+                'row_num': row.get('row_num'),
+                'field': None,
+                'old_value': {k: v for k, v in row.items() if k != 'row_num'},
+                'new_value': None,
+                'description': f'删除账号「{account}」: {row.get("主体名称") or row.get("主体") or "未命名主体"}'
+            })
+        return changes
+
+    old_map = old_content.get('account_map', {})
+    new_map = new_content.get('account_map', {})
+
+    all_keys = set(list(old_map.keys()) + list(new_map.keys()))
+
+    for key in all_keys:
+        old_row = old_map.get(key)
+        new_row = new_map.get(key)
+
+        if old_row is None and new_row is not None:
+            account = new_row.get('银行账号') or new_row.get('账号') or key
+            changes.append({
+                'change_type': 'add',
+                'account': str(account),
+                'row_num': new_row.get('row_num'),
+                'field': None,
+                'old_value': None,
+                'new_value': {k: v for k, v in new_row.items() if k != 'row_num'},
+                'description': f'新增账号「{account}」: {new_row.get("主体名称") or new_row.get("主体") or "未命名主体"}'
+            })
+        elif old_row is not None and new_row is None:
+            account = old_row.get('银行账号') or old_row.get('账号') or key
+            changes.append({
+                'change_type': 'remove',
+                'account': str(account),
+                'row_num': old_row.get('row_num'),
+                'field': None,
+                'old_value': {k: v for k, v in old_row.items() if k != 'row_num'},
+                'new_value': None,
+                'description': f'删除账号「{account}」: {old_row.get("主体名称") or old_row.get("主体") or "未命名主体"}'
+            })
+        else:
+            for field in set(list(old_row.keys()) + list(new_row.keys())):
+                if field == 'row_num':
+                    continue
+                old_val = old_row.get(field)
+                new_val = new_row.get(field)
+
+                old_str = '' if old_val is None else str(old_val).strip()
+                new_str = '' if new_val is None else str(new_val).strip()
+
+                if old_str != new_str:
+                    account = old_row.get('银行账号') or old_row.get('账号') or key
+                    changes.append({
+                        'change_type': 'modify',
+                        'account': str(account),
+                        'row_num': new_row.get('row_num'),
+                        'field': field,
+                        'old_value': old_val,
+                        'new_value': new_val,
+                        'description': f'账号「{account}」的「{field}」变更: {old_val} → {new_val}'
+                    })
+
+    return changes
+
+
+@dataclass
+class ChangeDetectionResult:
+    """变更检测结果"""
+    has_changes: bool = False
+    change_id: Optional[str] = None
+    change_details: List[Dict[str, Any]] = field(default_factory=list)
+    old_snapshot: Optional[Dict] = None
+    new_snapshot: Optional[Dict] = None
+    old_content: Optional[Dict] = None
+    new_content: Optional[Dict] = None
+
+
+def detect_and_record_lookup_change(script_dir=None, username=None,
+                                    change_reason='自动检测到查找表变更'):
+    """
+    自动检测查找表是否发生变更，如果有变更则记录到配置变更历史。
+
+    工作流程：
+    1. 读取当前查找表内容
+    2. 获取数据库中保存的最新快照
+    3. 比对两者差异（文件哈希 + 内容比对）
+    4. 如果有变更，记录详细变更并保存新快照
+    5. 返回变更检测结果
+
+    Args:
+        script_dir: 脚本目录
+        username: 操作用户（默认自动获取）
+        change_reason: 变更原因说明
+
+    Returns:
+        ChangeDetectionResult: 变更检测结果
+    """
+    if script_dir is None:
+        script_dir = get_script_dir()
+    logger = get_logger()
+
+    lookup_file = find_lookup_file(script_dir)
+    if lookup_file is None:
+        logger.debug('未找到查找表，跳过变更检测')
+        return ChangeDetectionResult(has_changes=False)
+
+    username = username or get_current_user()
+
+    current_content = read_lookup_table_content(lookup_file)
+    if current_content is None:
+        logger.warning('无法读取当前查找表内容，跳过变更检测')
+        return ChangeDetectionResult(has_changes=False)
+
+    last_snapshot = _get_last_lookup_snapshot(lookup_file, script_dir)
+    last_content = last_snapshot.get('content') if last_snapshot else None
+
+    current_hash = current_content.get('file_hash')
+    last_hash = last_content.get('file_hash') if last_content else None
+
+    if last_content is None:
+        logger.info('首次运行，保存查找表初始快照')
+        _save_lookup_snapshot(current_content, script_dir, username)
+        return ChangeDetectionResult(
+            has_changes=False,
+            new_snapshot={'snapshot_id': 'initial'},
+            new_content=current_content
+        )
+
+    if current_hash == last_hash:
+        logger.debug('查找表文件哈希未变化，无变更')
+        return ChangeDetectionResult(
+            has_changes=False,
+            old_snapshot=last_snapshot,
+            old_content=last_content,
+            new_content=current_content
+        )
+
+    changes = _diff_lookup_snapshots(last_content, current_content)
+
+    if not changes:
+        logger.info('查找表哈希变化但内容无差异，可能是格式或元数据变更')
+        _save_lookup_snapshot(current_content, script_dir, username)
+        return ChangeDetectionResult(
+            has_changes=False,
+            old_snapshot=last_snapshot,
+            old_content=last_content,
+            new_content=current_content
+        )
+
+    change_id = record_config_change(
+        config_type='lookup_table',
+        config_name=os.path.basename(lookup_file),
+        old_value=last_content,
+        new_value=current_content,
+        change_reason=change_reason,
+        script_dir=script_dir,
+        username=username,
+        change_details=changes
+    )
+
+    _save_lookup_snapshot(current_content, script_dir, username)
+
+    add_count = sum(1 for c in changes if c['change_type'] == 'add')
+    remove_count = sum(1 for c in changes if c['change_type'] == 'remove')
+    modify_count = sum(1 for c in changes if c['change_type'] == 'modify')
+
+    logger.warning(
+        '检测到查找表变更 [%s]: 新增 %d, 删除 %d, 修改 %d',
+        change_id, add_count, remove_count, modify_count
+    )
+
+    return ChangeDetectionResult(
+        has_changes=True,
+        change_id=change_id,
+        change_details=changes,
+        old_snapshot=last_snapshot,
+        new_content=current_content,
+        old_content=last_content
+    )
+
+
+def manual_record_lookup_change(script_dir=None, username=None, change_reason=''):
+    """
+    手动触发查找表变更记录。
+    用于用户明确修改了查找表后需要立即记录的场景。
+
+    Args:
+        script_dir: 脚本目录
+        username: 操作用户
+        change_reason: 变更原因
+
+    Returns:
+        ChangeDetectionResult: 变更检测结果
+    """
+    return detect_and_record_lookup_change(
+        script_dir=script_dir,
+        username=username,
+        change_reason=change_reason or '手动记录查找表变更'
+    )
 
 
 def query_audit_logs(script_dir=None, username=None, operation_type=None,
@@ -1569,9 +1995,20 @@ def query_audit_logs(script_dir=None, username=None, operation_type=None,
 
 
 def query_config_changes(script_dir=None, config_type=None, config_name=None,
-                         username=None, limit=100):
+                         username=None, limit=100, parse_details=True):
     """
     查询配置变更历史。
+
+    Args:
+        script_dir: 脚本目录
+        config_type: 按配置类型过滤
+        config_name: 按配置名称过滤
+        username: 按用户名过滤
+        limit: 返回记录数限制
+        parse_details: 是否解析 change_details JSON 字段
+
+    Returns:
+        List[Dict] 配置变更记录列表，包含 change_details 解析结果
     """
     if script_dir is None:
         script_dir = get_script_dir()
@@ -1604,7 +2041,17 @@ def query_config_changes(script_dir=None, config_type=None, config_name=None,
     rows = cursor.fetchall()
     conn.close()
 
-    return [dict(row) for row in rows]
+    result = []
+    for row in rows:
+        record = dict(row)
+        if parse_details and record.get('change_details'):
+            try:
+                record['change_details'] = json.loads(record['change_details'])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        result.append(record)
+
+    return result
 
 
 def export_audit_logs(output_path, script_dir=None, **query_kwargs):
@@ -1638,20 +2085,71 @@ def export_audit_logs(output_path, script_dir=None, **query_kwargs):
     return output_path
 
 
-def export_config_changes(output_path, script_dir=None, **query_kwargs):
+def export_config_changes(output_path, script_dir=None, expand_details=False, **query_kwargs):
     """
     导出配置变更历史到 Excel 文件。
+
+    Args:
+        output_path: 输出文件路径
+        script_dir: 脚本目录
+        expand_details: 是否展开详细变更记录为多行
+        **query_kwargs: 查询参数
+
+    Returns:
+        输出文件路径
     """
     records = query_config_changes(script_dir=script_dir, **query_kwargs)
     if not records:
         return None
 
-    df = pd.DataFrame(records)
-    columns_order = [
-        'change_id', 'username', 'config_type', 'config_name',
-        'old_value', 'new_value', 'change_reason',
-        'old_hash', 'new_hash', 'changed_at', 'user_id', 'id'
-    ]
+    if expand_details:
+        expanded_rows = []
+        for record in records:
+            details = record.get('change_details')
+            if isinstance(details, list) and details:
+                for idx, detail in enumerate(details, 1):
+                    row = record.copy()
+                    row['detail_index'] = idx
+                    row['change_type'] = detail.get('change_type', '')
+                    row['account'] = detail.get('account', '')
+                    row['row_num'] = detail.get('row_num', '')
+                    row['field'] = detail.get('field', '')
+                    row['old_value_detail'] = json.dumps(detail.get('old_value'), ensure_ascii=False) if isinstance(detail.get('old_value'), (dict, list)) else str(detail.get('old_value', ''))
+                    row['new_value_detail'] = json.dumps(detail.get('new_value'), ensure_ascii=False) if isinstance(detail.get('new_value'), (dict, list)) else str(detail.get('new_value', ''))
+                    row['description'] = detail.get('description', '')
+                    expanded_rows.append(row)
+            else:
+                row = record.copy()
+                row['detail_index'] = None
+                row['change_type'] = ''
+                row['account'] = ''
+                row['row_num'] = ''
+                row['field'] = ''
+                row['old_value_detail'] = ''
+                row['new_value_detail'] = ''
+                row['description'] = ''
+                expanded_rows.append(row)
+
+        df = pd.DataFrame(expanded_rows)
+        columns_order = [
+            'change_id', 'username', 'config_type', 'config_name',
+            'detail_index', 'change_type', 'account', 'row_num', 'field',
+            'old_value_detail', 'new_value_detail', 'description',
+            'change_reason', 'old_hash', 'new_hash', 'changed_at',
+            'old_value', 'new_value', 'change_details', 'user_id', 'id'
+        ]
+    else:
+        df = pd.DataFrame(records)
+        if 'change_details' in df.columns:
+            df['change_details'] = df['change_details'].apply(
+                lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (dict, list)) else str(x) if x is not None else ''
+            )
+        columns_order = [
+            'change_id', 'username', 'config_type', 'config_name',
+            'old_value', 'new_value', 'change_reason',
+            'old_hash', 'new_hash', 'changed_at', 'change_details', 'user_id', 'id'
+        ]
+
     for col in columns_order:
         if col not in df.columns:
             df[col] = None
@@ -1675,6 +2173,21 @@ def run_pipeline_flow(script_dir):
 
     logger.info('用户选择文件夹: %s', folder)
 
+    change_result = detect_and_record_lookup_change(script_dir)
+    if change_result.has_changes:
+        add_count = sum(1 for c in change_result.change_details if c['change_type'] == 'add')
+        remove_count = sum(1 for c in change_result.change_details if c['change_type'] == 'remove')
+        modify_count = sum(1 for c in change_result.change_details if c['change_type'] == 'modify')
+        warning_msg = (
+            f'检测到查找表已变更！\n\n'
+            f'变更编号: {change_result.change_id}\n'
+            f'新增记录: {add_count} 条\n'
+            f'删除记录: {remove_count} 条\n'
+            f'修改记录: {modify_count} 条\n\n'
+        )
+        show_warning('查找表变更提醒', warning_msg)
+        logger.warning('查找表变更已记录: %s', change_result.change_id)
+
     with AuditLogger('pipeline', script_dir) as audit:
         audit.record_input(folder)
 
@@ -1690,6 +2203,8 @@ def run_pipeline_flow(script_dir):
 
         msg = format_result_message(result)
         msg += f'\n\n审计编号: {audit.audit_id}'
+        if change_result.change_id:
+            msg += f'\n配置变更编号: {change_result.change_id}'
         show_info('完成' if result.all_rows else '提示', msg)
 
 
@@ -1711,6 +2226,21 @@ def run_diff_flow(script_dir):
         return
     logger.info('用户选择新批次文件: %s', new_path)
 
+    change_result = detect_and_record_lookup_change(script_dir)
+    if change_result.has_changes:
+        add_count = sum(1 for c in change_result.change_details if c['change_type'] == 'add')
+        remove_count = sum(1 for c in change_result.change_details if c['change_type'] == 'remove')
+        modify_count = sum(1 for c in change_result.change_details if c['change_type'] == 'modify')
+        warning_msg = (
+            f'检测到查找表已变更！\n\n'
+            f'变更编号: {change_result.change_id}\n'
+            f'新增记录: {add_count} 条\n'
+            f'删除记录: {remove_count} 条\n'
+            f'修改记录: {modify_count} 条\n\n'
+        )
+        show_warning('查找表变更提醒', warning_msg)
+        logger.warning('查找表变更已记录: %s', change_result.change_id)
+
     with AuditLogger('diff', script_dir) as audit:
         audit.record_input(f'旧:{old_path} | 新:{new_path}')
 
@@ -1727,6 +2257,8 @@ def run_diff_flow(script_dir):
             )
             title = '对比完成（发现差异' if has_changes else '对比完成（无差异）'
             msg += f'\n\n审计编号: {audit.audit_id}'
+            if change_result.change_id:
+                msg += f'\n配置变更编号: {change_result.change_id}'
             show_info(title, msg)
         except FileNotFoundError as e:
             show_warning('错误', str(e))
