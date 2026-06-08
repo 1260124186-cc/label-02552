@@ -1,0 +1,20 @@
+{
+  "presets": [
+    {
+      "name": "月度常规处理",
+      "output_dir": "",
+      "enabled_banks": [
+        "北京银行",
+        "东亚银行"
+      ],
+      "keep_strategy": "keep_unprocessed",
+      "incremental": false,
+      "preset_id": "PRESET202606081528362ED5FB",
+      "created_at": "2026-06-08 15:28:36",
+      "updated_at": "2026-06-08 15:28:36"
+    }
+  ],
+  "settings": {
+    "default_preset": ""
+  }
+}

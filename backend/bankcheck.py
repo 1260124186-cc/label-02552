@@ -152,7 +152,8 @@ def cli_askmode():
     print('  6) 数据库查询：按主体/账号/时间范围查询流水记录')
     print('  7) 数据库统计：查看数据汇总统计信息')
     print('  8) 批次管理：查看历史批次与版本回溯')
-    choice = input('请输入选项（1-8，直接回车默认为 1）: ').strip()
+    print('  9) 预设管理：管理任务配置预设，一键加载常用方案')
+    choice = input('请输入选项（1-9，直接回车默认为 1）: ').strip()
     if choice == '2':
         return 'diff'
     elif choice == '3':
@@ -167,6 +168,8 @@ def cli_askmode():
         return 'db_stats'
     elif choice == '8':
         return 'batch_history'
+    elif choice == '9':
+        return 'preset'
     return 'pipeline'
 
 
@@ -175,18 +178,95 @@ def gui_askmode():
     if tk is None:
         return cli_askmode()
 
+    try:
+        result = _gui_askmode_full()
+        if result is not None:
+            return result
+    except Exception:
+        pass
+
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        choice = messagebox.askyesnocancel(
+            '选择运行模式',
+            '是 = 主流程：处理流水文件夹，输出总表\n\n否 = 变更对比：对比两次总表的差异\n\n取消 = 财务导出：按用友/金蝶等模板导出\n\n提示：\n- 使用命令行参数 --scheduler-menu 可进入定时调度管理\n- 使用命令行参数 --export 可直接进入财务导出\n- 使用命令行参数 --monitor 可进入监控面板\n- 使用命令行参数 --preset-menu 可进入预设管理',
+        )
+        root.destroy()
+        if choice is None:
+            return 'export'
+        return 'pipeline' if choice else 'diff'
+    except Exception:
+        return cli_askmode()
+
+
+def _gui_askmode_full():
+    """完整的GUI模式选择界面"""
+    if not hasattr(tk, 'Tk') or not callable(tk.Tk):
+        raise RuntimeError('Tk not available')
+
     root = tk.Tk()
-    root.withdraw()
+    if not hasattr(root, 'mainloop') or not callable(root.mainloop):
+        root.destroy()
+        raise RuntimeError('Mock Tk detected')
 
-    choice = messagebox.askyesnocancel(
-        '选择运行模式',
-        '是 = 主流程：处理流水文件夹，输出总表\n\n否 = 变更对比：对比两次总表的差异\n\n取消 = 财务导出：按用友/金蝶等模板导出\n\n提示：\n- 使用命令行参数 --scheduler-menu 可进入定时调度管理\n- 使用命令行参数 --export 可直接进入财务导出\n- 使用命令行参数 --monitor 可进入监控面板',
-    )
-    root.destroy()
+    root.title('银行流水检验工具 - 选择功能')
+    root.geometry('480x520')
+    root.resizable(False, False)
 
-    if choice is None:
-        return 'export'
-    return 'pipeline' if choice else 'diff'
+    result = {'mode': None}
+
+    def select_mode(mode):
+        result['mode'] = mode
+        root.destroy()
+
+    tk.Label(root, text='请选择运行模式', font=('Arial', 16, 'bold')).pack(pady=20)
+
+    button_frame = tk.Frame(root)
+    button_frame.pack(pady=10)
+
+    modes = [
+        ('主流程', 'pipeline', '处理银行流水文件夹，输出总表', '#4CAF50'),
+        ('变更对比', 'diff', '对比两次总表的差异', '#2196F3'),
+        ('监控面板', 'monitor', '运行监控与告警管理', '#FF9800'),
+        ('定时调度', 'scheduler', '定时批处理调度管理', '#9C27B0'),
+        ('财务导出', 'export', '按用友/金蝶等模板导出', '#607D8B'),
+        ('数据库查询', 'db_query', '按条件查询流水记录', '#00BCD4'),
+        ('数据库统计', 'db_stats', '查看数据汇总统计', '#795548'),
+        ('批次管理', 'batch_history', '历史批次与版本回溯', '#E91E63'),
+        ('预设管理', 'preset', '管理任务配置预设', '#FF5722'),
+    ]
+
+    for i, (name, mode, desc, color) in enumerate(modes):
+        row = i // 3
+        col = i % 3
+        btn = tk.Button(
+            button_frame,
+            text=name,
+            width=14,
+            height=3,
+            bg=color,
+            fg='white',
+            font=('Arial', 11, 'bold'),
+            command=lambda m=mode: select_mode(m),
+        )
+        btn.grid(row=row, column=col, padx=8, pady=8)
+        tk.Label(button_frame, text=desc, font=('Arial', 8), fg='#666').grid(
+            row=row * 2 + 1, column=col, padx=8, pady=(0, 8)
+        )
+
+    tk.Button(
+        root,
+        text='退出',
+        width=12,
+        command=lambda: select_mode(None),
+        bg='#f44336',
+        fg='white',
+        font=('Arial', 10, 'bold'),
+    ).pack(pady=20)
+
+    root.mainloop()
+    return result['mode']
 
 
 def _ask_monitor_or_scheduler():
@@ -1849,6 +1929,20 @@ class AuditLogger:
             self.record.lookup_file = find_lookup_file(self.script_dir)
         self._save_record()
         self.logger.debug('审计记录 [%s] 已记录输入目录: %s', self.audit_id, input_directory)
+
+    def set_extra_info(self, extra_info):
+        """记录额外信息到config_snapshot中"""
+        try:
+            if self.record.config_snapshot:
+                snapshot = json.loads(self.record.config_snapshot)
+            else:
+                snapshot = {}
+            snapshot.update(extra_info)
+            self.record.config_snapshot = json.dumps(snapshot, ensure_ascii=False)
+            self._save_record()
+            self.logger.debug('审计记录 [%s] 已添加额外信息: %s', self.audit_id, extra_info)
+        except Exception as e:
+            self.logger.warning('添加额外信息失败: %s', e)
 
     def record_result(self, result):
         """
@@ -5724,6 +5818,12 @@ def parse_args_and_run():
                        help='指定导出文件输出目录')
     parser.add_argument('--export-operator', type=str, metavar='OPERATOR',
                        help='指定制单人名称')
+    parser.add_argument('--preset-menu', action='store_true', help='打开预设管理菜单')
+    parser.add_argument('--list-presets', action='store_true', help='列出所有预设')
+    parser.add_argument('--apply-preset', type=str, metavar='PRESET_ID',
+                       help='应用指定ID的预设，需配合--watch-dir使用')
+    parser.add_argument('--save-preset', type=str, metavar='NAME',
+                       help='保存当前配置为新预设')
 
     args = parser.parse_args()
 
@@ -5745,6 +5845,65 @@ def parse_args_and_run():
                 print(f'    调度: 每 {job.get("interval_minutes", 60)} 分钟')
             else:
                 print(f'    调度: {job.get("cron_expression", "")}')
+        return True
+
+    if args.list_presets:
+        presets = list_presets(script_dir)
+        print(f'预设列表 (共 {len(presets)} 个):')
+        for preset in presets:
+            banks = ', '.join(preset.get('enabled_banks', []))
+            keep = KEEP_STRATEGIES.get(preset.get('keep_strategy'), '未知')
+            print(f'  [{preset["preset_id"]}] {preset.get("name", "")}')
+            print(f'    描述: {preset.get("description", "无")}')
+            print(f'    银行: {banks}')
+            print(f'    保留策略: {keep}')
+            print(f'    增量: {"是" if preset.get("incremental", True) else "否"}')
+            if preset.get('start_date') or preset.get('end_date'):
+                print(f'    日期: {preset.get("start_date", "不限")} ~ {preset.get("end_date", "不限")}')
+            print(f'    更新时间: {preset.get("updated_at", "")}')
+        return True
+
+    if args.apply_preset and args.watch_dir:
+        preset = load_preset(args.apply_preset, script_dir)
+        if not preset:
+            logger.error('未找到预设ID: %s', args.apply_preset)
+            print(f'错误: 未找到预设ID {args.apply_preset}')
+            return True
+
+        watch_dir = os.path.abspath(args.watch_dir)
+        if not os.path.isdir(watch_dir):
+            logger.error('目录不存在: %s', watch_dir)
+            print(f'错误: 目录不存在 {watch_dir}')
+            return True
+
+        print(f'应用预设: {preset.get("name", "")} ({args.apply_preset})')
+        print(f'处理目录: {watch_dir}')
+
+        with AuditLogger('preset_pipeline', script_dir) as audit:
+            audit.record_input(watch_dir)
+            audit.set_extra_info({'preset_id': args.apply_preset, 'preset_name': preset.get('name', '')})
+            result = apply_preset_to_pipeline(preset, watch_dir, script_dir)
+            audit.record_result(result)
+
+            if result.all_rows:
+                print(f'\n✅ 处理完成！')
+                print(f'   总记录数: {len(result.all_rows)}')
+                print(f'   新增记录: {result.new_record_count}')
+                print(f'   输出文件: {result.output_path}')
+            else:
+                print(f'\n⚠️  未提取到记录')
+            return True
+
+    if args.save_preset:
+        preset_data = {
+            'name': args.save_preset,
+            'output_dir': args.export_output or '',
+            'enabled_banks': list(BANK_PREFIXES),
+            'keep_strategy': 'keep_unprocessed',
+            'incremental': not args.no_incremental,
+        }
+        preset_id = save_preset(preset_data, script_dir)
+        print(f'\n✅ 预设已保存，ID: {preset_id}')
         return True
 
     if args.add_job:
@@ -5827,6 +5986,10 @@ def parse_args_and_run():
         run_scheduler_flow(script_dir)
         return True
 
+    if args.preset_menu:
+        run_preset_flow(script_dir)
+        return True
+
     if args.export or args.export_template or args.export_total:
         if args.export_total and args.export_template:
             template_type = args.export_template
@@ -5905,6 +6068,8 @@ def main():
         run_db_stats_flow(script_dir)
     elif mode == 'batch_history':
         run_batch_history_flow(script_dir)
+    elif mode == 'preset':
+        run_preset_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
@@ -6373,6 +6538,962 @@ def _delete_batch(batch_manager):
     except Exception as e:
         print(f'\n❌ 删除失败: {e}')
         get_logger().error('批次删除失败: %s', e, exc_info=True)
+
+
+# ──────────────────────────────────────────────
+# 任务配置预设管理模块
+# ──────────────────────────────────────────────
+
+PRESET_CONFIG_FILENAME = 'task_presets.json'
+
+
+@dataclass
+class TaskPreset:
+    preset_id: str
+    name: str
+    description: str = ''
+    output_dir: str = ''
+    start_date: str = ''
+    end_date: str = ''
+    keep_strategy: str = 'keep_unprocessed'
+    enabled_banks: List[str] = field(default_factory=list)
+    incremental: bool = True
+    created_at: str = ''
+    updated_at: str = ''
+
+
+KEEP_STRATEGIES = {
+    'keep_unprocessed': '仅保留未处理文件',
+    'keep_all': '保留所有文件',
+    'delete_all': '删除所有已处理文件',
+}
+
+
+def get_preset_config_path(script_dir=None):
+    if script_dir is None:
+        script_dir = get_script_dir()
+    return os.path.join(script_dir, PRESET_CONFIG_FILENAME)
+
+
+def load_preset_config(script_dir=None):
+    config_path = get_preset_config_path(script_dir)
+    logger = get_logger()
+
+    if not os.path.exists(config_path):
+        logger.info('预设配置文件不存在，将创建默认配置: %s', config_path)
+        default_config = {
+            'presets': [],
+            'settings': {
+                'default_preset': '',
+            }
+        }
+        save_preset_config(default_config, script_dir)
+        return default_config
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        logger.info('已加载预设配置，共 %d 个预设', len(config.get('presets', [])))
+        return config
+    except Exception as e:
+        logger.error('加载预设配置失败: %s', e)
+        return {'presets': [], 'settings': {}}
+
+
+def save_preset_config(config, script_dir=None):
+    config_path = get_preset_config_path(script_dir)
+    try:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        logger = get_logger()
+        logger.info('预设配置已保存: %s', config_path)
+        return True
+    except Exception as e:
+        logger = get_logger()
+        logger.error('保存预设配置失败: %s', e)
+        return False
+
+
+def _generate_preset_id():
+    return f"PRESET{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
+
+
+def save_preset(preset_data, script_dir=None):
+    config = load_preset_config(script_dir)
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    preset_id = preset_data.get('preset_id') or _generate_preset_id()
+    preset_data['preset_id'] = preset_id
+
+    if not preset_data.get('name'):
+        preset_data['name'] = f'预设_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+
+    preset_data['enabled_banks'] = preset_data.get('enabled_banks') or list(BANK_PREFIXES)
+    preset_data['keep_strategy'] = preset_data.get('keep_strategy') or 'keep_unprocessed'
+    preset_data['incremental'] = preset_data.get('incremental', True)
+
+    existing = None
+    for i, p in enumerate(config['presets']):
+        if p['preset_id'] == preset_id:
+            existing = i
+            break
+
+    if existing is not None:
+        preset_data['created_at'] = config['presets'][existing].get('created_at', now)
+        preset_data['updated_at'] = now
+        config['presets'][existing] = preset_data
+        action = '更新'
+    else:
+        preset_data['created_at'] = now
+        preset_data['updated_at'] = now
+        config['presets'].append(preset_data)
+        action = '添加'
+
+    save_preset_config(config, script_dir)
+
+    logger = get_logger()
+    logger.info('已%s预设 [%s] %s', action, preset_id, preset_data.get('name', ''))
+    return preset_id
+
+
+def load_preset(preset_id, script_dir=None):
+    config = load_preset_config(script_dir)
+    for preset in config.get('presets', []):
+        if preset['preset_id'] == preset_id:
+            return preset
+    return None
+
+
+def delete_preset(preset_id, script_dir=None):
+    config = load_preset_config(script_dir)
+    logger = get_logger()
+
+    original_count = len(config['presets'])
+    config['presets'] = [p for p in config['presets'] if p['preset_id'] != preset_id]
+
+    if len(config['presets']) == original_count:
+        logger.warning('未找到预设 [%s]', preset_id)
+        return False
+
+    if config.get('settings', {}).get('default_preset') == preset_id:
+        config['settings']['default_preset'] = ''
+
+    save_preset_config(config, script_dir)
+    logger.info('已删除预设 [%s]', preset_id)
+    return True
+
+
+def list_presets(script_dir=None):
+    config = load_preset_config(script_dir)
+    return config.get('presets', [])
+
+
+def set_default_preset(preset_id, script_dir=None):
+    config = load_preset_config(script_dir)
+    if 'settings' not in config:
+        config['settings'] = {}
+    config['settings']['default_preset'] = preset_id
+    save_preset_config(config, script_dir)
+
+
+def get_default_preset(script_dir=None):
+    config = load_preset_config(script_dir)
+    default_id = config.get('settings', {}).get('default_preset', '')
+    if default_id:
+        return load_preset(default_id, script_dir)
+    return None
+
+
+def apply_preset_to_pipeline(preset, folder, script_dir):
+    logger = get_logger()
+
+    if not preset:
+        logger.warning('预设为空，使用默认配置运行')
+        return run_pipeline(folder, script_dir)
+
+    logger.info('应用预设 [%s] %s', preset.get('preset_id'), preset.get('name', ''))
+
+    enabled_banks = preset.get('enabled_banks', BANK_PREFIXES)
+    keep_strategy = preset.get('keep_strategy', 'keep_unprocessed')
+    incremental = preset.get('incremental', True)
+    start_date = preset.get('start_date', '')
+    end_date = preset.get('end_date', '')
+
+    result = run_pipeline_with_options(
+        folder=folder,
+        script_dir=script_dir,
+        incremental=incremental,
+        enabled_banks=enabled_banks,
+        keep_strategy=keep_strategy,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    return result
+
+
+def run_pipeline_with_options(folder, script_dir, incremental=True,
+                              enabled_banks=None, keep_strategy='keep_unprocessed',
+                              start_date='', end_date='', batch_id=None):
+    logger = get_logger()
+
+    if enabled_banks is None:
+        enabled_banks = BANK_PREFIXES
+
+    lookup_file = find_lookup_file(script_dir)
+    lookup_missing = lookup_file is None
+    if lookup_missing:
+        logger.warning('未找到主体查找表，"主体"列将为空')
+
+    existing_keys = set()
+    existing_records = []
+    actual_incremental = False
+    duplicate_count = 0
+    new_record_count = 0
+
+    if incremental:
+        summary_path = get_summary_table_path(script_dir)
+        existing_keys, existing_records = load_existing_keys(summary_path)
+        actual_incremental = len(existing_records) > 0
+        if actual_incremental:
+            logger.info('===== 增量合并模式已启用 =====')
+        else:
+            logger.info('无历史数据，将以全量模式运行')
+
+    folder_name = os.path.basename(folder.rstrip('/\\'))
+    parent_dir = os.path.dirname(folder.rstrip('/\\'))
+    new_folder = os.path.join(parent_dir, f"{folder_name}＋检验版")
+
+    if os.path.exists(new_folder):
+        logger.info('＋检验版文件夹已存在，先删除: %s', new_folder)
+        shutil.rmtree(new_folder)
+    shutil.copytree(folder, new_folder)
+    logger.info('已复制文件夹为＋检验版: %s', new_folder)
+
+    excel_files = scan_excel_files(new_folder)
+    if not excel_files:
+        logger.warning('检验版文件夹中未发现任何 Excel 文件')
+        return ProcessingResult(
+            lookup_missing=lookup_missing,
+            folder_empty=True,
+            incremental_mode=actual_incremental,
+            existing_record_count=len(existing_records),
+        )
+
+    def _parse_date(value):
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            if isinstance(value, str):
+                return datetime.strptime(value[:10], '%Y-%m-%d')
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    start_dt = _parse_date(start_date)
+    end_dt = _parse_date(end_date)
+
+    if start_dt:
+        logger.info('日期过滤 - 开始日期: %s', start_dt.strftime('%Y-%m-%d'))
+    if end_dt:
+        logger.info('日期过滤 - 结束日期: %s', end_dt.strftime('%Y-%m-%d'))
+
+    def _is_date_in_range(trade_date):
+        if trade_date is None:
+            return True
+        dt = _parse_date(trade_date)
+        if dt is None:
+            return True
+        if start_dt and dt < start_dt:
+            return False
+        if end_dt and dt > end_dt:
+            return False
+        return True
+
+    all_rows = []
+    processed_files = []
+    unprocessed_files = []
+    error_files = []
+    filtered_out_count = 0
+
+    for filepath in excel_files:
+        bank = identify_bank(filepath)
+        if bank and bank in BANK_PROCESSORS and bank in enabled_banks:
+            try:
+                processor = BANK_PROCESSORS[bank]
+                rows = processor(filepath, lookup_file)
+
+                if start_dt or end_dt:
+                    original_len = len(rows)
+                    rows = [r for r in rows if _is_date_in_range(r.get('交易日期'))]
+                    filtered_out_count += (original_len - len(rows))
+
+                all_rows.extend(rows)
+                processed_files.append(filepath)
+                logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
+            except Exception as e:
+                error_files.append((filepath, str(e)))
+                logger.error('处理文件「%s」时发生错误: %s', filepath, e, exc_info=True)
+        else:
+            unprocessed_files.append(filepath)
+            if bank and bank not in enabled_banks:
+                logger.info('文件「%s」所属银行「%s」不在启用列表中，跳过', filepath, bank)
+
+    if filtered_out_count > 0:
+        logger.info('日期过滤共排除 %d 条记录', filtered_out_count)
+
+    error_file_paths = {f for f, _ in error_files}
+    keep_set = set(unprocessed_files) | error_file_paths
+
+    if keep_strategy == 'keep_all':
+        keep_set = set(excel_files)
+        logger.info('保留策略：保留所有文件')
+    elif keep_strategy == 'delete_all':
+        keep_set = set()
+        logger.info('保留策略：删除所有已处理文件')
+    else:
+        logger.info('保留策略：仅保留未处理文件')
+
+    delete_processed_files(excel_files, keep_set)
+
+    output_path = None
+    final_rows = []
+
+    if all_rows:
+        if actual_incremental:
+            incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
+            new_record_count = len(incremental_rows)
+            output_path = merge_and_export_summary(existing_records, incremental_rows, script_dir)
+            final_rows = existing_records + incremental_rows
+        else:
+            columns = [
+                '唯一id', '银行', '银行账号', '主体', '交易日期',
+                '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+            ]
+            df = pd.DataFrame(all_rows, columns=columns)
+            output_path = get_summary_table_path(script_dir)
+            df.to_excel(output_path, index=False, engine='openpyxl')
+            logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
+            final_rows = all_rows
+            new_record_count = len(all_rows)
+    else:
+        logger.warning('未提取到任何银行流水记录')
+        if existing_records:
+            output_path = merge_and_export_summary(existing_records, [], script_dir)
+            final_rows = existing_records
+
+    db_inserted = 0
+    db_duplicates = 0
+    if HAS_DATABASE and final_rows:
+        try:
+            if batch_id is None:
+                batch_id = f"BATCH{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            db_inserted, db_duplicates = db_module.persist_transactions(
+                final_rows,
+                batch_id=batch_id,
+                deduplicate=True,
+                script_dir=script_dir,
+            )
+            logger.info(
+                '数据库持久化完成: 批次 %s, 插入 %d 条, 去重跳过 %d 条',
+                batch_id, db_inserted, db_duplicates,
+            )
+        except Exception as e:
+            logger.error('数据库持久化失败: %s', e, exc_info=True)
+
+    return ProcessingResult(
+        all_rows=final_rows,
+        processed_files=processed_files,
+        unprocessed_files=unprocessed_files,
+        error_files=error_files,
+        output_path=output_path,
+        lookup_missing=lookup_missing,
+        incremental_mode=actual_incremental,
+        existing_record_count=len(existing_records),
+        new_record_count=new_record_count,
+        duplicate_record_count=duplicate_count,
+        db_inserted_count=db_inserted,
+        db_duplicate_count=db_duplicates,
+    )
+
+
+def run_preset_flow(script_dir):
+    """预设管理流程：管理和应用任务配置预设"""
+    logger = get_logger()
+
+    if HAS_TKINTER and tk is not None:
+        try:
+            gui_preset_manager(script_dir)
+            return
+        except Exception as e:
+            logger.warning('GUI预设管理启动失败，将使用命令行模式: %s', e)
+
+    print('\n' + '=' * 60)
+    print('任务配置预设管理')
+    print('=' * 60)
+
+    while True:
+        presets = list_presets(script_dir)
+        default_preset = get_default_preset(script_dir)
+
+        print(f'\n当前预设数量: {len(presets)}')
+        if default_preset:
+            print(f'默认预设: [{default_preset["preset_id"]}] {default_preset.get("name", "")}')
+
+        print('\n请选择操作：')
+        print('  1) 列出所有预设')
+        print('  2) 保存当前配置为新预设')
+        print('  3) 加载并应用预设')
+        print('  4) 删除预设')
+        print('  5) 设为默认预设')
+        print('  6) 查看预设详情')
+        print('  0) 返回主菜单')
+
+        choice = input('\n请输入选项: ').strip()
+
+        if choice == '1':
+            _list_presets_cli(presets)
+        elif choice == '2':
+            _save_preset_cli(script_dir)
+        elif choice == '3':
+            _apply_preset_cli(script_dir)
+        elif choice == '4':
+            _delete_preset_cli(script_dir)
+        elif choice == '5':
+            _set_default_preset_cli(script_dir)
+        elif choice == '6':
+            _show_preset_detail_cli(script_dir)
+        elif choice == '0':
+            break
+        else:
+            print('无效选项，请重新输入')
+
+
+def gui_preset_manager(script_dir):
+    """GUI预设管理窗口"""
+    if tk is None:
+        raise RuntimeError('Tkinter not available')
+
+    logger = get_logger()
+    logger.info('启动GUI预设管理')
+
+    root = tk.Tk()
+    root.title('任务配置预设管理')
+    root.geometry('750x600')
+    root.minsize(700, 550)
+
+    presets_list = []
+    selected_preset_id = tk.StringVar()
+    detail_text = None
+
+    def refresh_presets():
+        nonlocal presets_list
+        presets_list = list_presets(script_dir)
+        listbox.delete(0, tk.END)
+        default_id = get_default_preset(script_dir)
+        default_id = default_id['preset_id'] if default_id else ''
+        for p in presets_list:
+            marker = '★ ' if p['preset_id'] == default_id else '  '
+            listbox.insert(tk.END, f"{marker}{p['preset_id']} - {p.get('name', '未命名')}")
+
+    def on_select(event):
+        selection = listbox.curselection()
+        if not selection:
+            return
+        idx = selection[0]
+        preset = presets_list[idx]
+        selected_preset_id.set(preset['preset_id'])
+        show_preset_detail(preset)
+
+    def show_preset_detail(preset):
+        if detail_text is None:
+            return
+        detail_text.config(state=tk.NORMAL)
+        detail_text.delete(1.0, tk.END)
+
+        banks = ', '.join(preset.get('enabled_banks', []))
+        keep = KEEP_STRATEGIES.get(preset.get('keep_strategy'), '未知')
+        incremental = '是' if preset.get('incremental', True) else '否'
+
+        detail = f"""预设名称: {preset.get('name', '')}
+预设ID: {preset.get('preset_id', '')}
+描述: {preset.get('description', '无')}
+{'-' * 50}
+输出目录: {preset.get('output_dir', '默认')}
+开始日期: {preset.get('start_date', '不限制')}
+结束日期: {preset.get('end_date', '不限制')}
+保留策略: {keep}
+启用银行: {banks}
+增量合并: {incremental}
+{'-' * 50}
+创建时间: {preset.get('created_at', '')}
+更新时间: {preset.get('updated_at', '')}
+"""
+        detail_text.insert(tk.END, detail)
+        detail_text.config(state=tk.DISABLED)
+
+    def add_preset():
+        PresetEditorDialog(root, script_dir, on_saved=refresh_presets)
+
+    def edit_preset():
+        pid = selected_preset_id.get()
+        if not pid:
+            messagebox.showwarning('提示', '请先选择一个预设')
+            return
+        preset = load_preset(pid, script_dir)
+        if preset:
+            PresetEditorDialog(root, script_dir, preset=preset, on_saved=refresh_presets)
+
+    def delete_selected():
+        pid = selected_preset_id.get()
+        if not pid:
+            messagebox.showwarning('提示', '请先选择一个预设')
+            return
+        preset = load_preset(pid, script_dir)
+        if not preset:
+            return
+        if messagebox.askyesno('确认删除', f'确定要删除预设「{preset.get("name", "")}」吗？'):
+            if delete_preset(pid, script_dir):
+                messagebox.showinfo('成功', '预设已删除')
+                refresh_presets()
+                selected_preset_id.set('')
+                if detail_text:
+                    detail_text.config(state=tk.NORMAL)
+                    detail_text.delete(1.0, tk.END)
+                    detail_text.config(state=tk.DISABLED)
+            else:
+                messagebox.showerror('错误', '删除失败')
+
+    def set_default():
+        pid = selected_preset_id.get()
+        if not pid:
+            messagebox.showwarning('提示', '请先选择一个预设')
+            return
+        set_default_preset(pid, script_dir)
+        messagebox.showinfo('成功', '已设为默认预设')
+        refresh_presets()
+
+    def apply_preset():
+        pid = selected_preset_id.get()
+        if not pid:
+            messagebox.showwarning('提示', '请先选择一个预设')
+            return
+        preset = load_preset(pid, script_dir)
+        if not preset:
+            return
+
+        folder = filedialog.askdirectory(title='请选择银行流水文件夹')
+        if not folder:
+            return
+
+        if not messagebox.askyesno('确认应用',
+                                   f'即将应用预设「{preset.get("name", "")}」\n处理文件夹: {folder}\n\n是否继续？'):
+            return
+
+        root.destroy()
+
+        with AuditLogger('preset_pipeline', script_dir) as audit:
+            audit.record_input(folder)
+            audit.set_extra_info({'preset_id': pid, 'preset_name': preset.get('name', '')})
+            result = apply_preset_to_pipeline(preset, folder, script_dir)
+            audit.record_result(result)
+
+            msg = format_result_message(result)
+            msg += f'\n\n审计编号: {audit.audit_id}'
+            msg += f'\n预设: {preset.get("name", "")} ({pid})'
+            show_info('完成' if result.all_rows else '提示', msg)
+
+    main_frame = tk.Frame(root)
+    main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    left_frame = tk.Frame(main_frame)
+    left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+
+    tk.Label(left_frame, text='预设列表（★ 表示默认）', font=('Arial', 12, 'bold')).pack(anchor=tk.W)
+
+    listbox_frame = tk.Frame(left_frame)
+    listbox_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+
+    scrollbar = tk.Scrollbar(listbox_frame)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    listbox = tk.Listbox(listbox_frame, font=('Arial', 11), yscrollcommand=scrollbar.set)
+    listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scrollbar.config(command=listbox.yview)
+    listbox.bind('<<ListboxSelect>>', on_select)
+
+    btn_frame = tk.Frame(left_frame)
+    btn_frame.pack(fill=tk.X, pady=5)
+
+    tk.Button(btn_frame, text='新增', width=8, command=add_preset, bg='#4CAF50', fg='white').pack(side=tk.LEFT, padx=2)
+    tk.Button(btn_frame, text='编辑', width=8, command=edit_preset, bg='#2196F3', fg='white').pack(side=tk.LEFT, padx=2)
+    tk.Button(btn_frame, text='删除', width=8, command=delete_selected, bg='#f44336', fg='white').pack(side=tk.LEFT, padx=2)
+    tk.Button(btn_frame, text='设为默认', width=10, command=set_default, bg='#FF9800', fg='white').pack(side=tk.LEFT, padx=2)
+
+    right_frame = tk.Frame(main_frame)
+    right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
+
+    tk.Label(right_frame, text='预设详情', font=('Arial', 12, 'bold')).pack(anchor=tk.W)
+
+    detail_text = tk.Text(right_frame, font=('Arial', 11), wrap=tk.WORD, height=15)
+    detail_text.pack(fill=tk.BOTH, expand=True, pady=5)
+    detail_text.config(state=tk.DISABLED)
+
+    bottom_frame = tk.Frame(root)
+    bottom_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+    tk.Button(bottom_frame, text='应用预设处理文件', height=2, command=apply_preset,
+              bg='#FF5722', fg='white', font=('Arial', 12, 'bold')).pack(fill=tk.X)
+    tk.Button(bottom_frame, text='关闭', height=2, command=root.destroy,
+              bg='#9E9E9E', fg='white', font=('Arial', 11)).pack(fill=tk.X, pady=(5, 0))
+
+    refresh_presets()
+    root.mainloop()
+
+
+class PresetEditorDialog:
+    """预设编辑器对话框"""
+
+    def __init__(self, parent, script_dir, preset=None, on_saved=None):
+        self.script_dir = script_dir
+        self.preset = preset
+        self.on_saved = on_saved
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title('编辑预设' if preset else '新增预设')
+        self.dialog.geometry('500x560')
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self._build_ui()
+
+        if preset:
+            self._load_preset(preset)
+
+    def _build_ui(self):
+        pad = {'padx': 10, 'pady': 5}
+
+        tk.Label(self.dialog, text='预设名称:', font=('Arial', 11)).pack(anchor=tk.W, **pad)
+        self.name_var = tk.StringVar()
+        tk.Entry(self.dialog, textvariable=self.name_var, font=('Arial', 11)).pack(fill=tk.X, **pad)
+
+        tk.Label(self.dialog, text='描述:', font=('Arial', 11)).pack(anchor=tk.W, **pad)
+        self.desc_text = tk.Text(self.dialog, height=3, font=('Arial', 11))
+        self.desc_text.pack(fill=tk.X, **pad)
+
+        tk.Label(self.dialog, text='输出目录（可选）:', font=('Arial', 11)).pack(anchor=tk.W, **pad)
+        output_frame = tk.Frame(self.dialog)
+        output_frame.pack(fill=tk.X, **pad)
+        self.output_var = tk.StringVar()
+        tk.Entry(output_frame, textvariable=self.output_var, font=('Arial', 11)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def browse_output():
+            d = filedialog.askdirectory(title='选择输出目录')
+            if d:
+                self.output_var.set(d)
+
+        tk.Button(output_frame, text='浏览...', command=browse_output).pack(side=tk.LEFT, padx=5)
+
+        date_frame = tk.Frame(self.dialog)
+        date_frame.pack(fill=tk.X, **pad)
+
+        tk.Label(date_frame, text='开始日期:', font=('Arial', 11)).pack(side=tk.LEFT)
+        self.start_date_var = tk.StringVar()
+        tk.Entry(date_frame, textvariable=self.start_date_var, width=15, font=('Arial', 11)).pack(side=tk.LEFT, padx=5)
+        tk.Label(date_frame, text='(YYYY-MM-DD)', font=('Arial', 9), fg='#666').pack(side=tk.LEFT)
+
+        date_frame2 = tk.Frame(self.dialog)
+        date_frame2.pack(fill=tk.X, **pad)
+        tk.Label(date_frame2, text='结束日期:', font=('Arial', 11)).pack(side=tk.LEFT)
+        self.end_date_var = tk.StringVar()
+        tk.Entry(date_frame2, textvariable=self.end_date_var, width=15, font=('Arial', 11)).pack(side=tk.LEFT, padx=5)
+        tk.Label(date_frame2, text='(YYYY-MM-DD)', font=('Arial', 9), fg='#666').pack(side=tk.LEFT)
+
+        tk.Label(self.dialog, text='保留策略:', font=('Arial', 11)).pack(anchor=tk.W, **pad)
+        self.keep_var = tk.StringVar(value='keep_unprocessed')
+        keep_frame = tk.Frame(self.dialog)
+        keep_frame.pack(anchor=tk.W, **pad)
+        for key, desc in KEEP_STRATEGIES.items():
+            tk.Radiobutton(keep_frame, text=desc, variable=self.keep_var, value=key, font=('Arial', 10)).pack(anchor=tk.W)
+
+        tk.Label(self.dialog, text='启用银行:', font=('Arial', 11)).pack(anchor=tk.W, **pad)
+        self.bank_vars = {}
+        bank_frame = tk.Frame(self.dialog)
+        bank_frame.pack(anchor=tk.W, **pad)
+        for bank in BANK_PREFIXES:
+            var = tk.BooleanVar(value=True)
+            self.bank_vars[bank] = var
+            tk.Checkbutton(bank_frame, text=bank, variable=var, font=('Arial', 10)).pack(side=tk.LEFT, padx=5)
+
+        tk.Label(self.dialog, text='增量合并:', font=('Arial', 11)).pack(anchor=tk.W, **pad)
+        self.incremental_var = tk.BooleanVar(value=True)
+        inc_frame = tk.Frame(self.dialog)
+        inc_frame.pack(anchor=tk.W, **pad)
+        tk.Radiobutton(inc_frame, text='启用（推荐）', variable=self.incremental_var, value=True, font=('Arial', 10)).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(inc_frame, text='禁用（全量覆盖）', variable=self.incremental_var, value=False, font=('Arial', 10)).pack(side=tk.LEFT)
+
+        btn_frame = tk.Frame(self.dialog)
+        btn_frame.pack(fill=tk.X, padx=10, pady=20)
+
+        tk.Button(btn_frame, text='保存', width=12, command=self._save,
+                  bg='#4CAF50', fg='white', font=('Arial', 11, 'bold')).pack(side=tk.RIGHT, padx=5)
+        tk.Button(btn_frame, text='取消', width=12, command=self.dialog.destroy,
+                  bg='#9E9E9E', fg='white', font=('Arial', 11)).pack(side=tk.RIGHT)
+
+    def _load_preset(self, preset):
+        self.name_var.set(preset.get('name', ''))
+        self.desc_text.delete(1.0, tk.END)
+        self.desc_text.insert(1.0, preset.get('description', ''))
+        self.output_var.set(preset.get('output_dir', ''))
+        self.start_date_var.set(preset.get('start_date', ''))
+        self.end_date_var.set(preset.get('end_date', ''))
+        self.keep_var.set(preset.get('keep_strategy', 'keep_unprocessed'))
+        self.incremental_var.set(preset.get('incremental', True))
+
+        enabled_banks = preset.get('enabled_banks', BANK_PREFIXES)
+        for bank in BANK_PREFIXES:
+            self.bank_vars[bank].set(bank in enabled_banks)
+
+    def _save(self):
+        name = self.name_var.get().strip()
+        if not name:
+            messagebox.showerror('错误', '请输入预设名称', parent=self.dialog)
+            return
+
+        start_date = self.start_date_var.get().strip()
+        end_date = self.end_date_var.get().strip()
+
+        def validate_date(d):
+            if not d:
+                return True
+            try:
+                datetime.strptime(d, '%Y-%m-%d')
+                return True
+            except ValueError:
+                return False
+
+        if start_date and not validate_date(start_date):
+            messagebox.showerror('错误', '开始日期格式错误，请使用 YYYY-MM-DD 格式', parent=self.dialog)
+            return
+
+        if end_date and not validate_date(end_date):
+            messagebox.showerror('错误', '结束日期格式错误，请使用 YYYY-MM-DD 格式', parent=self.dialog)
+            return
+
+        enabled_banks = [bank for bank, var in self.bank_vars.items() if var.get()]
+        if not enabled_banks:
+            messagebox.showerror('错误', '请至少选择一个银行', parent=self.dialog)
+            return
+
+        preset_data = {
+            'name': name,
+            'description': self.desc_text.get(1.0, tk.END).strip(),
+            'output_dir': self.output_var.get().strip(),
+            'start_date': start_date,
+            'end_date': end_date,
+            'keep_strategy': self.keep_var.get(),
+            'enabled_banks': enabled_banks,
+            'incremental': self.incremental_var.get(),
+        }
+
+        if self.preset:
+            preset_data['preset_id'] = self.preset['preset_id']
+
+        preset_id = save_preset(preset_data, self.script_dir)
+
+        messagebox.showinfo('成功', f'预设已保存\nID: {preset_id}', parent=self.dialog)
+        self.dialog.destroy()
+
+        if self.on_saved:
+            self.on_saved()
+
+
+def _list_presets_cli(presets):
+    if not presets:
+        print('\n暂无预设配置')
+        return
+
+    print('\n' + '-' * 80)
+    print(f'{"ID":<22}{"名称":<20}{"描述":<25}{"更新时间":<20}')
+    print('-' * 80)
+    for p in presets:
+        name = (p.get('name', '')[:18] + '..') if len(p.get('name', '')) > 20 else p.get('name', '')
+        desc = (p.get('description', '')[:23] + '..') if len(p.get('description', '')) > 25 else p.get('description', '')
+        print(f'{p["preset_id"]:<22}{name:<20}{desc:<25}{p.get("updated_at", ""):<20}')
+    print('-' * 80)
+
+
+def _save_preset_cli(script_dir):
+    print('\n--- 保存新预设 ---')
+
+    name = input('预设名称: ').strip()
+    if not name:
+        print('预设名称不能为空')
+        return
+
+    description = input('预设描述（可选）: ').strip()
+    output_dir = input('输出目录（可选，留空使用默认）: ').strip()
+    start_date = input('开始日期（YYYY-MM-DD，可选）: ').strip()
+    end_date = input('结束日期（YYYY-MM-DD，可选）: ').strip()
+
+    print('\n保留策略选项：')
+    for key, desc in KEEP_STRATEGIES.items():
+        print(f'  {key}: {desc}')
+    keep_strategy = input(f'保留策略（默认: keep_unprocessed）: ').strip() or 'keep_unprocessed'
+    if keep_strategy not in KEEP_STRATEGIES:
+        print(f'无效的保留策略，使用默认: keep_unprocessed')
+        keep_strategy = 'keep_unprocessed'
+
+    print('\n可用银行列表：')
+    for i, bank in enumerate(BANK_PREFIXES, 1):
+        print(f'  {i}) {bank}')
+    bank_input = input('选择启用的银行（输入编号，逗号分隔，回车全选）: ').strip()
+    if bank_input:
+        try:
+            indices = [int(x.strip()) - 1 for x in bank_input.split(',')]
+            enabled_banks = [BANK_PREFIXES[i] for i in indices if 0 <= i < len(BANK_PREFIXES)]
+        except (ValueError, IndexError):
+            print('输入无效，将启用所有银行')
+            enabled_banks = list(BANK_PREFIXES)
+    else:
+        enabled_banks = list(BANK_PREFIXES)
+
+    incremental_input = input('是否启用增量合并? (y/N): ').strip().lower()
+    incremental = incremental_input == 'y'
+
+    preset_data = {
+        'name': name,
+        'description': description,
+        'output_dir': output_dir,
+        'start_date': start_date,
+        'end_date': end_date,
+        'keep_strategy': keep_strategy,
+        'enabled_banks': enabled_banks,
+        'incremental': incremental,
+    }
+
+    preset_id = save_preset(preset_data, script_dir)
+    print(f'\n✅ 预设已保存，ID: {preset_id}')
+
+
+def _apply_preset_cli(script_dir):
+    presets = list_presets(script_dir)
+    if not presets:
+        print('\n暂无预设可用')
+        return
+
+    _list_presets_cli(presets)
+    preset_id = input('\n请输入要应用的预设ID: ').strip()
+
+    preset = load_preset(preset_id, script_dir)
+    if not preset:
+        print(f'❌ 未找到预设: {preset_id}')
+        return
+
+    print(f'\n即将应用预设: {preset.get("name", "")}')
+    _print_preset_detail(preset)
+
+    folder = ask_directory('请选择银行流水文件夹')
+    if not folder:
+        print('未选择文件夹，取消应用')
+        return
+
+    confirm = input(f'\n确认应用预设处理文件夹「{folder}」? (Y/n): ').strip().lower()
+    if confirm and confirm != 'y':
+        print('已取消')
+        return
+
+    with AuditLogger('preset_pipeline', script_dir) as audit:
+        audit.record_input(folder)
+        audit.set_extra_info({'preset_id': preset_id, 'preset_name': preset.get('name', '')})
+
+        result = apply_preset_to_pipeline(preset, folder, script_dir)
+        audit.record_result(result)
+
+        msg = format_result_message(result)
+        msg += f'\n\n审计编号: {audit.audit_id}'
+        msg += f'\n预设: {preset.get("name", "")} ({preset_id})'
+        show_info('完成' if result.all_rows else '提示', msg)
+
+
+def _delete_preset_cli(script_dir):
+    presets = list_presets(script_dir)
+    if not presets:
+        print('\n暂无预设可删除')
+        return
+
+    _list_presets_cli(presets)
+    preset_id = input('\n请输入要删除的预设ID: ').strip()
+
+    preset = load_preset(preset_id, script_dir)
+    if not preset:
+        print(f'❌ 未找到预设: {preset_id}')
+        return
+
+    confirm = input(f'确认删除预设「{preset.get("name", "")}」? (y/N): ').strip().lower()
+    if confirm != 'y':
+        print('已取消')
+        return
+
+    if delete_preset(preset_id, script_dir):
+        print('✅ 预设已删除')
+    else:
+        print('❌ 删除失败')
+
+
+def _set_default_preset_cli(script_dir):
+    presets = list_presets(script_dir)
+    if not presets:
+        print('\n暂无预设')
+        return
+
+    _list_presets_cli(presets)
+    preset_id = input('\n请输入要设为默认的预设ID: ').strip()
+
+    preset = load_preset(preset_id, script_dir)
+    if not preset:
+        print(f'❌ 未找到预设: {preset_id}')
+        return
+
+    set_default_preset(preset_id, script_dir)
+    print(f'✅ 已将「{preset.get("name", "")}」设为默认预设')
+
+
+def _show_preset_detail_cli(script_dir):
+    presets = list_presets(script_dir)
+    if not presets:
+        print('\n暂无预设')
+        return
+
+    _list_presets_cli(presets)
+    preset_id = input('\n请输入要查看的预设ID: ').strip()
+
+    preset = load_preset(preset_id, script_dir)
+    if not preset:
+        print(f'❌ 未找到预设: {preset_id}')
+        return
+
+    _print_preset_detail(preset)
+
+
+def _print_preset_detail(preset):
+    print('\n' + '=' * 50)
+    print(f'预设名称: {preset.get("name", "")}')
+    print(f'预设ID: {preset.get("preset_id", "")}')
+    print(f'描述: {preset.get("description", "无")}')
+    print('-' * 50)
+    print(f'输出目录: {preset.get("output_dir", "默认")}')
+    print(f'开始日期: {preset.get("start_date", "不限制")}')
+    print(f'结束日期: {preset.get("end_date", "不限制")}')
+    print(f'保留策略: {KEEP_STRATEGIES.get(preset.get("keep_strategy"), "未知")}')
+    print(f'启用银行: {", ".join(preset.get("enabled_banks", []))}')
+    print(f'增量合并: {"是" if preset.get("incremental", True) else "否"}')
+    print('-' * 50)
+    print(f'创建时间: {preset.get("created_at", "")}')
+    print(f'更新时间: {preset.get("updated_at", "")}')
+    print('=' * 50)
 
 
 if __name__ == '__main__':
