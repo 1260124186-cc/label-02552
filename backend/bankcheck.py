@@ -133,11 +133,14 @@ def cli_askmode():
     print('  1) 主流程：处理银行流水文件夹，输出总表')
     print('  2) 变更对比：对比两次总表的差异（新增/删除/变更）')
     print('  3) 监控面板：运行监控与告警管理')
-    choice = input('请输入选项（1、2 或 3，直接回车默认为 1）: ').strip()
+    print('  4) 定时调度：定时批处理调度管理')
+    choice = input('请输入选项（1、2、3 或 4，直接回车默认为 1）: ').strip()
     if choice == '2':
         return 'diff'
     elif choice == '3':
         return 'monitor'
+    elif choice == '4':
+        return 'scheduler'
     return 'pipeline'
 
 
@@ -147,12 +150,41 @@ def gui_askmode():
     root.withdraw()
     choice = messagebox.askyesnocancel(
         '选择运行模式',
-        '是 = 主流程：处理流水文件夹，输出总表\n\n否 = 变更对比：对比两次总表的差异\n\n取消 = 监控面板：运行监控与告警',
+        '是 = 主流程：处理流水文件夹，输出总表\n\n否 = 变更对比：对比两次总表的差异\n\n取消 = 监控面板：运行监控与告警\n\n提示：使用命令行参数 --scheduler-menu 可进入定时调度管理',
     )
     root.destroy()
     if choice is None:
         return 'monitor'
     return 'pipeline' if choice else 'diff'
+
+
+def _ask_monitor_or_scheduler():
+    """二级菜单：选择监控或调度"""
+    if tk is not None:
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            choice = messagebox.askyesnocancel(
+                '选择功能',
+                '是 = 监控面板：运行监控与告警管理\n\n否 = 定时调度：定时批处理调度管理\n\n取消 = 返回主菜单',
+            )
+            root.destroy()
+            if choice is None:
+                return 'monitor'
+            return 'monitor' if choice else 'scheduler'
+        except Exception:
+            pass
+
+    print('\n请选择功能：')
+    print('  1) 监控面板：运行监控与告警管理')
+    print('  2) 定时调度：定时批处理调度管理')
+    print('  3) 返回主菜单')
+    choice = input('请输入选项: ').strip()
+    if choice == '1':
+        return 'monitor'
+    elif choice == '2':
+        return 'scheduler'
+    return 'monitor'
 
 
 # 根据 tkinter 是否可用，选择交互方式
@@ -3844,7 +3876,1211 @@ def run_diff_flow(script_dir):
             logger.error('对比失败: %s', e)
 
 
+# ──────────────────────────────────────────────
+# 定时批处理调度模块
+# ──────────────────────────────────────────────
+
+SCHEDULER_CONFIG_FILENAME = 'scheduler_config.json'
+PROCESSED_FILES_DB_FILENAME = 'processed_files.db'
+SCHEDULE_LOG_FILENAME = 'scheduler.log'
+
+
+@dataclass
+class ScheduleJobConfig:
+    job_id: str
+    name: str
+    watch_directory: str
+    cron_expression: str = '0 0 * * *'
+    interval_minutes: Optional[int] = None
+    schedule_type: str = 'cron'
+    incremental: bool = True
+    enabled: bool = True
+    description: str = ''
+    created_at: str = ''
+    updated_at: str = ''
+
+
+@dataclass
+class ProcessedFileRecord:
+    file_path: str
+    file_hash: str
+    file_size: int
+    last_modified: float
+    processed_at: str
+    job_id: str
+    record_count: int = 0
+    status: str = 'success'
+
+
+def get_scheduler_config_path(script_dir=None):
+    if script_dir is None:
+        script_dir = get_script_dir()
+    return os.path.join(script_dir, SCHEDULER_CONFIG_FILENAME)
+
+
+def get_processed_files_db_path(script_dir=None):
+    if script_dir is None:
+        script_dir = get_script_dir()
+    return os.path.join(script_dir, PROCESSED_FILES_DB_FILENAME)
+
+
+def get_scheduler_log_path(script_dir=None):
+    if script_dir is None:
+        script_dir = get_script_dir()
+    return os.path.join(script_dir, SCHEDULE_LOG_FILENAME)
+
+
+def init_processed_files_db(db_path=None):
+    if db_path is None:
+        db_path = get_processed_files_db_path()
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS processed_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_path TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            last_modified REAL NOT NULL,
+            processed_at TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            record_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'success',
+            UNIQUE(file_path, file_hash)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS scheduler_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL UNIQUE,
+            job_id TEXT NOT NULL,
+            job_name TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL,
+            files_scanned INTEGER DEFAULT 0,
+            files_new INTEGER DEFAULT 0,
+            files_processed INTEGER DEFAULT 0,
+            files_skipped INTEGER DEFAULT 0,
+            files_error INTEGER DEFAULT 0,
+            records_extracted INTEGER DEFAULT 0,
+            error_message TEXT,
+            output_path TEXT,
+            duration_ms INTEGER
+        )
+    ''')
+
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_processed_files_job ON processed_files(job_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_processed_files_path ON processed_files(file_path)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_scheduler_runs_job ON scheduler_runs(job_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_scheduler_runs_started ON scheduler_runs(started_at)')
+
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.debug('已处理文件数据库初始化完成: %s', db_path)
+
+
+def load_scheduler_config(script_dir=None):
+    config_path = get_scheduler_config_path(script_dir)
+    logger = get_logger()
+
+    if not os.path.exists(config_path):
+        logger.info('调度配置文件不存在，将创建默认配置: %s', config_path)
+        default_config = {
+            'jobs': [],
+            'settings': {
+                'max_concurrent_jobs': 1,
+                'check_interval_seconds': 30,
+                'enable_alerts': True,
+                'log_level': 'INFO'
+            }
+        }
+        save_scheduler_config(default_config, script_dir)
+        return default_config
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        logger.info('已加载调度配置，共 %d 个任务', len(config.get('jobs', [])))
+        return config
+    except Exception as e:
+        logger.error('加载调度配置失败: %s', e)
+        return {'jobs': [], 'settings': {}}
+
+
+def save_scheduler_config(config, script_dir=None):
+    config_path = get_scheduler_config_path(script_dir)
+    try:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        logger = get_logger()
+        logger.info('调度配置已保存: %s', config_path)
+        return True
+    except Exception as e:
+        logger = get_logger()
+        logger.error('保存调度配置失败: %s', e)
+        return False
+
+
+def add_schedule_job(job_config, script_dir=None):
+    config = load_scheduler_config(script_dir)
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    if not job_config.get('job_id'):
+        job_config['job_id'] = f"JOB{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
+
+    job_config['created_at'] = now
+    job_config['updated_at'] = now
+    job_config['enabled'] = job_config.get('enabled', True)
+
+    config['jobs'].append(job_config)
+    save_scheduler_config(config, script_dir)
+
+    logger = get_logger()
+    logger.info('已添加调度任务 [%s] %s', job_config['job_id'], job_config.get('name', ''))
+    return job_config['job_id']
+
+
+def update_schedule_job(job_id, updates, script_dir=None):
+    config = load_scheduler_config(script_dir)
+    logger = get_logger()
+
+    for job in config['jobs']:
+        if job['job_id'] == job_id:
+            job.update(updates)
+            job['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            save_scheduler_config(config, script_dir)
+            logger.info('已更新调度任务 [%s]', job_id)
+            return True
+
+    logger.warning('未找到调度任务 [%s]', job_id)
+    return False
+
+
+def remove_schedule_job(job_id, script_dir=None):
+    config = load_scheduler_config(script_dir)
+    logger = get_logger()
+
+    config['jobs'] = [job for job in config['jobs'] if job['job_id'] != job_id]
+    save_scheduler_config(config, script_dir)
+    logger.info('已删除调度任务 [%s]', job_id)
+
+
+def list_schedule_jobs(script_dir=None):
+    config = load_scheduler_config(script_dir)
+    return config.get('jobs', [])
+
+
+def is_file_processed(file_path, job_id, db_path=None):
+    if db_path is None:
+        db_path = get_processed_files_db_path()
+
+    file_hash = compute_file_hash(file_path)
+    if not file_hash:
+        return False, None
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT file_path, processed_at FROM processed_files
+        WHERE file_path = ? AND file_hash = ? AND job_id = ?
+    ''', (file_path, file_hash, job_id))
+    result = cursor.fetchone()
+    conn.close()
+
+    return result is not None, file_hash
+
+
+def mark_file_processed(file_path, file_hash, job_id, record_count=0, status='success', db_path=None):
+    if db_path is None:
+        db_path = get_processed_files_db_path()
+    init_processed_files_db(db_path)
+
+    file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+    last_modified = os.path.getmtime(file_path) if os.path.exists(file_path) else 0
+    processed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT OR REPLACE INTO processed_files (
+                file_path, file_hash, file_size, last_modified,
+                processed_at, job_id, record_count, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (file_path, file_hash, file_size, last_modified,
+              processed_at, job_id, record_count, status))
+        conn.commit()
+    finally:
+        conn.close()
+
+    logger = get_logger()
+    logger.debug('已标记文件为已处理: %s (job=%s)', file_path, job_id)
+
+
+def scan_new_files(watch_directory, job_id, script_dir=None):
+    logger = get_logger()
+    db_path = get_processed_files_db_path(script_dir)
+    init_processed_files_db(db_path)
+
+    all_files = scan_excel_files(watch_directory)
+    new_files = []
+
+    for file_path in all_files:
+        processed, file_hash = is_file_processed(file_path, job_id, db_path)
+        if not processed:
+            new_files.append((file_path, file_hash))
+            logger.debug('发现新文件: %s', file_path)
+
+    logger.info('扫描目录 %s: 共 %d 个文件，新增 %d 个',
+                watch_directory, len(all_files), len(new_files))
+    return new_files
+
+
+def record_scheduler_run(run_data, script_dir=None):
+    db_path = get_processed_files_db_path(script_dir)
+    init_processed_files_db(db_path)
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO scheduler_runs (
+                run_id, job_id, job_name, started_at, completed_at,
+                status, files_scanned, files_new, files_processed,
+                files_skipped, files_error, records_extracted,
+                error_message, output_path, duration_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            run_data['run_id'], run_data['job_id'], run_data['job_name'],
+            run_data['started_at'], run_data.get('completed_at'),
+            run_data['status'], run_data.get('files_scanned', 0),
+            run_data.get('files_new', 0), run_data.get('files_processed', 0),
+            run_data.get('files_skipped', 0), run_data.get('files_error', 0),
+            run_data.get('records_extracted', 0), run_data.get('error_message'),
+            run_data.get('output_path'), run_data.get('duration_ms')
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def run_scheduled_pipeline(job_config, script_dir=None):
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    logger = get_logger()
+    job_id = job_config['job_id']
+    job_name = job_config.get('name', job_id)
+    watch_directory = job_config['watch_directory']
+    incremental = job_config.get('incremental', True)
+
+    logger.info('========== 定时任务启动 [%s] %s ==========', job_id, job_name)
+    logger.info('监控目录: %s', watch_directory)
+    logger.info('运行模式: %s', '增量合并' if incremental else '全量覆盖')
+
+    run_id = f"SCH{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
+    start_time = datetime.now()
+
+    run_data = {
+        'run_id': run_id,
+        'job_id': job_id,
+        'job_name': job_name,
+        'started_at': start_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+        'status': 'running',
+    }
+
+    try:
+        change_result = detect_and_record_lookup_change(script_dir, username='scheduler')
+        if change_result.has_changes:
+            logger.warning('检测到查找表变更: %s', change_result.change_id)
+
+        if not os.path.exists(watch_directory):
+            raise FileNotFoundError(f'监控目录不存在: {watch_directory}')
+
+        new_files = scan_new_files(watch_directory, job_id, script_dir)
+        run_data['files_scanned'] = len(scan_excel_files(watch_directory))
+        run_data['files_new'] = len(new_files)
+
+        if not new_files:
+            logger.info('没有新文件需要处理，任务结束')
+            run_data['status'] = 'success'
+            run_data['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+            run_data['duration_ms'] = int((datetime.now() - start_time).total_seconds() * 1000)
+            return run_data
+
+        with AuditLogger('scheduled_pipeline', script_dir, username='scheduler') as audit:
+            audit.record_input(watch_directory)
+
+            result = run_pipeline(watch_directory, script_dir, incremental=incremental)
+            audit.record_result(result)
+
+            db_path = get_processed_files_db_path(script_dir)
+            for file_path, file_hash in new_files:
+                record_count = 0
+                status = 'success'
+                for proc_file in result.processed_files:
+                    if os.path.basename(file_path) in proc_file:
+                        record_count = len(result.all_rows)
+                        break
+                for err_file, _ in result.error_files:
+                    if os.path.basename(file_path) in err_file:
+                        status = 'error'
+                        break
+
+                mark_file_processed(file_path, file_hash, job_id, record_count, status, db_path)
+
+            run_data['files_processed'] = len(result.processed_files)
+            run_data['files_error'] = len(result.error_files)
+            run_data['files_skipped'] = len(result.unprocessed_files)
+            run_data['records_extracted'] = result.new_record_count
+            run_data['output_path'] = result.output_path
+            run_data['status'] = 'success' if not result.error_files else 'partial'
+
+            if result.lookup_missing:
+                logger.warning('未找到主体查找表，主体列为空')
+
+            logger.info('定时任务完成: 新增文件 %d 个，处理 %d 个，错误 %d 个，提取记录 %d 条',
+                        len(new_files), len(result.processed_files),
+                        len(result.error_files), result.new_record_count)
+
+            if result.output_path:
+                logger.info('输出总表: %s', result.output_path)
+
+    except Exception as e:
+        logger.error('定时任务执行失败: %s', e, exc_info=True)
+        run_data['status'] = 'failed'
+        run_data['error_message'] = str(e)
+
+    finally:
+        run_data['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+        run_data['duration_ms'] = int((datetime.now() - start_time).total_seconds() * 1000)
+        record_scheduler_run(run_data, script_dir)
+
+        if run_data['status'] == 'failed' and load_scheduler_config(script_dir).get('settings', {}).get('enable_alerts', True):
+            run_alert_detection(script_dir, username='scheduler')
+
+    logger.info('========== 定时任务结束 [%s] 状态: %s 耗时: %dms ==========',
+                job_id, run_data['status'], run_data['duration_ms'])
+
+    return run_data
+
+
+def _try_import_apscheduler():
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        from apscheduler.triggers.interval import IntervalTrigger
+        return BackgroundScheduler, CronTrigger, IntervalTrigger
+    except ImportError:
+        logger = get_logger()
+        logger.warning('未安装 APScheduler，将使用简单内置调度器。请运行: pip install APScheduler')
+        return None, None, None
+
+
+class SimpleScheduler:
+    def __init__(self):
+        self.jobs = []
+        self.running = False
+        self._thread = None
+        self.logger = get_logger()
+
+    def add_job(self, func, trigger, args=None, kwargs=None, id=None, name=None):
+        job = {
+            'id': id or f"JOB{uuid.uuid4().hex[:8].upper()}",
+            'name': name or func.__name__,
+            'func': func,
+            'trigger': trigger,
+            'args': args or [],
+            'kwargs': kwargs or {},
+            'last_run': None,
+        }
+        self.jobs.append(job)
+        self.logger.info('已添加调度任务: %s (%s)', job['id'], job['name'])
+        return job
+
+    def _should_run(self, job, now):
+        trigger = job['trigger']
+
+        if job['last_run'] is None:
+            return True
+
+        if hasattr(trigger, 'get_interval'):
+            interval_sec = trigger.get_interval().total_seconds()
+            return (now - job['last_run']).total_seconds() >= interval_sec
+
+        if hasattr(trigger, 'fields'):
+            from datetime import datetime as dt
+            last_run_date = job['last_run'].replace(second=0, microsecond=0)
+            now_date = now.replace(second=0, microsecond=0)
+            return now_date > last_run_date
+
+        return False
+
+    def _run_loop(self):
+        import time
+        while self.running:
+            now = datetime.now()
+            for job in self.jobs:
+                if self._should_run(job, now):
+                    try:
+                        self.logger.info('触发定时任务: %s', job['name'])
+                        job['last_run'] = now
+                        job['func'](*job['args'], **job['kwargs'])
+                    except Exception as e:
+                        self.logger.error('任务执行错误 [%s]: %s', job['name'], e, exc_info=True)
+            time.sleep(30)
+
+    def start(self):
+        import threading
+        if self.running:
+            return
+        self.running = True
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        self.logger.info('简单调度器已启动')
+
+    def shutdown(self):
+        self.running = False
+        if self._thread:
+            self._thread.join(timeout=5)
+        self.logger.info('简单调度器已停止')
+
+
+def get_scheduler():
+    BackgroundScheduler, CronTrigger, IntervalTrigger = _try_import_apscheduler()
+
+    if BackgroundScheduler:
+        scheduler = BackgroundScheduler(timezone='Asia/Shanghai')
+        scheduler_type = 'apscheduler'
+    else:
+        scheduler = SimpleScheduler()
+        CronTrigger = None
+        IntervalTrigger = None
+        scheduler_type = 'simple'
+
+    return scheduler, scheduler_type, CronTrigger, IntervalTrigger
+
+
+def start_scheduler(script_dir=None):
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    logger = get_logger()
+    logger.info('========== 定时调度器启动 ==========')
+
+    config = load_scheduler_config(script_dir)
+    jobs = [j for j in config.get('jobs', []) if j.get('enabled', True)]
+
+    if not jobs:
+        logger.warning('没有启用的调度任务，请先配置任务')
+        return None
+
+    init_processed_files_db(get_processed_files_db_path(script_dir))
+
+    scheduler, scheduler_type, CronTrigger, IntervalTrigger = get_scheduler()
+
+    for job_config in jobs:
+        job_id = job_config['job_id']
+        job_name = job_config.get('name', job_id)
+        schedule_type = job_config.get('schedule_type', 'cron')
+
+        try:
+            if scheduler_type == 'apscheduler':
+                if schedule_type == 'interval' and job_config.get('interval_minutes'):
+                    trigger = IntervalTrigger(minutes=job_config['interval_minutes'])
+                else:
+                    cron_expr = job_config.get('cron_expression', '0 0 * * *')
+                    parts = cron_expr.split()
+                    if len(parts) == 5:
+                        minute, hour, day, month, day_of_week = parts
+                        trigger = CronTrigger(
+                            minute=minute, hour=hour, day=day,
+                            month=month, day_of_week=day_of_week,
+                            timezone='Asia/Shanghai'
+                        )
+                    else:
+                        logger.warning('cron 表达式格式错误，使用默认每日0点: %s', cron_expr)
+                        trigger = CronTrigger(hour=0, minute=0, timezone='Asia/Shanghai')
+
+                scheduler.add_job(
+                    run_scheduled_pipeline,
+                    trigger=trigger,
+                    args=[job_config, script_dir],
+                    id=job_id,
+                    name=job_name,
+                    misfire_grace_time=3600,
+                    coalesce=True,
+                    max_instances=1,
+                )
+            else:
+                class SimpleIntervalTrigger:
+                    def __init__(self, minutes):
+                        self._minutes = minutes
+                    def get_interval(self):
+                        from datetime import timedelta
+                        return timedelta(minutes=self._minutes)
+
+                class SimpleCronTrigger:
+                    def __init__(self, cron_expr):
+                        self.fields = cron_expr.split()
+
+                if schedule_type == 'interval' and job_config.get('interval_minutes'):
+                    trigger = SimpleIntervalTrigger(job_config['interval_minutes'])
+                else:
+                    trigger = SimpleCronTrigger(job_config.get('cron_expression', '0 0 * * *'))
+
+                scheduler.add_job(
+                    run_scheduled_pipeline,
+                    trigger=trigger,
+                    args=[job_config, script_dir],
+                    id=job_id,
+                    name=job_name,
+                )
+
+            logger.info('已注册任务 [%s] %s: 类型=%s, 配置=%s',
+                        job_id, job_name, schedule_type,
+                        job_config.get('cron_expression') or f"{job_config.get('interval_minutes')}分钟")
+
+        except Exception as e:
+            logger.error('注册任务失败 [%s]: %s', job_id, e)
+
+    try:
+        scheduler.start()
+        logger.info('调度器已启动 (%s)，共 %d 个任务', scheduler_type, len(jobs))
+        logger.info('按 Ctrl+C 停止调度器')
+
+        if scheduler_type == 'apscheduler':
+            import time
+            try:
+                while True:
+                    time.sleep(60)
+            except (KeyboardInterrupt, SystemExit):
+                logger.info('收到停止信号')
+                scheduler.shutdown()
+        else:
+            import time
+            try:
+                while scheduler.running:
+                    time.sleep(60)
+            except (KeyboardInterrupt, SystemExit):
+                logger.info('收到停止信号')
+                scheduler.shutdown()
+
+    except Exception as e:
+        logger.error('调度器运行错误: %s', e)
+        scheduler.shutdown()
+
+    logger.info('========== 定时调度器停止 ==========')
+    return scheduler
+
+
+def generate_cron_script(job_config, script_path, script_dir=None):
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    logger = get_logger()
+    job_id = job_config['job_id']
+    cron_expr = job_config.get('cron_expression', '0 0 * * *')
+
+    python_path = sys.executable
+    script_abs_path = os.path.abspath(script_path)
+
+    log_path = get_scheduler_log_path(script_dir)
+
+    cron_line = f'{cron_expr} {python_path} {script_abs_path} --run-job {job_id} >> {log_path} 2>&1'
+
+    script_content = f'''#!/bin/bash
+# 银行流水检验工具 - 定时任务 cron 配置
+# 任务ID: {job_id}
+# 任务名称: {job_config.get('name', '')}
+# 监控目录: {job_config.get('watch_directory', '')}
+# 调度时间: {cron_expr}
+# 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+# 添加到 crontab 的命令:
+# crontab -e
+# 然后添加以下行:
+
+{cron_line}
+
+# 或者运行以下命令自动添加:
+# (crontab -l 2>/dev/null; echo "{cron_line}") | crontab -
+
+# 查看当前 crontab:
+# crontab -l
+
+# 日志文件: {log_path}
+'''
+
+    output_path = os.path.join(script_dir, f'cron_job_{job_id}.sh')
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(script_content)
+
+    os.chmod(output_path, 0o755)
+    logger.info('已生成 cron 脚本: %s', output_path)
+    return output_path, cron_line
+
+
+def generate_windows_task_script(job_config, script_path, script_dir=None):
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    logger = get_logger()
+    job_id = job_config['job_id']
+    job_name = job_config.get('name', f'bankcheck_{job_id}')
+    cron_expr = job_config.get('cron_expression', '0 0 * * *')
+
+    parts = cron_expr.split()
+    start_time = '00:00'
+    if len(parts) >= 2:
+        start_time = f'{parts[1].zfill(2)}:{parts[0].zfill(2)}'
+
+    python_path = sys.executable
+    script_abs_path = os.path.abspath(script_path)
+    log_path = get_scheduler_log_path(script_dir)
+
+    schtasks_cmd = (
+        f'SchTasks /Create /SC DAILY /TN "{job_name}" '
+        f'/TR "\\"{python_path}\\" \\"{script_abs_path}\\" --run-job {job_id}" '
+        f'/ST {start_time} /RL HIGHEST /F'
+    )
+
+    ps_content = f'''# 银行流水检验工具 - Windows 任务计划配置
+# 任务ID: {job_id}
+# 任务名称: {job_name}
+# 监控目录: {job_config.get('watch_directory', '')}
+# 调度时间: {cron_expr} (每日 {start_time})
+# 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+# 方法1: 以管理员身份运行此 PowerShell 脚本
+$action = New-ScheduledTaskAction -Execute "{python_path}" -Argument "`"{script_abs_path}`" --run-job {job_id}"
+$trigger = New-ScheduledTaskTrigger -Daily -At {start_time}
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName "{job_name}" -Action $action -Trigger $trigger -Settings $settings -Description "银行流水检验工具定时任务" -Force
+Write-Host "任务已创建: {job_name}"
+
+# 方法2: 在命令行(cmd)中运行以下命令:
+# {schtasks_cmd}
+
+# 查看任务:
+# Get-ScheduledTask -TaskName "{job_name}"
+
+# 删除任务:
+# Unregister-ScheduledTask -TaskName "{job_name}" -Confirm:$false
+
+# 日志文件: {log_path}
+'''
+
+    bat_content = f'''@echo off
+REM 银行流水检验工具 - Windows 任务计划配置
+REM 任务ID: {job_id}
+REM 任务名称: {job_name}
+REM 监控目录: {job_config.get('watch_directory', '')}
+REM 调度时间: {cron_expr} (每日 {start_time})
+REM 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+echo 创建 Windows 任务计划: {job_name}
+{schtasks_cmd}
+
+if %errorlevel%==0 (
+    echo 任务创建成功！
+    echo 查看任务: schtasks /Query /TN "{job_name}"
+    echo 删除任务: schtasks /Delete /TN "{job_name}" /F
+) else (
+    echo 任务创建失败，请以管理员身份运行。
+)
+
+pause
+'''
+
+    ps_output = os.path.join(script_dir, f'task_job_{job_id}.ps1')
+    bat_output = os.path.join(script_dir, f'task_job_{job_id}.bat')
+
+    with open(ps_output, 'w', encoding='utf-8') as f:
+        f.write(ps_content)
+
+    with open(bat_output, 'w', encoding='gbk') as f:
+        f.write(bat_content)
+
+    logger.info('已生成 Windows 任务计划脚本: %s, %s', ps_output, bat_output)
+    return ps_output, bat_output
+
+
+def show_scheduler_menu(script_dir=None):
+    if script_dir is None:
+        script_dir = get_script_dir()
+    logger = get_logger()
+
+    while True:
+        jobs = list_schedule_jobs(script_dir)
+
+        print('\n' + '=' * 80)
+        print('⏰ 定时批处理调度管理'.center(70))
+        print('=' * 80)
+
+        if jobs:
+            print(f'{"ID":<14} {"名称":<20} {"类型":<10} {"调度":<20} {"状态":<8} {"目录":<30}')
+            print('-' * 80)
+            for job in jobs:
+                status = '✅启用' if job.get('enabled', True) else '❌禁用'
+                sched_type = job.get('schedule_type', 'cron')
+                if sched_type == 'interval':
+                    sched_display = f"每{job.get('interval_minutes', 60)}分钟"
+                else:
+                    sched_display = job.get('cron_expression', '0 0 * * *')
+                watch_dir = job.get('watch_directory', '')[:28]
+                print(f'{job["job_id"][:12]:<14} {job.get("name", "")[:18]:<20} {sched_type:<10} {sched_display[:18]:<20} {status:<8} {watch_dir:<30}')
+        else:
+            print('暂无调度任务，请先添加任务')
+
+        print('\n请选择操作：')
+        print('  1) ➕ 添加定时任务')
+        print('  2) ✏️  编辑任务')
+        print('  3) 🗑️  删除任务')
+        print('  4) ▶️  启动调度器')
+        print('  5) 🏃  立即运行指定任务')
+        print('  6) 📜  查看任务运行历史')
+        print('  7) 📄  生成系统任务脚本')
+        print('  8) ⚙️  调度器设置')
+        print('  0) 返回主菜单')
+
+        choice = input('\n请输入选项: ').strip()
+
+        if choice == '0':
+            break
+        elif choice == '1':
+            _add_job_interactive(script_dir)
+        elif choice == '2':
+            _edit_job_interactive(script_dir)
+        elif choice == '3':
+            _remove_job_interactive(script_dir)
+        elif choice == '4':
+            start_scheduler(script_dir)
+        elif choice == '5':
+            _run_job_now_interactive(script_dir)
+        elif choice == '6':
+            _show_scheduler_history(script_dir)
+        elif choice == '7':
+            _generate_system_task_script(script_dir)
+        elif choice == '8':
+            _scheduler_settings_menu(script_dir)
+        else:
+            print('无效选项')
+            input('按回车继续...')
+
+
+def _add_job_interactive(script_dir=None):
+    print('\n--- 添加定时任务 ---')
+
+    name = input('任务名称: ').strip()
+    if not name:
+        print('名称不能为空')
+        input('按回车继续...')
+        return
+
+    watch_directory = input('监控目录路径: ').strip().strip('"').strip("'")
+    if not watch_directory or not os.path.isdir(watch_directory):
+        print('目录不存在')
+        input('按回车继续...')
+        return
+
+    print('\n调度类型:')
+    print('  1) cron 表达式 (推荐)')
+    print('  2) 固定间隔(分钟)')
+    type_choice = input('请选择 (默认1): ').strip()
+
+    job_config = {
+        'name': name,
+        'watch_directory': watch_directory,
+        'enabled': True,
+    }
+
+    if type_choice == '2':
+        interval_input = input('间隔分钟数 (默认60): ').strip()
+        interval = int(interval_input) if interval_input.isdigit() else 60
+        job_config['schedule_type'] = 'interval'
+        job_config['interval_minutes'] = interval
+    else:
+        print('\ncron 表达式格式: 分 时 日 月 周')
+        print('  示例:')
+        print('    0 0 * * *    = 每天 00:00')
+        print('    0 2 * * *    = 每天 02:00')
+        print('    0 */6 * * *  = 每6小时')
+        print('    0 8 * * 1-5  = 周一至周五 08:00')
+        cron_expr = input('请输入 cron 表达式 (默认 0 0 * * *): ').strip() or '0 0 * * *'
+        job_config['schedule_type'] = 'cron'
+        job_config['cron_expression'] = cron_expr
+
+    inc_choice = input('启用增量合并? (Y/n): ').strip().lower()
+    job_config['incremental'] = inc_choice != 'n'
+
+    job_config['description'] = input('任务描述 (可选): ').strip()
+
+    job_id = add_schedule_job(job_config, script_dir)
+    print(f'✅ 任务已添加，ID: {job_id}')
+    input('按回车继续...')
+
+
+def _edit_job_interactive(script_dir=None):
+    jobs = list_schedule_jobs(script_dir)
+    if not jobs:
+        print('暂无任务')
+        input('按回车继续...')
+        return
+
+    job_id = input('请输入要编辑的任务ID: ').strip()
+    job = next((j for j in jobs if j['job_id'] == job_id), None)
+    if not job:
+        print('未找到该任务')
+        input('按回车继续...')
+        return
+
+    print(f'\n当前配置:')
+    print(f'  名称: {job.get("name", "")}')
+    print(f'  目录: {job.get("watch_directory", "")}')
+    print(f'  类型: {job.get("schedule_type", "cron")}')
+    if job.get('schedule_type') == 'interval':
+        print(f'  间隔: {job.get("interval_minutes", 60)} 分钟')
+    else:
+        print(f'  cron: {job.get("cron_expression", "")}')
+    print(f'  增量: {"启用" if job.get("incremental", True) else "禁用"}')
+    print(f'  状态: {"启用" if job.get("enabled", True) else "禁用"}')
+
+    print(f'\n编辑 (留空保持当前值):')
+    updates = {}
+
+    new_name = input(f'新名称 [{job.get("name", "")}]: ').strip()
+    if new_name:
+        updates['name'] = new_name
+
+    new_dir = input(f'新目录 [{job.get("watch_directory", "")}]: ').strip().strip('"').strip("'")
+    if new_dir:
+        if os.path.isdir(new_dir):
+            updates['watch_directory'] = new_dir
+        else:
+            print('目录不存在，跳过')
+
+    new_enabled = input(f'启用? (y/n) [{job.get("enabled", True)}]: ').strip().lower()
+    if new_enabled in ['y', 'n']:
+        updates['enabled'] = new_enabled == 'y'
+
+    new_inc = input(f'增量合并? (y/n) [{job.get("incremental", True)}]: ').strip().lower()
+    if new_inc in ['y', 'n']:
+        updates['incremental'] = new_inc == 'y'
+
+    if updates:
+        update_schedule_job(job_id, updates, script_dir)
+        print('✅ 任务已更新')
+    else:
+        print('未做修改')
+
+    input('按回车继续...')
+
+
+def _remove_job_interactive(script_dir=None):
+    jobs = list_schedule_jobs(script_dir)
+    if not jobs:
+        print('暂无任务')
+        input('按回车继续...')
+        return
+
+    job_id = input('请输入要删除的任务ID: ').strip()
+    job = next((j for j in jobs if j['job_id'] == job_id), None)
+    if not job:
+        print('未找到该任务')
+        input('按回车继续...')
+        return
+
+    confirm = input(f'确认删除任务 [{job.get("name", job_id)}]? (y/N): ').strip().lower()
+    if confirm == 'y':
+        remove_schedule_job(job_id, script_dir)
+        print('✅ 任务已删除')
+    else:
+        print('已取消')
+
+    input('按回车继续...')
+
+
+def _run_job_now_interactive(script_dir=None):
+    jobs = list_schedule_jobs(script_dir)
+    if not jobs:
+        print('暂无任务')
+        input('按回车继续...')
+        return
+
+    job_id = input('请输入要立即运行的任务ID: ').strip()
+    job = next((j for j in jobs if j['job_id'] == job_id), None)
+    if not job:
+        print('未找到该任务')
+        input('按回车继续...')
+        return
+
+    print(f'🚀 立即运行任务: {job.get("name", job_id)}')
+    result = run_scheduled_pipeline(job, script_dir)
+    print(f'\n执行完成，状态: {result["status"]}')
+    print(f'扫描文件: {result.get("files_scanned", 0)} 个')
+    print(f'新增文件: {result.get("files_new", 0)} 个')
+    print(f'处理文件: {result.get("files_processed", 0)} 个')
+    print(f'提取记录: {result.get("records_extracted", 0)} 条')
+    print(f'耗时: {result.get("duration_ms", 0)} ms')
+    if result.get("output_path"):
+        print(f'输出: {result["output_path"]}')
+
+    input('按回车继续...')
+
+
+def _show_scheduler_history(script_dir=None):
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    db_path = get_processed_files_db_path(script_dir)
+    if not os.path.exists(db_path):
+        print('暂无运行历史')
+        input('按回车继续...')
+        return
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM scheduler_runs
+        ORDER BY started_at DESC
+        LIMIT 50
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+
+    print('\n' + '=' * 80)
+    print('📜 调度任务运行历史'.center(70))
+    print('=' * 80)
+    print(f'{"运行ID":<14} {"任务":<18} {"开始时间":<20} {"状态":<10} {"文件":<8} {"记录":<8}')
+    print('-' * 80)
+
+    for row in rows:
+        run_id = row['run_id'][:12]
+        job_name = row['job_name'][:16]
+        started = row['started_at'][:19]
+        status_sym = _get_status_symbol(row['status'])
+        files_new = row['files_new'] or 0
+        records = row['records_extracted'] or 0
+        print(f'{run_id:<14} {job_name:<18} {started:<20} {status_sym} {row["status"]:<8} {files_new:<8} {records:<8}')
+
+    if not rows:
+        print('暂无运行记录')
+
+    input('\n按回车继续...')
+
+
+def _generate_system_task_script(script_dir=None):
+    jobs = list_schedule_jobs(script_dir)
+    if not jobs:
+        print('暂无任务')
+        input('按回车继续...')
+        return
+
+    job_id = input('请输入任务ID: ').strip()
+    job = next((j for j in jobs if j['job_id'] == job_id), None)
+    if not job:
+        print('未找到该任务')
+        input('按回车继续...')
+        return
+
+    script_path = os.path.abspath(__file__)
+
+    print('\n选择目标系统:')
+    print('  1) Linux/macOS (cron)')
+    print('  2) Windows (任务计划)')
+    sys_choice = input('请选择 (默认1): ').strip()
+
+    if sys_choice == '2':
+        ps_output, bat_output = generate_windows_task_script(job, script_path, script_dir)
+        print(f'\n✅ 已生成 Windows 任务计划脚本:')
+        print(f'  PowerShell: {ps_output}')
+        print(f'  批处理: {bat_output}')
+    else:
+        output_path, cron_line = generate_cron_script(job, script_path, script_dir)
+        print(f'\n✅ 已生成 cron 脚本: {output_path}')
+        print(f'\n手动添加到 crontab:')
+        print(f'  {cron_line}')
+
+    input('按回车继续...')
+
+
+def _scheduler_settings_menu(script_dir=None):
+    config = load_scheduler_config(script_dir)
+    settings = config.get('settings', {})
+
+    while True:
+        print('\n--- 调度器设置 ---')
+        print(f'  1) 告警通知: {"启用" if settings.get("enable_alerts", True) else "禁用"}')
+        print(f'  2) 最大并发任务数: {settings.get("max_concurrent_jobs", 1)}')
+        print(f'  3) 检查间隔(秒): {settings.get("check_interval_seconds", 30)}')
+        print(f'  4) 日志级别: {settings.get("log_level", "INFO")}')
+        print('  0) 返回')
+
+        choice = input('\n请选择: ').strip()
+
+        if choice == '0':
+            break
+        elif choice == '1':
+            settings['enable_alerts'] = not settings.get('enable_alerts', True)
+        elif choice == '2':
+            val = input('最大并发任务数: ').strip()
+            if val.isdigit():
+                settings['max_concurrent_jobs'] = int(val)
+        elif choice == '3':
+            val = input('检查间隔(秒): ').strip()
+            if val.isdigit():
+                settings['check_interval_seconds'] = int(val)
+        elif choice == '4':
+            level = input('日志级别 (DEBUG/INFO/WARNING/ERROR): ').strip().upper()
+            if level in ['DEBUG', 'INFO', 'WARNING', 'ERROR']:
+                settings['log_level'] = level
+
+        config['settings'] = settings
+        save_scheduler_config(config, script_dir)
+        print('✅ 设置已保存')
+
+
+def run_scheduler_flow(script_dir):
+    logger = get_logger()
+    logger.info('========== 定时调度管理启动 ==========')
+    init_default_alert_rules(script_dir)
+    init_processed_files_db(get_processed_files_db_path(script_dir))
+    show_scheduler_menu(script_dir)
+    logger.info('========== 定时调度管理关闭 ==========')
+
+
+def parse_args_and_run():
+    import argparse
+
+    parser = argparse.ArgumentParser(description='银行流水检验工具')
+    parser.add_argument('--scheduler', action='store_true', help='启动定时调度器')
+    parser.add_argument('--scheduler-menu', action='store_true', help='打开调度管理菜单')
+    parser.add_argument('--run-job', type=str, metavar='JOB_ID', help='立即运行指定ID的定时任务')
+    parser.add_argument('--add-job', action='store_true', help='交互式添加定时任务')
+    parser.add_argument('--list-jobs', action='store_true', help='列出所有定时任务')
+    parser.add_argument('--watch-dir', type=str, metavar='DIR', help='单次运行: 监控目录路径')
+    parser.add_argument('--once', action='store_true', help='单次运行后退出(配合--watch-dir使用)')
+    parser.add_argument('--interval', type=int, metavar='MINUTES', help='单次运行模式下的间隔分钟数')
+    parser.add_argument('--no-incremental', action='store_true', help='禁用增量合并，使用全量覆盖')
+
+    args = parser.parse_args()
+
+    script_dir = get_script_dir()
+    setup_logging()
+    logger = get_logger()
+
+    init_audit_db(get_audit_db_path(script_dir))
+    init_default_alert_rules(script_dir)
+
+    if args.list_jobs:
+        jobs = list_schedule_jobs(script_dir)
+        print(f'定时任务列表 (共 {len(jobs)} 个):')
+        for job in jobs:
+            status = '启用' if job.get('enabled', True) else '禁用'
+            print(f'  [{job["job_id"]}] {job.get("name", "")} - {status}')
+            print(f'    目录: {job.get("watch_directory", "")}')
+            if job.get('schedule_type') == 'interval':
+                print(f'    调度: 每 {job.get("interval_minutes", 60)} 分钟')
+            else:
+                print(f'    调度: {job.get("cron_expression", "")}')
+        return True
+
+    if args.add_job:
+        _add_job_interactive(script_dir)
+        return True
+
+    if args.run_job:
+        jobs = list_schedule_jobs(script_dir)
+        job = next((j for j in jobs if j['job_id'] == args.run_job), None)
+        if not job:
+            logger.error('未找到任务ID: %s', args.run_job)
+            return True
+        run_scheduled_pipeline(job, script_dir)
+        return True
+
+    if args.watch_dir:
+        watch_dir = os.path.abspath(args.watch_dir)
+        if not os.path.isdir(watch_dir):
+            logger.error('目录不存在: %s', watch_dir)
+            return True
+
+        job_config = {
+            'job_id': 'ONETIME',
+            'name': '单次运行任务',
+            'watch_directory': watch_dir,
+            'incremental': not args.no_incremental,
+            'schedule_type': 'interval',
+            'interval_minutes': args.interval or 60,
+        }
+
+        if args.once:
+            logger.info('单次运行模式，目录: %s', watch_dir)
+            run_scheduled_pipeline(job_config, script_dir)
+            return True
+        else:
+            if not args.interval:
+                logger.warning('未指定--interval，将使用默认60分钟间隔')
+
+            logger.info('监控模式启动，目录: %s，间隔: %d 分钟，Ctrl+C 停止',
+                        watch_dir, job_config['interval_minutes'])
+
+            scheduler, scheduler_type, CronTrigger, IntervalTrigger = get_scheduler()
+
+            if scheduler_type == 'apscheduler':
+                trigger = IntervalTrigger(minutes=job_config['interval_minutes'])
+                scheduler.add_job(
+                    run_scheduled_pipeline,
+                    trigger=trigger,
+                    args=[job_config, script_dir],
+                    id='watch_job',
+                    name='监控目录任务',
+                )
+            else:
+                class SimpleIntervalTrigger:
+                    def __init__(self, minutes):
+                        self._minutes = minutes
+                    def get_interval(self):
+                        from datetime import timedelta
+                        return timedelta(minutes=self._minutes)
+                scheduler.add_job(
+                    run_scheduled_pipeline,
+                    trigger=SimpleIntervalTrigger(job_config['interval_minutes']),
+                    args=[job_config, script_dir],
+                    id='watch_job',
+                    name='监控目录任务',
+                )
+
+            try:
+                run_scheduled_pipeline(job_config, script_dir)
+                scheduler.start()
+            except (KeyboardInterrupt, SystemExit):
+                scheduler.shutdown()
+            return True
+
+    if args.scheduler:
+        start_scheduler(script_dir)
+        return True
+
+    if args.scheduler_menu:
+        run_scheduler_flow(script_dir)
+        return True
+
+    return None
+
+
 def main():
+    result = parse_args_and_run()
+    if result is not None:
+        return
+
     setup_logging()
     logger = get_logger()
     logger.info('========== 银行流水检验工具启动 ==========')
@@ -3869,6 +5105,8 @@ def main():
         run_diff_flow(script_dir)
     elif mode == 'monitor':
         run_monitor_flow(script_dir)
+    elif mode == 'scheduler':
+        run_scheduler_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 

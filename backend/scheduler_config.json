@@ -1,0 +1,9 @@
+{
+  "jobs": [],
+  "settings": {
+    "max_concurrent_jobs": 1,
+    "check_interval_seconds": 30,
+    "enable_alerts": true,
+    "log_level": "INFO"
+  }
+}
