@@ -18,9 +18,13 @@ import shutil
 import uuid
 import logging
 import tempfile
+import sqlite3
+import json
+import getpass
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 
 import openpyxl
 import pandas as pd
@@ -1083,12 +1087,661 @@ def run_diff_flow(script_dir):
         logger.error('对比失败: %s', e)
 
 
+# ──────────────────────────────────────────────
+# 多用户与操作审计模块
+# ──────────────────────────────────────────────
+
+AUDIT_DB_FILENAME = 'audit_log.db'
+
+
+def get_audit_db_path(script_dir=None):
+    """获取审计数据库文件路径"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    return os.path.join(script_dir, AUDIT_DB_FILENAME)
+
+
+def init_audit_db(db_path=None):
+    """
+    初始化审计数据库，创建所需表结构。
+    包含三张核心表：
+    - users: 用户信息表
+    - audit_logs: 操作审计主表
+    - config_changes: 配置变更历史表
+    """
+    if db_path is None:
+        db_path = get_audit_db_path()
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            display_name TEXT,
+            role TEXT DEFAULT 'operator',
+            created_at TEXT NOT NULL,
+            last_login TEXT,
+            is_active INTEGER DEFAULT 1
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id TEXT NOT NULL UNIQUE,
+            user_id INTEGER,
+            username TEXT NOT NULL,
+            operation_type TEXT NOT NULL,
+            input_directory TEXT,
+            output_path TEXT,
+            processed_files INTEGER DEFAULT 0,
+            extracted_records INTEGER DEFAULT 0,
+            unprocessed_files INTEGER DEFAULT 0,
+            error_files INTEGER DEFAULT 0,
+            lookup_file TEXT,
+            lookup_missing INTEGER DEFAULT 0,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            config_snapshot TEXT,
+            input_files_hash TEXT,
+            output_hash TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            duration_ms INTEGER,
+            client_ip TEXT,
+            client_hostname TEXT,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS config_changes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            change_id TEXT NOT NULL UNIQUE,
+            user_id INTEGER,
+            username TEXT NOT NULL,
+            config_type TEXT NOT NULL,
+            config_name TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            old_hash TEXT,
+            new_hash TEXT,
+            change_reason TEXT,
+            changed_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_logs_username ON audit_logs(username)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_logs_operation ON audit_logs(operation_type)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_logs_started_at ON audit_logs(started_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_config_changes_config ON config_changes(config_type, config_name)')
+
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.info('审计数据库初始化完成: %s', db_path)
+
+
+def get_current_user():
+    """
+    获取当前操作用户。
+    优先级：环境变量 BANKCHECK_USER > 系统登录用户 > 'unknown'
+    """
+    env_user = os.environ.get('BANKCHECK_USER', '').strip()
+    if env_user:
+        return env_user
+    try:
+        return getpass.getuser()
+    except Exception:
+        return 'unknown'
+
+
+def get_client_info():
+    """获取客户端信息（主机名、IP等）"""
+    import socket
+    hostname = ''
+    ip = ''
+    try:
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+    except Exception:
+        pass
+    return {'hostname': hostname, 'ip': ip}
+
+
+def _ensure_user(username, db_path=None):
+    """确保用户存在于数据库中，不存在则创建"""
+    if db_path is None:
+        db_path = get_audit_db_path()
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT id FROM users WHERE username = ?', (username,))
+    row = cursor.fetchone()
+
+    if row:
+        user_id = row[0]
+        cursor.execute(
+            'UPDATE users SET last_login = ? WHERE id = ?',
+            (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), user_id)
+        )
+    else:
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute(
+            'INSERT INTO users (username, display_name, created_at, last_login) VALUES (?, ?, ?, ?)',
+            (username, username, now, now)
+        )
+        user_id = cursor.lastrowid
+
+    conn.commit()
+    conn.close()
+    return user_id
+
+
+def compute_file_hash(filepath):
+    """计算文件的 SHA256 哈希值，用于完整性校验"""
+    if not filepath or not os.path.exists(filepath):
+        return None
+    sha256 = hashlib.sha256()
+    try:
+        with open(filepath, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+    except Exception:
+        return None
+
+
+def compute_config_snapshot(script_dir):
+    """
+    生成当前配置快照，包含：
+    - 支持的银行列表
+    - 银行处理器配置
+    - 查找表文件信息
+    """
+    lookup_file = find_lookup_file(script_dir)
+    snapshot = {
+        'supported_banks': BANK_PREFIXES,
+        'bank_processors': list(BANK_PROCESSORS.keys()),
+        'lookup_file': lookup_file,
+        'lookup_file_hash': compute_file_hash(lookup_file) if lookup_file else None,
+        'diff_columns': DIFF_COLUMNS,
+        'amount_fields': AMOUNT_FIELDS,
+        'timestamp': datetime.now().isoformat(),
+    }
+    return json.dumps(snapshot, ensure_ascii=False)
+
+
+@dataclass
+class AuditRecord:
+    """审计记录数据类"""
+    audit_id: str
+    username: str
+    operation_type: str
+    input_directory: Optional[str] = None
+    output_path: Optional[str] = None
+    processed_files: int = 0
+    extracted_records: int = 0
+    unprocessed_files: int = 0
+    error_files: int = 0
+    lookup_file: Optional[str] = None
+    lookup_missing: bool = False
+    status: str = 'running'
+    error_message: Optional[str] = None
+    config_snapshot: Optional[str] = None
+    input_files_hash: Optional[str] = None
+    output_hash: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    duration_ms: Optional[int] = None
+    client_ip: Optional[str] = None
+    client_hostname: Optional[str] = None
+
+
+class AuditLogger:
+    """
+    审计日志核心类，提供上下文管理器支持。
+    使用方式：
+        with AuditLogger('pipeline', script_dir) as audit:
+            audit.record_input(folder)
+            ... 执行操作 ...
+            audit.record_result(result)
+    """
+
+    def __init__(self, operation_type, script_dir=None, username=None):
+        self.script_dir = script_dir or get_script_dir()
+        self.db_path = get_audit_db_path(self.script_dir)
+        init_audit_db(self.db_path)
+
+        self.username = username or get_current_user()
+        self.user_id = _ensure_user(self.username, self.db_path)
+
+        self.audit_id = f"AUD{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
+        self.operation_type = operation_type
+
+        client_info = get_client_info()
+
+        self.record = AuditRecord(
+            audit_id=self.audit_id,
+            username=self.username,
+            operation_type=operation_type,
+            status='running',
+            started_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
+            client_ip=client_info.get('ip'),
+            client_hostname=client_info.get('hostname'),
+            config_snapshot=compute_config_snapshot(self.script_dir),
+        )
+
+        self.logger = get_logger()
+        self._start_time = datetime.now()
+        self._save_record()
+        self.logger.info('审计记录已创建 [%s] 操作: %s, 用户: %s',
+                         self.audit_id, operation_type, self.username)
+
+    def _save_record(self):
+        """保存审计记录到数据库"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT id FROM audit_logs WHERE audit_id = ?', (self.audit_id,))
+        exists = cursor.fetchone()
+
+        if exists:
+            cursor.execute('''
+                UPDATE audit_logs SET
+                    input_directory = ?, output_path = ?,
+                    processed_files = ?, extracted_records = ?,
+                    unprocessed_files = ?, error_files = ?,
+                    lookup_file = ?, lookup_missing = ?,
+                    status = ?, error_message = ?,
+                    config_snapshot = ?, input_files_hash = ?,
+                    output_hash = ?, started_at = ?,
+                    completed_at = ?, duration_ms = ?,
+                    client_ip = ?, client_hostname = ?
+                WHERE audit_id = ?
+            ''', (
+                self.record.input_directory, self.record.output_path,
+                self.record.processed_files, self.record.extracted_records,
+                self.record.unprocessed_files, self.record.error_files,
+                self.record.lookup_file, 1 if self.record.lookup_missing else 0,
+                self.record.status, self.record.error_message,
+                self.record.config_snapshot, self.record.input_files_hash,
+                self.record.output_hash, self.record.started_at,
+                self.record.completed_at, self.record.duration_ms,
+                self.record.client_ip, self.record.client_hostname,
+                self.audit_id,
+            ))
+        else:
+            cursor.execute('''
+                INSERT INTO audit_logs (
+                    audit_id, user_id, username, operation_type,
+                    input_directory, output_path,
+                    processed_files, extracted_records,
+                    unprocessed_files, error_files,
+                    lookup_file, lookup_missing,
+                    status, error_message,
+                    config_snapshot, input_files_hash,
+                    output_hash, started_at,
+                    completed_at, duration_ms,
+                    client_ip, client_hostname
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                self.audit_id, self.user_id, self.username, self.operation_type,
+                self.record.input_directory, self.record.output_path,
+                self.record.processed_files, self.record.extracted_records,
+                self.record.unprocessed_files, self.record.error_files,
+                self.record.lookup_file, 1 if self.record.lookup_missing else 0,
+                self.record.status, self.record.error_message,
+                self.record.config_snapshot, self.record.input_files_hash,
+                self.record.output_hash, self.record.started_at,
+                self.record.completed_at, self.record.duration_ms,
+                self.record.client_ip, self.record.client_hostname,
+            ))
+
+        conn.commit()
+        conn.close()
+
+    def record_input(self, input_directory, lookup_file=None):
+        """记录输入信息"""
+        self.record.input_directory = input_directory
+        if lookup_file:
+            self.record.lookup_file = lookup_file
+        elif self.record.input_directory:
+            self.record.lookup_file = find_lookup_file(self.script_dir)
+        self._save_record()
+        self.logger.debug('审计记录 [%s] 已记录输入目录: %s', self.audit_id, input_directory)
+
+    def record_result(self, result):
+        """
+        根据 ProcessingResult 或 DiffResult 记录处理结果
+        """
+        if isinstance(result, ProcessingResult):
+            self.record.processed_files = len(result.processed_files)
+            self.record.extracted_records = len(result.all_rows)
+            self.record.unprocessed_files = len(result.unprocessed_files)
+            self.record.error_files = len(result.error_files)
+            self.record.output_path = result.output_path
+            self.record.lookup_missing = result.lookup_missing
+            if result.output_path:
+                self.record.output_hash = compute_file_hash(result.output_path)
+        elif isinstance(result, DiffResult):
+            self.record.extracted_records = result.added_count + result.deleted_count + result.changed_count
+            self.record.output_path = result.output_path
+            if result.output_path:
+                self.record.output_hash = compute_file_hash(result.output_path)
+
+        self._save_record()
+
+    def record_success(self):
+        """标记操作成功完成"""
+        self.record.status = 'success'
+        self.record.completed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+        duration = (datetime.now() - self._start_time).total_seconds() * 1000
+        self.record.duration_ms = int(duration)
+        self._save_record()
+        self.logger.info('审计记录 [%s] 操作成功完成，耗时 %d ms', self.audit_id, self.record.duration_ms)
+
+    def record_failure(self, error_message):
+        """标记操作失败"""
+        self.record.status = 'failed'
+        self.record.error_message = str(error_message)
+        self.record.completed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+        duration = (datetime.now() - self._start_time).total_seconds() * 1000
+        self.record.duration_ms = int(duration)
+        self._save_record()
+        self.logger.error('审计记录 [%s] 操作失败: %s', self.audit_id, error_message)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self.record_failure(f'{exc_type.__name__}: {exc_val}')
+        elif self.record.status == 'running':
+            self.record_success()
+        return False
+
+
+def record_config_change(config_type, config_name, old_value, new_value,
+                         change_reason='', script_dir=None, username=None):
+    """
+    记录配置变更历史。
+    适用于查找表更新、银行配置调整等场景。
+    """
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+    init_audit_db(db_path)
+
+    username = username or get_current_user()
+    user_id = _ensure_user(username, db_path)
+
+    change_id = f"CFG{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
+    changed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    old_hash = hashlib.sha256(str(old_value or '').encode('utf-8')).hexdigest()
+    new_hash = hashlib.sha256(str(new_value or '').encode('utf-8')).hexdigest()
+
+    old_str = json.dumps(old_value, ensure_ascii=False) if isinstance(old_value, (dict, list)) else str(old_value)
+    new_str = json.dumps(new_value, ensure_ascii=False) if isinstance(new_value, (dict, list)) else str(new_value)
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO config_changes (
+            change_id, user_id, username, config_type, config_name,
+            old_value, new_value, old_hash, new_hash, change_reason, changed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        change_id, user_id, username, config_type, config_name,
+        old_str, new_str, old_hash, new_hash, change_reason, changed_at
+    ))
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.info('配置变更已记录 [%s] %s.%s 由 %s 修改',
+                change_id, config_type, config_name, username)
+
+    return change_id
+
+
+def query_audit_logs(script_dir=None, username=None, operation_type=None,
+                     start_date=None, end_date=None, status=None, limit=100):
+    """
+    查询审计日志记录。
+
+    Args:
+        script_dir: 脚本目录
+        username: 按用户名过滤
+        operation_type: 按操作类型过滤
+        start_date: 开始日期 (YYYY-MM-DD)
+        end_date: 结束日期 (YYYY-MM-DD)
+        status: 按状态过滤
+        limit: 返回记录数限制
+
+    Returns:
+        List[Dict] 审计记录列表
+    """
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    if not os.path.exists(db_path):
+        return []
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = 'SELECT * FROM audit_logs WHERE 1=1'
+    params = []
+
+    if username:
+        query += ' AND username = ?'
+        params.append(username)
+    if operation_type:
+        query += ' AND operation_type = ?'
+        params.append(operation_type)
+    if start_date:
+        query += ' AND date(started_at) >= date(?)'
+        params.append(start_date)
+    if end_date:
+        query += ' AND date(started_at) <= date(?)'
+        params.append(end_date)
+    if status:
+        query += ' AND status = ?'
+        params.append(status)
+
+    query += ' ORDER BY started_at DESC LIMIT ?'
+    params.append(limit)
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def query_config_changes(script_dir=None, config_type=None, config_name=None,
+                         username=None, limit=100):
+    """
+    查询配置变更历史。
+    """
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    if not os.path.exists(db_path):
+        return []
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = 'SELECT * FROM config_changes WHERE 1=1'
+    params = []
+
+    if config_type:
+        query += ' AND config_type = ?'
+        params.append(config_type)
+    if config_name:
+        query += ' AND config_name = ?'
+        params.append(config_name)
+    if username:
+        query += ' AND username = ?'
+        params.append(username)
+
+    query += ' ORDER BY changed_at DESC LIMIT ?'
+    params.append(limit)
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def export_audit_logs(output_path, script_dir=None, **query_kwargs):
+    """
+    导出审计日志到 Excel 文件。
+    """
+    records = query_audit_logs(script_dir=script_dir, **query_kwargs)
+    if not records:
+        return None
+
+    df = pd.DataFrame(records)
+    columns_order = [
+        'audit_id', 'username', 'operation_type', 'status',
+        'input_directory', 'output_path',
+        'processed_files', 'extracted_records',
+        'unprocessed_files', 'error_files',
+        'lookup_file', 'lookup_missing',
+        'started_at', 'completed_at', 'duration_ms',
+        'client_ip', 'client_hostname',
+        'error_message', 'config_snapshot',
+        'input_files_hash', 'output_hash', 'id'
+    ]
+    for col in columns_order:
+        if col not in df.columns:
+            df[col] = None
+    df = df[columns_order]
+
+    df.to_excel(output_path, index=False, engine='openpyxl')
+    logger = get_logger()
+    logger.info('审计日志已导出到: %s (共 %d 条记录)', output_path, len(records))
+    return output_path
+
+
+def export_config_changes(output_path, script_dir=None, **query_kwargs):
+    """
+    导出配置变更历史到 Excel 文件。
+    """
+    records = query_config_changes(script_dir=script_dir, **query_kwargs)
+    if not records:
+        return None
+
+    df = pd.DataFrame(records)
+    columns_order = [
+        'change_id', 'username', 'config_type', 'config_name',
+        'old_value', 'new_value', 'change_reason',
+        'old_hash', 'new_hash', 'changed_at', 'user_id', 'id'
+    ]
+    for col in columns_order:
+        if col not in df.columns:
+            df[col] = None
+    df = df[columns_order]
+
+    df.to_excel(output_path, index=False, engine='openpyxl')
+    logger = get_logger()
+    logger.info('配置变更历史已导出到: %s (共 %d 条记录)', output_path, len(records))
+    return output_path
+
+
+def run_pipeline_flow(script_dir):
+    """主流程：处理银行流水文件夹，输出总表"""
+    logger = get_logger()
+
+    folder = ask_directory('请选择银行流水文件夹')
+    if not folder:
+        show_info('提示', '未选择文件夹，程序退出。')
+        logger.info('用户未选择文件夹，程序退出')
+        return
+
+    logger.info('用户选择文件夹: %s', folder)
+
+    with AuditLogger('pipeline', script_dir) as audit:
+        audit.record_input(folder)
+
+        result = run_pipeline(folder, script_dir)
+        audit.record_result(result)
+
+        if result.lookup_missing:
+            show_warning(
+                '警告',
+                '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
+                '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
+            )
+
+        msg = format_result_message(result)
+        msg += f'\n\n审计编号: {audit.audit_id}'
+        show_info('完成' if result.all_rows else '提示', msg)
+
+
+def run_diff_flow(script_dir):
+    """变更对比流程：选择两次总表，输出对比结果"""
+    logger = get_logger()
+
+    old_path = ask_file('请选择【旧批次】银行流水总表')
+    if not old_path:
+        show_info('提示', '未选择旧批次文件，程序退出。')
+        logger.info('用户未选择旧批次文件，程序退出')
+        return
+    logger.info('用户选择旧批次文件: %s', old_path)
+
+    new_path = ask_file('请选择【新批次】银行流水总表')
+    if not new_path:
+        show_info('提示', '未选择新批次文件，程序退出。')
+        logger.info('用户未选择新批次文件，程序退出')
+        return
+    logger.info('用户选择新批次文件: %s', new_path)
+
+    with AuditLogger('diff', script_dir) as audit:
+        audit.record_input(f'旧:{old_path} | 新:{new_path}')
+
+        try:
+            diff_result = run_diff(old_path, new_path, script_dir)
+            audit.record_result(diff_result)
+
+            msg = format_diff_message(diff_result)
+
+            has_changes = (
+                diff_result.added_count > 0
+                or diff_result.deleted_count > 0
+                or diff_result.changed_count > 0
+            )
+            title = '对比完成（发现差异' if has_changes else '对比完成（无差异）'
+            msg += f'\n\n审计编号: {audit.audit_id}'
+            show_info(title, msg)
+        except FileNotFoundError as e:
+            show_warning('错误', str(e))
+            logger.error('对比失败: %s', e)
+
+
 def main():
     setup_logging()
     logger = get_logger()
     logger.info('========== 银行流水检验工具启动 ==========')
 
     script_dir = get_script_dir()
+
+    init_audit_db(get_audit_db_path(script_dir))
+    logger.info('当前操作用户: %s', get_current_user())
 
     mode = ask_mode()
     if mode is None:
