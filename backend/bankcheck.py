@@ -3064,10 +3064,12 @@ def render_monitor_dashboard(script_dir=None):
         print('┌' + '─' * 78 + '┐')
         print('│  📅 每日运行趋势' + ' ' * 63 + '│')
         print('├' + '─' * 78 + '┤')
-        print(f'│  {"日期":<12} {"次数":<8} {"成功":<8} {"失败":<8} {"成功率":<10} {"平均耗时":<12} {"处理量":<8} │')
+        print(f'│  {"日期":<12} {"次数":<6} {"成功":<6} {"失败":<6} {"成功率":<9} {"处理":<6} {"错误":<6} {"未识别":<8} {"耗时":<10} │')
         print('│' + '─' * 78 + '│')
         for day in daily_trend[:7]:
-            print(f'│  {day["run_date"]:<12} {day["total_runs"]:<8} {day["success_count"]:<8} {day["failed_count"]:<8} {_format_rate(day["success_rate"]):<10} {_format_duration(day["avg_duration_ms"]):<12} {day["total_processed_files"]:<8} │')
+            err = day.get('total_error_files', 0) or 0
+            unproc = day.get('total_unprocessed_files', 0) or 0
+            print(f'│  {day["run_date"]:<12} {day["total_runs"]:<6} {day["success_count"]:<6} {day["failed_count"]:<6} {_format_rate(day["success_rate"]):<9} {day["total_processed_files"]:<6} {err:<6} {unproc:<8} {_format_duration(day["avg_duration_ms"]):<10} │')
         print('└' + '─' * 78 + '┘')
         print()
 
@@ -3184,7 +3186,7 @@ def _show_run_history(script_dir=None):
     print('\n' + '=' * 80)
     print(f'📊 运行历史记录 (最近{days}天)'.center(70))
     print('=' * 80)
-    print(f'{"审计ID":<14} {"开始时间":<20} {"类型":<10} {"状态":<8} {"耗时":<12} {"文件":<6} {"记录":<8}')
+    print(f'{"审计ID":<14} {"开始时间":<20} {"类型":<10} {"状态":<8} {"耗时":<10} {"处理":<6} {"错误":<6} {"未识别":<8} {"记录":<8}')
     print('-' * 80)
 
     for run in records:
@@ -3194,8 +3196,10 @@ def _show_run_history(script_dir=None):
         op_type = run.get('operation_type', '')[:8]
         duration = _format_duration(run.get('duration_ms'))
         files = run.get('processed_files', 0)
+        err = run.get('error_files', 0)
+        unproc = run.get('unprocessed_files', 0)
         recs = run.get('extracted_records', 0)
-        print(f'{audit_id:<14} {start_time:<20} {op_type:<10} {status_sym} {run["status"]:<6} {duration:<12} {files:<6} {recs:<8}')
+        print(f'{audit_id:<14} {start_time:<20} {op_type:<10} {status_sym} {run["status"]:<6} {duration:<10} {files:<6} {err:<6} {unproc:<8} {recs:<8}')
 
     if daily_trend:
         print('\n' + '=' * 80)
@@ -3208,6 +3212,28 @@ def _show_run_history(script_dir=None):
             bar_len = int((files / max_files) * 40)
             bar = '█' * bar_len
             print(f'{date} | {bar:<40} | {files:>5} 文件')
+
+        print('\n' + '=' * 80)
+        print('🚨 错误文件趋势图 (ASCII)'.center(70))
+        print('=' * 80)
+        max_err = max((d.get('total_error_files', 0) or 0) for d in daily_trend) or 1
+        for day in reversed(daily_trend):
+            date = day['run_date']
+            err = day.get('total_error_files', 0) or 0
+            bar_len = int((err / max_err) * 40) if max_err > 0 else 0
+            bar = '▓' * bar_len
+            print(f'{date} | {bar:<40} | {err:>5} 错误')
+
+        print('\n' + '=' * 80)
+        print('⚠️  未识别文件趋势图 (ASCII)'.center(70))
+        print('=' * 80)
+        max_unproc = max((d.get('total_unprocessed_files', 0) or 0) for d in daily_trend) or 1
+        for day in reversed(daily_trend):
+            date = day['run_date']
+            unproc = day.get('total_unprocessed_files', 0) or 0
+            bar_len = int((unproc / max_unproc) * 40) if max_unproc > 0 else 0
+            bar = '▒' * bar_len
+            print(f'{date} | {bar:<40} | {unproc:>5} 未识别')
 
     input('\n按回车继续...')
 
