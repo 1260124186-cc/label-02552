@@ -36,6 +36,13 @@ except ImportError:
     HAS_DATABASE = False
     db_module = None
 
+try:
+    import batch_manager as batch_module
+    HAS_BATCH_MANAGER = True
+except ImportError:
+    HAS_BATCH_MANAGER = False
+    batch_module = None
+
 # ──────────────────────────────────────────────
 # tkinter 兼容：尝试导入并安全测试，失败则回退命令行模式
 # ──────────────────────────────────────────────
@@ -144,7 +151,8 @@ def cli_askmode():
     print('  5) 财务导出：按用友/金蝶等模板导出凭证或日记账')
     print('  6) 数据库查询：按主体/账号/时间范围查询流水记录')
     print('  7) 数据库统计：查看数据汇总统计信息')
-    choice = input('请输入选项（1-7，直接回车默认为 1）: ').strip()
+    print('  8) 批次管理：查看历史批次与版本回溯')
+    choice = input('请输入选项（1-8，直接回车默认为 1）: ').strip()
     if choice == '2':
         return 'diff'
     elif choice == '3':
@@ -157,6 +165,8 @@ def cli_askmode():
         return 'db_query'
     elif choice == '7':
         return 'db_stats'
+    elif choice == '8':
+        return 'batch_history'
     return 'pipeline'
 
 
@@ -891,7 +901,7 @@ else:
     ask_incremental_mode = cli_ask_incremental_mode
 
 
-def run_pipeline(folder, script_dir, incremental=True):
+def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
     logger = get_logger()
 
     lookup_file = find_lookup_file(script_dir)
@@ -987,7 +997,8 @@ def run_pipeline(folder, script_dir, incremental=True):
     db_duplicates = 0
     if HAS_DATABASE and final_rows:
         try:
-            batch_id = f"BATCH{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            if batch_id is None:
+                batch_id = f"BATCH{datetime.now().strftime('%Y%m%d%H%M%S')}"
             db_inserted, db_duplicates = db_module.persist_transactions(
                 final_rows,
                 batch_id=batch_id,
@@ -4489,10 +4500,23 @@ def run_pipeline_flow(script_dir):
         return
     logger.info('用户选择运行模式: %s', '增量合并' if incremental else '全量覆盖')
 
+    batch_id = None
+    batch_manager = None
+    if HAS_BATCH_MANAGER:
+        try:
+            batch_manager = batch_module.get_batch_manager(script_dir)
+            operator = get_current_user()
+            batch_info = batch_manager.start_batch(input_folder=folder, operator=operator)
+            batch_id = batch_info.batch_id
+            logger.info('批次管理已启用，批次号: %s', batch_id)
+        except Exception as e:
+            logger.error('批次创建失败: %s', e, exc_info=True)
+            batch_manager = None
+
     with AuditLogger('pipeline', script_dir) as audit:
         audit.record_input(folder)
 
-        result = run_pipeline(folder, script_dir, incremental=incremental)
+        result = run_pipeline(folder, script_dir, incremental=incremental, batch_id=batch_id)
         audit.record_result(result)
 
         if result.lookup_missing:
@@ -4506,6 +4530,37 @@ def run_pipeline_flow(script_dir):
         msg += f'\n\n审计编号: {audit.audit_id}'
         if change_result.change_id:
             msg += f'\n配置变更编号: {change_result.change_id}'
+
+        if batch_manager and batch_id:
+            try:
+                log_file = os.path.join(script_dir, 'bankcheck.log')
+                result_data = {
+                    'total_records': len(result.all_rows),
+                    'new_records': result.new_record_count,
+                    'duplicate_records': result.duplicate_record_count,
+                    'processed_files': result.processed_files,
+                    'unprocessed_files': result.unprocessed_files,
+                    'error_files': result.error_files,
+                    'incremental_mode': result.incremental_mode,
+                    'output_folder': folder,
+                    'summary_table_path': result.output_path,
+                    'log_file_path': log_file,
+                    'audit_id': audit.audit_id,
+                }
+                status = 'success' if result.all_rows or result.existing_record_count > 0 else 'warning'
+                if result.error_files:
+                    status = 'warning'
+                batch_manager.finish_batch(batch_id, result_data, status=status)
+                msg += f'\n批次号: {batch_id}'
+                msg += f'\n归档目录: {batch_info.batch_dir}'
+            except Exception as e:
+                logger.error('批次归档失败: %s', e, exc_info=True)
+                if batch_manager:
+                    try:
+                        batch_manager.finish_batch(batch_id, {}, status='failed', error_message=str(e))
+                    except Exception:
+                        pass
+
         show_info('完成' if result.all_rows else '提示', msg)
 
 
@@ -5848,6 +5903,8 @@ def main():
         run_db_query_flow(script_dir)
     elif mode == 'db_stats':
         run_db_stats_flow(script_dir)
+    elif mode == 'batch_history':
+        run_batch_history_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
@@ -6078,6 +6135,244 @@ def run_db_stats_flow(script_dir):
     except Exception as e:
         show_warning('统计失败', f'获取统计信息失败：{e}')
         logger.error('获取数据库统计失败: %s', e, exc_info=True)
+
+
+# ──────────────────────────────────────────────
+# 历史批次与版本管理流程
+# ──────────────────────────────────────────────
+
+def run_batch_history_flow(script_dir):
+    """批次管理流程：查看历史批次与版本回溯"""
+    logger = get_logger()
+
+    if not HAS_BATCH_MANAGER:
+        show_warning('错误', '批次管理模块不可用，请检查 batch_manager.py 文件是否存在。')
+        logger.error('批次管理模块不可用')
+        return
+
+    try:
+        batch_manager = batch_module.get_batch_manager(script_dir)
+    except Exception as e:
+        show_warning('错误', f'批次管理器初始化失败：{e}')
+        logger.error('批次管理器初始化失败: %s', e, exc_info=True)
+        return
+
+    logger.info('========== 批次管理面板启动 ==========')
+
+    while True:
+        stats = batch_manager.get_statistics()
+
+        print('\n' + '=' * 60)
+        print('批次管理面板')
+        print('=' * 60)
+        print(f'总批次数: {stats["total_batches"]}')
+        print(f'  ├─ 成功: {stats["success_batches"]}')
+        print(f'  ├─ 失败: {stats["failed_batches"]}')
+        print(f'  └─ 运行中: {stats["running_batches"]}')
+        print(f'累计处理记录: {stats["total_records"]:,} 条')
+        print(f'累计新增记录: {stats["total_new_records"]:,} 条')
+        print('-' * 60)
+        print('  1) 查看最近批次列表')
+        print('  2) 按条件查询批次')
+        print('  3) 查看批次详情')
+        print('  4) 恢复批次文件')
+        print('  5) 删除批次')
+        print('  0) 返回主菜单')
+        print('-' * 60)
+
+        choice = input('请选择操作（0-5）: ').strip()
+
+        if choice == '0':
+            break
+        elif choice == '1':
+            _show_recent_batches(batch_manager)
+        elif choice == '2':
+            _query_batches(batch_manager)
+        elif choice == '3':
+            _show_batch_detail(batch_manager)
+        elif choice == '4':
+            _restore_batch(batch_manager)
+        elif choice == '5':
+            _delete_batch(batch_manager)
+        else:
+            print('无效选项，请重新选择。')
+
+    logger.info('========== 批次管理面板关闭 ==========')
+
+
+def _display_batch_list(batches):
+    if not batches:
+        print('\n未找到符合条件的批次。')
+        return
+
+    print('\n' + '-' * 100)
+    print(f'{"序号":<5}{"批次号":<24}{"状态":<10}{"开始时间":<20}'
+          f'{"记录数":<10}{"新增":<10}{"模式":<8}')
+    print('-' * 100)
+
+    for i, b in enumerate(batches, 1):
+        mode = '增量' if b.incremental_mode else '全量'
+        status = f'{b.status}'
+        if status == 'success':
+            status = '✅ 成功'
+        elif status == 'warning':
+            status = '⚠️ 警告'
+        elif status == 'failed':
+            status = '❌ 失败'
+        elif status == 'running':
+            status = '⏳ 运行中'
+        print(f'{i:<5}{b.batch_id:<24}{status:<10}{b.start_time:<20}'
+              f'{b.total_records:<10,}{b.new_records:<10,}{mode:<8}')
+    print('-' * 100)
+
+
+def _show_recent_batches(batch_manager):
+    limit_str = input('请输入显示数量（默认 20）: ').strip()
+    limit = int(limit_str) if limit_str.isdigit() else 20
+
+    batches = batch_manager.query_batches(limit=limit)
+    _display_batch_list(batches)
+
+
+def _query_batches(batch_manager):
+    print('\n查询条件（直接回车表示不使用该条件）:')
+    start_date = input('开始日期（YYYY-MM-DD）: ').strip() or None
+    end_date = input('结束日期（YYYY-MM-DD）: ').strip() or None
+    status = input('状态（success/warning/failed/running）: ').strip() or None
+    operator = input('操作员: ').strip() or None
+    min_records_str = input('最小记录数: ').strip()
+    min_records = int(min_records_str) if min_records_str.isdigit() else None
+
+    batches = batch_manager.query_batches(
+        start_date=start_date,
+        end_date=end_date,
+        status=status,
+        operator=operator,
+        min_records=min_records,
+        limit=100,
+    )
+    _display_batch_list(batches)
+
+
+def _show_batch_detail(batch_manager):
+    batch_id = input('请输入批次号: ').strip()
+    if not batch_id:
+        print('未输入批次号。')
+        return
+
+    detail = batch_manager.get_batch_detail(batch_id)
+    if not detail:
+        print(f'\n批次不存在: {batch_id}')
+        return
+
+    info = detail['batch_info']
+    metadata = detail['metadata']
+    files = detail['files']
+
+    status = info.get('status', '')
+    if status == 'success':
+        status_icon = '✅'
+    elif status == 'warning':
+        status_icon = '⚠️'
+    elif status == 'failed':
+        status_icon = '❌'
+    else:
+        status_icon = '⏳'
+
+    mode = '增量合并' if info.get('incremental_mode') else '全量覆盖'
+
+    print('\n' + '=' * 60)
+    print(f'批次详情 - {batch_id}')
+    print('=' * 60)
+    print(f'状态: {status_icon} {status}')
+    print(f'开始时间: {info.get("start_time", "")}')
+    print(f'结束时间: {info.get("end_time", "")}')
+    print(f'操作员: {info.get("operator", "未指定")}')
+    print(f'输入文件夹: {info.get("input_folder", "")}')
+    print(f'运行模式: {mode}')
+    print('-' * 40)
+    print('📊 处理统计:')
+    print(f'  总记录数: {info.get("total_records", 0):,}')
+    print(f'  新增记录: {info.get("new_records", 0):,}')
+    print(f'  重复记录: {info.get("duplicate_records", 0):,}')
+    print(f'  处理文件: {info.get("processed_files", 0)} 个')
+    print(f'  未识别文件: {info.get("unprocessed_files", 0)} 个')
+    print(f'  出错文件: {info.get("error_files", 0)} 个')
+    print('-' * 40)
+
+    processed_files = metadata.get('processed_files', [])
+    if processed_files:
+        print('📄 已处理文件:')
+        for f in processed_files:
+            print(f'  - {os.path.basename(f)}')
+
+    unprocessed_files = metadata.get('unprocessed_files', [])
+    if unprocessed_files:
+        print('\n⚠️  未识别文件:')
+        for f in unprocessed_files:
+            print(f'  - {os.path.basename(f)}')
+
+    error_files = metadata.get('error_files', [])
+    if error_files:
+        print('\n❌ 出错文件:')
+        for f, err in error_files:
+            print(f'  - {os.path.basename(f)}: {err}')
+
+    if info.get('error_message'):
+        print(f'\n❌ 错误信息:\n{info["error_message"]}')
+
+    print('-' * 40)
+    print('📁 归档文件:')
+    for name, path in files.items():
+        print(f'  - {name}')
+        print(f'    路径: {path}')
+
+    print(f'\n📂 归档目录: {info.get("batch_dir", "")}')
+    print('=' * 60)
+
+
+def _restore_batch(batch_manager):
+    batch_id = input('请输入要恢复的批次号: ').strip()
+    if not batch_id:
+        print('未输入批次号。')
+        return
+
+    target_dir = input('请输入恢复目录（直接回车使用默认目录）: ').strip() or None
+
+    try:
+        restored = batch_manager.restore_batch(batch_id, target_dir)
+        print(f'\n✅ 批次 {batch_id} 恢复成功！')
+        print(f'恢复目录: {os.path.dirname(next(iter(restored.values()))) if restored else target_dir}')
+        print('\n恢复的文件:')
+        for name in restored.keys():
+            print(f'  - {name}')
+    except ValueError as e:
+        print(f'\n❌ {e}')
+    except Exception as e:
+        print(f'\n❌ 恢复失败: {e}')
+        get_logger().error('批次恢复失败: %s', e, exc_info=True)
+
+
+def _delete_batch(batch_manager):
+    batch_id = input('请输入要删除的批次号: ').strip()
+    if not batch_id:
+        print('未输入批次号。')
+        return
+
+    confirm = input(f'确认要删除批次 {batch_id} 吗？此操作不可恢复！(yes/N): ').strip().lower()
+    if confirm != 'yes':
+        print('已取消删除。')
+        return
+
+    try:
+        success = batch_manager.delete_batch(batch_id)
+        if success:
+            print(f'\n✅ 批次 {batch_id} 已删除。')
+        else:
+            print(f'\n❌ 批次不存在: {batch_id}')
+    except Exception as e:
+        print(f'\n❌ 删除失败: {e}')
+        get_logger().error('批次删除失败: %s', e, exc_info=True)
 
 
 if __name__ == '__main__':
