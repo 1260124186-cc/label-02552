@@ -29,6 +29,13 @@ from typing import List, Optional, Tuple, Dict, Any
 import openpyxl
 import pandas as pd
 
+try:
+    import database as db_module
+    HAS_DATABASE = True
+except ImportError:
+    HAS_DATABASE = False
+    db_module = None
+
 # ──────────────────────────────────────────────
 # tkinter 兼容：尝试导入并安全测试，失败则回退命令行模式
 # ──────────────────────────────────────────────
@@ -135,7 +142,9 @@ def cli_askmode():
     print('  3) 监控面板：运行监控与告警管理')
     print('  4) 定时调度：定时批处理调度管理')
     print('  5) 财务导出：按用友/金蝶等模板导出凭证或日记账')
-    choice = input('请输入选项（1、2、3、4 或 5，直接回车默认为 1）: ').strip()
+    print('  6) 数据库查询：按主体/账号/时间范围查询流水记录')
+    print('  7) 数据库统计：查看数据汇总统计信息')
+    choice = input('请输入选项（1-7，直接回车默认为 1）: ').strip()
     if choice == '2':
         return 'diff'
     elif choice == '3':
@@ -144,6 +153,10 @@ def cli_askmode():
         return 'scheduler'
     elif choice == '5':
         return 'export'
+    elif choice == '6':
+        return 'db_query'
+    elif choice == '7':
+        return 'db_stats'
     return 'pipeline'
 
 
@@ -712,6 +725,8 @@ class ProcessingResult:
     existing_record_count: int = 0
     new_record_count: int = 0
     duplicate_record_count: int = 0
+    db_inserted_count: int = 0
+    db_duplicate_count: int = 0
 
 
 # ──────────────────────────────────────────────
@@ -968,6 +983,24 @@ def run_pipeline(folder, script_dir, incremental=True):
             output_path = merge_and_export_summary(existing_records, [], script_dir)
             final_rows = existing_records
 
+    db_inserted = 0
+    db_duplicates = 0
+    if HAS_DATABASE and final_rows:
+        try:
+            batch_id = f"BATCH{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            db_inserted, db_duplicates = db_module.persist_transactions(
+                final_rows,
+                batch_id=batch_id,
+                deduplicate=True,
+                script_dir=script_dir,
+            )
+            logger.info(
+                '数据库持久化完成: 批次 %s, 插入 %d 条, 去重跳过 %d 条',
+                batch_id, db_inserted, db_duplicates,
+            )
+        except Exception as e:
+            logger.error('数据库持久化失败: %s', e, exc_info=True)
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -979,6 +1012,8 @@ def run_pipeline(folder, script_dir, incremental=True):
         existing_record_count=len(existing_records),
         new_record_count=new_record_count,
         duplicate_record_count=duplicate_count,
+        db_inserted_count=db_inserted,
+        db_duplicate_count=db_duplicates,
     )
 
 
@@ -1006,6 +1041,13 @@ def format_result_message(result):
                 f'已处理文件数：{len(result.processed_files)}\n'
                 f'提取记录数：{len(result.all_rows)}\n'
                 f'总表路径：{result.output_path}'
+            )
+
+        if HAS_DATABASE and (result.db_inserted_count > 0 or result.db_duplicate_count > 0):
+            msg += (
+                f'\n\n数据库持久化：\n'
+                f'├─ 新增入库：{result.db_inserted_count} 条\n'
+                f'└─ 重复跳过：{result.db_duplicate_count} 条'
             )
     else:
         if result.incremental_mode and result.existing_record_count > 0:
@@ -5802,8 +5844,240 @@ def main():
         run_scheduler_flow(script_dir)
     elif mode == 'export':
         run_export_flow(script_dir)
+    elif mode == 'db_query':
+        run_db_query_flow(script_dir)
+    elif mode == 'db_stats':
+        run_db_stats_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
+
+
+# ──────────────────────────────────────────────
+# 数据库查询与统计流程
+# ──────────────────────────────────────────────
+
+def run_db_query_flow(script_dir):
+    """数据库查询流程：按主体/账号/时间范围查询流水记录"""
+    logger = get_logger()
+
+    if not HAS_DATABASE:
+        show_warning('错误', '数据库模块不可用，请检查 database.py 文件是否存在。')
+        logger.error('数据库模块不可用')
+        return
+
+    print('\n' + '=' * 60)
+    print('数据库查询 - 支持多条件组合查询')
+    print('=' * 60)
+    print('提示：直接回车表示不使用该条件')
+    print()
+
+    subject = input('请输入主体名称（支持模糊匹配）: ').strip()
+    account = input('请输入银行账号（支持模糊匹配）: ').strip()
+    bank = input('请输入银行名称（如：北京银行、东亚银行）: ').strip()
+    start_date = input('请输入开始日期（YYYY-MM-DD）: ').strip()
+    end_date = input('请输入结束日期（YYYY-MM-DD）: ').strip()
+
+    min_amount_str = input('请输入最小金额（单位：元）: ').strip()
+    max_amount_str = input('请输入最大金额（单位：元）: ').strip()
+    counterpart = input('请输入对方户名（支持模糊匹配）: ').strip()
+    summary_keyword = input('请输入摘要关键词（支持模糊匹配）: ').strip()
+
+    limit_str = input('请输入返回记录数上限（默认 1000）: ').strip()
+    limit = int(limit_str) if limit_str.isdigit() else 1000
+
+    min_amount = float(min_amount_str) if min_amount_str else None
+    max_amount = float(max_amount_str) if max_amount_str else None
+
+    print(f'\n正在查询数据库...')
+
+    try:
+        result = db_module.query_transactions(
+            subject=subject if subject else None,
+            account=account if account else None,
+            bank=bank if bank else None,
+            start_date=start_date if start_date else None,
+            end_date=end_date if end_date else None,
+            min_amount=min_amount,
+            max_amount=max_amount,
+            counterpart=counterpart if counterpart else None,
+            summary_keyword=summary_keyword if summary_keyword else None,
+            limit=limit,
+            script_dir=script_dir,
+        )
+
+        print(f'\n查询完成！共找到 {result.total_count} 条记录')
+
+        if result.records:
+            print(f'\n返回前 {len(result.records)} 条记录：')
+            print('-' * 100)
+            print(f'{"序号":<6}{"日期":<20}{"主体":<20}{"银行":<10}{"金额(元)":<15}{"对方户名":<20}')
+            print('-' * 100)
+
+            for i, record in enumerate(result.records[:50], 1):
+                amount = record.收款 if (record.收款 and record.收款 > 0) else (record.付款 or 0)
+                counterpart = record.对方户名 or ''
+                if len(counterpart) > 18:
+                    counterpart = counterpart[:16] + '...'
+
+                print(f'{i:<6}{str(record.交易日期 or "")[:19]:<20}'
+                      f'{str(record.主体 or "")[:18]:<20}'
+                      f'{str(record.银行 or "")[:8]:<10}'
+                      f'{amount:>12,.2f}  '
+                      f'{counterpart:<20}')
+
+            if len(result.records) > 50:
+                print(f'\n... 还有 {len(result.records) - 50} 条记录未显示')
+
+        if result.summary:
+            print(f'\n{"=" * 60}')
+            print('查询结果汇总：')
+            print('-' * 60)
+            print(f'记录总数：{result.summary.get("记录总数", 0)}')
+            print(f'付款笔数：{result.summary.get("付款笔数", 0)}')
+            print(f'收款笔数：{result.summary.get("收款笔数", 0)}')
+            print(f'付款总额：{result.summary.get("付款总额", 0):,.2f} 元')
+            print(f'收款总额：{result.summary.get("收款总额", 0):,.2f} 元')
+            print(f'净　　额：{result.summary.get("净额", 0):,.2f} 元')
+
+            bank_dist = result.summary.get('银行分布', {})
+            if bank_dist:
+                print(f'\n银行分布：')
+                for bank_name, cnt in bank_dist.items():
+                    print(f'  {bank_name}: {cnt} 条')
+
+            subject_dist = result.summary.get('主体分布', {})
+            if subject_dist:
+                print(f'\n主体分布（前 10）：')
+                for i, (subj_name, cnt) in enumerate(list(subject_dist.items())[:10], 1):
+                    print(f'  {i}. {subj_name}: {cnt} 条')
+
+        export = input(f'\n是否导出查询结果到 Excel？(y/N): ').strip().lower()
+        if export == 'y':
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_path = os.path.join(script_dir, f'查询结果_{timestamp}.xlsx')
+            try:
+                result.to_excel(output_path)
+                show_info('导出成功', f'查询结果已导出到：\n{output_path}')
+                logger.info('查询结果已导出: %s', output_path)
+            except Exception as e:
+                show_warning('导出失败', f'导出 Excel 失败：{e}')
+                logger.error('导出查询结果失败: %s', e)
+
+    except Exception as e:
+        show_warning('查询失败', f'数据库查询失败：{e}')
+        logger.error('数据库查询失败: %s', e, exc_info=True)
+
+
+def run_db_stats_flow(script_dir):
+    """数据库统计流程：查看数据汇总统计信息"""
+    logger = get_logger()
+
+    if not HAS_DATABASE:
+        show_warning('错误', '数据库模块不可用，请检查 database.py 文件是否存在。')
+        logger.error('数据库模块不可用')
+        return
+
+    print('\n' + '=' * 60)
+    print('数据库统计信息')
+    print('=' * 60)
+
+    try:
+        stats = db_module.get_db_statistics(script_dir=script_dir)
+
+        print(f'\n【总体概览】')
+        print(f'  总记录数：{stats.get("总记录数", 0):,} 条')
+        print(f'  导入批次：{stats.get("导入批次数量", 0)} 次')
+
+        date_range = stats.get('日期范围', {})
+        if date_range:
+            print(f'  最早交易：{date_range.get("最早交易日期", "无")}')
+            print(f'  最晚交易：{date_range.get("最晚交易日期", "无")}')
+
+        by_bank = stats.get('按银行统计', [])
+        if by_bank:
+            print(f'\n【按银行统计】')
+            print('-' * 80)
+            print(f'{"银行":<15}{"记录数":<12}{"付款总额(元)":<20}{"收款总额(元)":<20}')
+            print('-' * 80)
+            for row in by_bank:
+                bank_name = row.get('银行', '未知')
+                cnt = row.get('cnt', 0)
+                payment = row.get('total_payment', 0) or 0
+                receipt = row.get('total_receipt', 0) or 0
+                print(f'{bank_name:<15}{cnt:<12,}{payment:>18,.2f}  {receipt:>18,.2f}')
+
+        by_subject = stats.get('按主体统计', [])
+        if by_subject:
+            print(f'\n【按主体统计（前 15）】')
+            print('-' * 90)
+            print(f'{"序号":<6}{"主体":<30}{"记录数":<12}{"付款总额(元)":<20}{"收款总额(元)":<20}')
+            print('-' * 90)
+            for i, row in enumerate(by_subject[:15], 1):
+                subject_name = str(row.get('主体', '未知'))[:28]
+                cnt = row.get('cnt', 0)
+                payment = row.get('total_payment', 0) or 0
+                receipt = row.get('total_receipt', 0) or 0
+                print(f'{i:<6}{subject_name:<30}{cnt:<12,}'
+                      f'{payment:>18,.2f}  {receipt:>18,.2f}')
+
+        by_account = stats.get('按账号统计', [])
+        if by_account:
+            print(f'\n【按账号统计（前 15）】')
+            print('-' * 80)
+            print(f'{"序号":<6}{"银行账号":<25}{"主体":<20}{"银行":<12}{"记录数":<10}')
+            print('-' * 80)
+            for i, row in enumerate(by_account[:15], 1):
+                account = str(row.get('银行账号', '未知'))[:22]
+                subject = str(row.get('主体', '未知'))[:18]
+                bank = str(row.get('银行', ''))[:10]
+                cnt = row.get('cnt', 0)
+                print(f'{i:<6}{account:<25}{subject:<20}{bank:<12}{cnt:<10,}')
+
+        by_date = stats.get('近30天交易趋势', [])
+        if by_date:
+            print(f'\n【近 30 天交易趋势】')
+            print('-' * 60)
+            print(f'{"日期":<15}{"记录数":<10}{"付款(元)":<18}{"收款(元)":<18}')
+            print('-' * 60)
+            for row in reversed(by_date):
+                dt = str(row.get('dt', ''))[:10]
+                cnt = row.get('cnt', 0)
+                payment = row.get('total_payment', 0) or 0
+                receipt = row.get('total_receipt', 0) or 0
+                print(f'{dt:<15}{cnt:<10}{payment:>16,.2f}  {receipt:>16,.2f}')
+
+        export = input(f'\n是否导出统计信息到 Excel？(y/N): ').strip().lower()
+        if export == 'y':
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_path = os.path.join(script_dir, f'数据库统计_{timestamp}.xlsx')
+            try:
+                with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+                    if by_bank:
+                        pd.DataFrame(by_bank).to_excel(writer, sheet_name='按银行统计', index=False)
+                    if by_subject:
+                        pd.DataFrame(by_subject).to_excel(writer, sheet_name='按主体统计', index=False)
+                    if by_account:
+                        pd.DataFrame(by_account).to_excel(writer, sheet_name='按账号统计', index=False)
+                    if by_date:
+                        pd.DataFrame(by_date).to_excel(writer, sheet_name='近30天趋势', index=False)
+
+                    overview_df = pd.DataFrame([{
+                        '总记录数': stats.get('总记录数', 0),
+                        '导入批次数量': stats.get('导入批次数量', 0),
+                        '最早交易日期': date_range.get('最早交易日期', ''),
+                        '最晚交易日期': date_range.get('最晚交易日期', ''),
+                    }])
+                    overview_df.to_excel(writer, sheet_name='总体概览', index=False)
+
+                show_info('导出成功', f'统计信息已导出到：\n{output_path}')
+                logger.info('数据库统计已导出: %s', output_path)
+            except Exception as e:
+                show_warning('导出失败', f'导出 Excel 失败：{e}')
+                logger.error('导出统计信息失败: %s', e)
+
+    except Exception as e:
+        show_warning('统计失败', f'获取统计信息失败：{e}')
+        logger.error('获取数据库统计失败: %s', e, exc_info=True)
 
 
 if __name__ == '__main__':
