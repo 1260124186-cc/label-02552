@@ -826,9 +826,10 @@ class ProcessingResult:
 SUMMARY_TABLE_FILENAME = '银行流水总表.xlsx'
 
 
-def get_summary_table_path(script_dir):
+def get_summary_table_path(script_dir, output_dir=None):
     """获取历史总表文件路径"""
-    return os.path.join(script_dir, SUMMARY_TABLE_FILENAME)
+    base_dir = output_dir or script_dir
+    return os.path.join(base_dir, SUMMARY_TABLE_FILENAME)
 
 
 def load_existing_keys(summary_path):
@@ -916,7 +917,7 @@ def filter_incremental_records(new_rows, existing_keys):
     return incremental_rows, duplicate_count
 
 
-def merge_and_export_summary(existing_records, incremental_rows, script_dir):
+def merge_and_export_summary(existing_records, incremental_rows, script_dir, output_dir=None):
     """
     合并历史记录与增量记录，并输出到总表。
 
@@ -924,6 +925,7 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir):
         existing_records: 历史记录列表
         incremental_rows: 新增记录列表
         script_dir: 脚本目录
+        output_dir: 输出目录，默认为script_dir
 
     Returns:
         str: 输出文件路径
@@ -942,7 +944,11 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir):
         return None
 
     df = pd.DataFrame(merged_records, columns=columns)
-    output_path = get_summary_table_path(script_dir)
+    output_path = get_summary_table_path(script_dir, output_dir)
+
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
     df.to_excel(output_path, index=False, engine='openpyxl')
 
     logger.info('总表输出完成: %s（历史 %d 条 + 新增 %d 条 = 共 %d 条）',
@@ -6718,6 +6724,7 @@ def apply_preset_to_pipeline(preset, folder, script_dir):
     incremental = preset.get('incremental', True)
     start_date = preset.get('start_date', '')
     end_date = preset.get('end_date', '')
+    output_dir = preset.get('output_dir', '') or None
 
     result = run_pipeline_with_options(
         folder=folder,
@@ -6727,6 +6734,7 @@ def apply_preset_to_pipeline(preset, folder, script_dir):
         keep_strategy=keep_strategy,
         start_date=start_date,
         end_date=end_date,
+        output_dir=output_dir,
     )
 
     return result
@@ -6734,7 +6742,7 @@ def apply_preset_to_pipeline(preset, folder, script_dir):
 
 def run_pipeline_with_options(folder, script_dir, incremental=True,
                               enabled_banks=None, keep_strategy='keep_unprocessed',
-                              start_date='', end_date='', batch_id=None):
+                              start_date='', end_date='', batch_id=None, output_dir=None):
     logger = get_logger()
 
     if enabled_banks is None:
@@ -6751,8 +6759,12 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     duplicate_count = 0
     new_record_count = 0
 
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        logger.info('使用自定义输出目录: %s', output_dir)
+
     if incremental:
-        summary_path = get_summary_table_path(script_dir)
+        summary_path = get_summary_table_path(script_dir, output_dir)
         existing_keys, existing_records = load_existing_keys(summary_path)
         actual_incremental = len(existing_records) > 0
         if actual_incremental:
@@ -6865,7 +6877,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         if actual_incremental:
             incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
             new_record_count = len(incremental_rows)
-            output_path = merge_and_export_summary(existing_records, incremental_rows, script_dir)
+            output_path = merge_and_export_summary(existing_records, incremental_rows, script_dir, output_dir)
             final_rows = existing_records + incremental_rows
         else:
             columns = [
@@ -6873,7 +6885,9 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                 '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
             ]
             df = pd.DataFrame(all_rows, columns=columns)
-            output_path = get_summary_table_path(script_dir)
+            output_path = get_summary_table_path(script_dir, output_dir)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
             df.to_excel(output_path, index=False, engine='openpyxl')
             logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
             final_rows = all_rows
@@ -6881,7 +6895,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     else:
         logger.warning('未提取到任何银行流水记录')
         if existing_records:
-            output_path = merge_and_export_summary(existing_records, [], script_dir)
+            output_path = merge_and_export_summary(existing_records, [], script_dir, output_dir)
             final_rows = existing_records
 
     db_inserted = 0

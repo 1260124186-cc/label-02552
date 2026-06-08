@@ -10,6 +10,7 @@ import shutil
 from datetime import datetime
 
 import pytest
+import openpyxl
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
@@ -302,3 +303,143 @@ def test_preset_dataclass():
     assert preset.preset_id == 'TEST123'
     assert preset.name == '测试'
     assert preset.enabled_banks == ['北京银行']
+
+
+def test_output_dir_in_preset():
+    """测试预设中的output_dir字段"""
+    preset_data = {
+        'name': '测试输出目录',
+        'output_dir': '/custom/output/path',
+        'enabled_banks': ['北京银行'],
+        'keep_strategy': 'keep_unprocessed',
+        'incremental': True,
+    }
+
+    preset_id = bankcheck.save_preset(preset_data, script_dir=None)
+    loaded = bankcheck.load_preset(preset_id, script_dir=None)
+    assert loaded['output_dir'] == '/custom/output/path'
+
+
+def test_get_summary_table_path_with_output_dir(tmp_path):
+    """测试get_summary_table_path支持自定义输出目录"""
+    script_dir = str(tmp_path)
+    output_dir = str(tmp_path / 'custom_output')
+
+    default_path = bankcheck.get_summary_table_path(script_dir)
+    assert default_path == os.path.join(script_dir, '银行流水总表.xlsx')
+
+    custom_path = bankcheck.get_summary_table_path(script_dir, output_dir)
+    assert custom_path == os.path.join(output_dir, '银行流水总表.xlsx')
+
+
+def test_run_pipeline_with_options_output_dir(tmp_path):
+    """测试run_pipeline_with_options使用自定义输出目录"""
+    script_dir = str(tmp_path)
+    output_dir = str(tmp_path / 'custom_output')
+    bank_dir = tmp_path / '北京银行测试'
+    bank_dir.mkdir()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for row_idx in range(1, 4):
+        ws.cell(row=row_idx, column=1, value=f'header{row_idx}')
+    ws.cell(row=4, column=2, value='6222021234567890')
+    ws.cell(row=4, column=4, value=1000.0)
+    ws.cell(row=4, column=6, value=5000.0)
+    ws.cell(row=4, column=7, value='张三')
+    ws.cell(row=4, column=12, value='测试交易')
+    ws.cell(row=4, column=16, value='TXN001')
+    wb.save(bank_dir / '北京银行测试.xlsx')
+
+    result = bankcheck.run_pipeline_with_options(
+        folder=str(bank_dir),
+        script_dir=script_dir,
+        incremental=False,
+        output_dir=output_dir,
+    )
+
+    expected_output = os.path.join(output_dir, '银行流水总表.xlsx')
+    assert result.output_path == expected_output
+    assert os.path.exists(expected_output)
+    assert len(result.all_rows) == 1
+
+
+def test_apply_preset_with_output_dir(tmp_path):
+    """测试应用预设时使用自定义输出目录"""
+    script_dir = str(tmp_path)
+    output_dir = str(tmp_path / 'preset_output')
+    bank_dir = tmp_path / '北京银行测试'
+    bank_dir.mkdir()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for row_idx in range(1, 4):
+        ws.cell(row=row_idx, column=1, value=f'header{row_idx}')
+    ws.cell(row=4, column=2, value='6222021234567890')
+    ws.cell(row=4, column=4, value=1000.0)
+    ws.cell(row=4, column=6, value=5000.0)
+    ws.cell(row=4, column=7, value='张三')
+    ws.cell(row=4, column=12, value='测试交易')
+    ws.cell(row=4, column=16, value='TXN001')
+    wb.save(bank_dir / '北京银行测试.xlsx')
+
+    preset_data = {
+        'name': '测试输出目录预设',
+        'output_dir': output_dir,
+        'enabled_banks': ['北京银行'],
+        'keep_strategy': 'keep_unprocessed',
+        'incremental': False,
+        'start_date': '',
+        'end_date': '',
+    }
+    preset_id = bankcheck.save_preset(preset_data, script_dir=script_dir)
+    preset = bankcheck.load_preset(preset_id, script_dir=script_dir)
+
+    result = bankcheck.apply_preset_to_pipeline(
+        preset=preset,
+        folder=str(bank_dir),
+        script_dir=script_dir,
+    )
+
+    expected_output = os.path.join(output_dir, '银行流水总表.xlsx')
+    assert result.output_path == expected_output
+    assert os.path.exists(expected_output)
+
+
+def test_preset_output_dir_empty_defaults_to_script_dir(tmp_path):
+    """测试预设output_dir为空时使用script_dir"""
+    script_dir = str(tmp_path)
+    bank_dir = tmp_path / '北京银行测试'
+    bank_dir.mkdir()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for row_idx in range(1, 4):
+        ws.cell(row=row_idx, column=1, value=f'header{row_idx}')
+    ws.cell(row=4, column=2, value='6222021234567890')
+    ws.cell(row=4, column=4, value=1000.0)
+    ws.cell(row=4, column=6, value=5000.0)
+    ws.cell(row=4, column=7, value='张三')
+    ws.cell(row=4, column=12, value='测试交易')
+    ws.cell(row=4, column=16, value='TXN001')
+    wb.save(bank_dir / '北京银行测试.xlsx')
+
+    preset_data = {
+        'name': '测试空输出目录',
+        'output_dir': '',
+        'enabled_banks': ['北京银行'],
+        'keep_strategy': 'keep_unprocessed',
+        'incremental': False,
+    }
+    preset_id = bankcheck.save_preset(preset_data, script_dir=script_dir)
+    preset = bankcheck.load_preset(preset_id, script_dir=script_dir)
+
+    result = bankcheck.apply_preset_to_pipeline(
+        preset=preset,
+        folder=str(bank_dir),
+        script_dir=script_dir,
+    )
+
+    expected_output = os.path.join(script_dir, '银行流水总表.xlsx')
+    assert result.output_path == expected_output
+    assert os.path.exists(expected_output)

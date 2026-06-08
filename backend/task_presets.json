@@ -12,6 +12,66 @@
       "preset_id": "PRESET202606081528362ED5FB",
       "created_at": "2026-06-08 15:28:36",
       "updated_at": "2026-06-08 15:28:36"
+    },
+    {
+      "name": "测试输出目录",
+      "output_dir": "/custom/output/path",
+      "enabled_banks": [
+        "北京银行"
+      ],
+      "keep_strategy": "keep_unprocessed",
+      "incremental": true,
+      "preset_id": "PRESET20260608160448256A25",
+      "created_at": "2026-06-08 16:04:48",
+      "updated_at": "2026-06-08 16:04:48"
+    },
+    {
+      "name": "测试输出目录",
+      "output_dir": "/custom/output/path",
+      "enabled_banks": [
+        "北京银行"
+      ],
+      "keep_strategy": "keep_unprocessed",
+      "incremental": true,
+      "preset_id": "PRESET20260608160717E02ECD",
+      "created_at": "2026-06-08 16:07:17",
+      "updated_at": "2026-06-08 16:07:17"
+    },
+    {
+      "name": "测试输出目录",
+      "output_dir": "/custom/output/path",
+      "enabled_banks": [
+        "北京银行"
+      ],
+      "keep_strategy": "keep_unprocessed",
+      "incremental": true,
+      "preset_id": "PRESET202606081607280E0BA5",
+      "created_at": "2026-06-08 16:07:28",
+      "updated_at": "2026-06-08 16:07:28"
+    },
+    {
+      "name": "测试输出目录",
+      "output_dir": "/custom/output/path",
+      "enabled_banks": [
+        "北京银行"
+      ],
+      "keep_strategy": "keep_unprocessed",
+      "incremental": true,
+      "preset_id": "PRESET20260608160812F07C40",
+      "created_at": "2026-06-08 16:08:12",
+      "updated_at": "2026-06-08 16:08:12"
+    },
+    {
+      "name": "测试输出目录",
+      "output_dir": "/custom/output/path",
+      "enabled_banks": [
+        "北京银行"
+      ],
+      "keep_strategy": "keep_unprocessed",
+      "incremental": true,
+      "preset_id": "PRESET20260608161022D4CBD3",
+      "created_at": "2026-06-08 16:10:22",
+      "updated_at": "2026-06-08 16:10:22"
     }
   ],
   "settings": {
