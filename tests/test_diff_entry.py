@@ -81,11 +81,11 @@ class TestGUIAskMode:
              mock.patch.object(bankcheck.messagebox, 'askyesnocancel', return_value=False):
             assert bankcheck.gui_askmode() == 'diff'
 
-    def test_cancel_returns_monitor(self):
+    def test_cancel_returns_export(self):
         with mock.patch.object(bankcheck, 'tk', create=True), \
              mock.patch.object(bankcheck, 'messagebox', create=True), \
              mock.patch.object(bankcheck.messagebox, 'askyesnocancel', return_value=None):
-            assert bankcheck.gui_askmode() == 'monitor'
+            assert bankcheck.gui_askmode() == 'export'
 
 
 class TestRunPipelineFlow:

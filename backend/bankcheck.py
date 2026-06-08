@@ -134,27 +134,35 @@ def cli_askmode():
     print('  2) 变更对比：对比两次总表的差异（新增/删除/变更）')
     print('  3) 监控面板：运行监控与告警管理')
     print('  4) 定时调度：定时批处理调度管理')
-    choice = input('请输入选项（1、2、3 或 4，直接回车默认为 1）: ').strip()
+    print('  5) 财务导出：按用友/金蝶等模板导出凭证或日记账')
+    choice = input('请输入选项（1、2、3、4 或 5，直接回车默认为 1）: ').strip()
     if choice == '2':
         return 'diff'
     elif choice == '3':
         return 'monitor'
     elif choice == '4':
         return 'scheduler'
+    elif choice == '5':
+        return 'export'
     return 'pipeline'
 
 
 def gui_askmode():
     """GUI 模式下让用户选择运行模式"""
+    if tk is None:
+        return cli_askmode()
+
     root = tk.Tk()
     root.withdraw()
+
     choice = messagebox.askyesnocancel(
         '选择运行模式',
-        '是 = 主流程：处理流水文件夹，输出总表\n\n否 = 变更对比：对比两次总表的差异\n\n取消 = 监控面板：运行监控与告警\n\n提示：使用命令行参数 --scheduler-menu 可进入定时调度管理',
+        '是 = 主流程：处理流水文件夹，输出总表\n\n否 = 变更对比：对比两次总表的差异\n\n取消 = 财务导出：按用友/金蝶等模板导出\n\n提示：\n- 使用命令行参数 --scheduler-menu 可进入定时调度管理\n- 使用命令行参数 --export 可直接进入财务导出\n- 使用命令行参数 --monitor 可进入监控面板',
     )
     root.destroy()
+
     if choice is None:
-        return 'monitor'
+        return 'export'
     return 'pipeline' if choice else 'diff'
 
 
@@ -184,6 +192,23 @@ def _ask_monitor_or_scheduler():
         return 'monitor'
     elif choice == '2':
         return 'scheduler'
+    return 'monitor'
+
+
+def cli_ask_monitor_export_menu():
+    """二级菜单：选择监控/调度/财务导出"""
+    print('\n请选择功能：')
+    print('  1) 监控面板：运行监控与告警管理')
+    print('  2) 定时调度：定时批处理调度管理')
+    print('  3) 财务导出：按用友/金蝶等模板导出凭证或日记账')
+    print('  4) 返回主菜单')
+    choice = input('请输入选项: ').strip()
+    if choice == '1':
+        return 'monitor'
+    elif choice == '2':
+        return 'scheduler'
+    elif choice == '3':
+        return 'export'
     return 'monitor'
 
 
@@ -2499,6 +2524,629 @@ def export_config_changes(output_path, script_dir=None, expand_details=False, **
     logger = get_logger()
     logger.info('配置变更历史已导出到: %s (共 %d 条记录)', output_path, len(records))
     return output_path
+
+
+# ──────────────────────────────────────────────
+# 财务软件对接导出模块
+# ──────────────────────────────────────────────
+
+@dataclass
+class StandardTransaction:
+    """标准化交易记录，作为总表到各财务软件模板的中间格式"""
+    transaction_date: Optional[datetime] = None
+    voucher_date: Optional[datetime] = None
+    voucher_number: str = ''
+    summary: str = ''
+    subject_code: str = ''
+    subject_name: str = ''
+    debit_amount: float = 0.0
+    credit_amount: float = 0.0
+    bank_account: str = ''
+    bank_name: str = ''
+    entity: str = ''
+    counterparty: str = ''
+    transaction_id: str = ''
+    balance: float = 0.0
+    direction: str = ''
+    department: str = ''
+    personnel: str = ''
+    customer: str = ''
+    supplier: str = ''
+    project: str = ''
+    attachment_count: int = 1
+    prepared_by: str = ''
+    reviewed_by: str = ''
+    posted_by: str = ''
+    remark: str = ''
+
+
+@dataclass
+class StandardVoucher:
+    """标准化凭证，包含多条借贷分录"""
+    voucher_date: Optional[datetime] = None
+    voucher_number: str = ''
+    voucher_type: str = '记'
+    attachment_count: int = 1
+    prepared_by: str = ''
+    reviewed_by: str = ''
+    posted_by: str = ''
+    entries: List[StandardTransaction] = field(default_factory=list)
+    source_transaction: Optional[dict] = None
+
+
+FINANCIAL_EXPORT_TEMPLATES = {
+    'yonyou_voucher': {
+        'name': '用友凭证导入模板',
+        'description': '用友U8/U9/NC系列财务软件凭证导入格式',
+        'file_suffix': '_用友凭证导入',
+    },
+    'kingdee_voucher': {
+        'name': '金蝶凭证导入模板',
+        'description': '金蝶K3/KIS/EAS系列财务软件凭证导入格式',
+        'file_suffix': '_金蝶凭证导入',
+    },
+    'bank_journal': {
+        'name': '银行日记账模板',
+        'description': '标准银行日记账格式，可直接导入财务软件',
+        'file_suffix': '_银行日记账',
+    },
+}
+
+DEFAULT_ACCOUNT_MAPPING = {
+    'cash': {'code': '1001', 'name': '库存现金'},
+    'bank_deposit': {'code': '1002', 'name': '银行存款'},
+    'accounts_receivable': {'code': '1122', 'name': '应收账款'},
+    'accounts_payable': {'code': '2202', 'name': '应付账款'},
+    'operating_revenue': {'code': '6001', 'name': '主营业务收入'},
+    'operating_cost': {'code': '6401', 'name': '主营业务成本'},
+    'management_expense': {'code': '6602', 'name': '管理费用'},
+    'sales_expense': {'code': '6601', 'name': '销售费用'},
+    'financial_expense': {'code': '6603', 'name': '财务费用'},
+}
+
+
+def _normalize_date(value):
+    """规范化日期为 datetime 对象"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        for fmt in ['%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d', '%Y%m%d', '%Y-%m-%d %H:%M:%S', '%Y/%m/%d %H:%M:%S']:
+            try:
+                return datetime.strptime(value.strip(), fmt)
+            except ValueError:
+                continue
+        try:
+            return pd.to_datetime(value).to_pydatetime()
+        except Exception:
+            pass
+    return None
+
+
+def _format_date_for_export(dt, format_str='%Y-%m-%d'):
+    """格式化日期用于导出"""
+    if dt is None:
+        return ''
+    return dt.strftime(format_str)
+
+
+def _format_amount(amount):
+    """格式化金额，保留2位小数"""
+    if amount is None:
+        return 0.0
+    try:
+        return round(float(amount), 2)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def total_to_standard_transactions(total_records, account_mapping=None, operator=''):
+    """
+    将总表数据转换为标准化交易记录列表。
+
+    标准化层是财务导出的核心，它将银行流水的每一条记录转换为：
+    1. 借方分录（收款时）或贷方分录（付款时）- 银行存款科目
+    2. 对应的对方科目分录（需要根据摘要/对方户名智能判断）
+
+    Args:
+        total_records: 总表记录列表，每条包含银行流水字段
+        account_mapping: 科目映射字典，可选
+        operator: 制单人名称
+
+    Returns:
+        List[StandardVoucher]: 标准化凭证列表
+    """
+    logger = get_logger()
+
+    if account_mapping is None:
+        account_mapping = DEFAULT_ACCOUNT_MAPPING
+
+    bank_account_info = account_mapping['bank_deposit']
+    vouchers = []
+
+    for idx, record in enumerate(total_records, 1):
+        payment = to_float(record.get('付款'))
+        receipt = to_float(record.get('收款'))
+        trade_date = _normalize_date(record.get('交易日期'))
+        voucher_num = f"记-{datetime.now().strftime('%Y%m')}-{idx:04d}"
+
+        bank_entry = StandardTransaction(
+            transaction_date=trade_date,
+            voucher_date=trade_date,
+            voucher_number=voucher_num,
+            summary=str(record.get('摘要', '')) or '银行流水',
+            subject_code=bank_account_info['code'],
+            subject_name=bank_account_info['name'],
+            bank_account=str(record.get('银行账号', '')),
+            bank_name=str(record.get('银行', '')),
+            entity=str(record.get('主体', '')),
+            counterparty=str(record.get('对方户名', '')),
+            transaction_id=str(record.get('交易流水号', '')),
+            balance=_format_amount(record.get('余额')),
+            prepared_by=operator,
+            attachment_count=1,
+        )
+
+        counter_entry = StandardTransaction(
+            transaction_date=trade_date,
+            voucher_date=trade_date,
+            voucher_number=voucher_num,
+            summary=str(record.get('摘要', '')) or '银行流水',
+            bank_account=str(record.get('银行账号', '')),
+            bank_name=str(record.get('银行', '')),
+            entity=str(record.get('主体', '')),
+            counterparty=str(record.get('对方户名', '')),
+            transaction_id=str(record.get('交易流水号', '')),
+            prepared_by=operator,
+            attachment_count=1,
+        )
+
+        if receipt and receipt > 0:
+            bank_entry.debit_amount = _format_amount(receipt)
+            bank_entry.direction = '借'
+
+            counter_entry.credit_amount = _format_amount(receipt)
+            summary_lower = str(record.get('摘要', '')).lower()
+            counterparty_lower = str(record.get('对方户名', '')).lower()
+
+            if any(k in summary_lower for k in ['收入', '销售', '货款', '营收', '主营业务']):
+                counter_entry.subject_code = account_mapping['operating_revenue']['code']
+                counter_entry.subject_name = account_mapping['operating_revenue']['name']
+            elif any(k in summary_lower or k in counterparty_lower for k in ['客户', '应收']):
+                counter_entry.subject_code = account_mapping['accounts_receivable']['code']
+                counter_entry.subject_name = account_mapping['accounts_receivable']['name']
+            else:
+                counter_entry.subject_code = account_mapping['accounts_receivable']['code']
+                counter_entry.subject_name = account_mapping['accounts_receivable']['name']
+
+        elif payment and payment < 0:
+            payment_abs = abs(payment)
+            bank_entry.credit_amount = _format_amount(payment_abs)
+            bank_entry.direction = '贷'
+
+            counter_entry.debit_amount = _format_amount(payment_abs)
+            summary_lower = str(record.get('摘要', '')).lower()
+            counterparty_lower = str(record.get('对方户名', '')).lower()
+
+            if any(k in summary_lower for k in ['成本', '主营成本']):
+                counter_entry.subject_code = account_mapping['operating_cost']['code']
+                counter_entry.subject_name = account_mapping['operating_cost']['name']
+            elif any(k in summary_lower for k in ['管理费用', '办公费', '差旅费', '招待费', '工资']):
+                counter_entry.subject_code = account_mapping['management_expense']['code']
+                counter_entry.subject_name = account_mapping['management_expense']['name']
+            elif any(k in summary_lower for k in ['销售费用', '广告费', '推广费']):
+                counter_entry.subject_code = account_mapping['sales_expense']['code']
+                counter_entry.subject_name = account_mapping['sales_expense']['name']
+            elif any(k in summary_lower for k in ['财务费用', '手续费', '利息']):
+                counter_entry.subject_code = account_mapping['financial_expense']['code']
+                counter_entry.subject_name = account_mapping['financial_expense']['name']
+            elif any(k in summary_lower or k in counterparty_lower for k in ['供应商', '应付', '采购', '货款']):
+                counter_entry.subject_code = account_mapping['accounts_payable']['code']
+                counter_entry.subject_name = account_mapping['accounts_payable']['name']
+            else:
+                counter_entry.subject_code = account_mapping['accounts_payable']['code']
+                counter_entry.subject_name = account_mapping['accounts_payable']['name']
+        else:
+            continue
+
+        voucher = StandardVoucher(
+            voucher_date=trade_date,
+            voucher_number=voucher_num,
+            voucher_type='记',
+            attachment_count=1,
+            prepared_by=operator,
+            entries=[bank_entry, counter_entry],
+            source_transaction=record,
+        )
+        vouchers.append(voucher)
+
+    logger.info('总表 %d 条记录转换为 %d 张标准化凭证', len(total_records), len(vouchers))
+    return vouchers
+
+
+def load_total_table(total_path):
+    """加载总表数据"""
+    logger = get_logger()
+
+    if not total_path or not os.path.exists(total_path):
+        logger.error('总表文件不存在: %s', total_path)
+        return []
+
+    try:
+        df = pd.read_excel(total_path, engine='openpyxl')
+        records = df.to_dict('records')
+        logger.info('加载总表成功，共 %d 条记录', len(records))
+        return records
+    except Exception as e:
+        logger.error('加载总表失败: %s', e, exc_info=True)
+        return []
+
+
+def export_yonyou_voucher(vouchers, output_path):
+    """
+    导出用友凭证导入格式。
+
+    用友U8标准凭证导入格式包含以下字段：
+    凭证类别字、凭证编号、凭证日期、附单据数、制单人、审核人、记账人、
+    摘要、科目编码、科目名称、借方金额、贷方金额、
+    部门编码、部门名称、个人编码、个人名称、客户编码、客户名称、
+    供应商编码、供应商名称、项目编码、项目名称、银行账号、票据号
+    """
+    logger = get_logger()
+
+    columns = [
+        '凭证类别字', '凭证编号', '凭证日期', '附单据数',
+        '制单人', '审核人', '记账人',
+        '摘要', '科目编码', '科目名称',
+        '借方金额', '贷方金额',
+        '部门编码', '部门名称',
+        '个人编码', '个人名称',
+        '客户编码', '客户名称',
+        '供应商编码', '供应商名称',
+        '项目编码', '项目名称',
+        '银行账号', '票据号',
+    ]
+
+    rows = []
+    for voucher in vouchers:
+        for entry in voucher.entries:
+            rows.append({
+                '凭证类别字': voucher.voucher_type,
+                '凭证编号': voucher.voucher_number,
+                '凭证日期': _format_date_for_export(voucher.voucher_date),
+                '附单据数': voucher.attachment_count,
+                '制单人': voucher.prepared_by,
+                '审核人': voucher.reviewed_by,
+                '记账人': voucher.posted_by,
+                '摘要': entry.summary,
+                '科目编码': str(entry.subject_code) if entry.subject_code is not None else '',
+                '科目名称': entry.subject_name,
+                '借方金额': entry.debit_amount,
+                '贷方金额': entry.credit_amount,
+                '部门编码': '',
+                '部门名称': entry.department,
+                '个人编码': '',
+                '个人名称': entry.personnel,
+                '客户编码': '',
+                '客户名称': entry.customer,
+                '供应商编码': '',
+                '供应商名称': entry.supplier,
+                '项目编码': '',
+                '项目名称': entry.project,
+                '银行账号': entry.bank_account,
+                '票据号': entry.transaction_id,
+            })
+
+    if not rows:
+        logger.warning('无凭证数据可导出')
+        return None
+
+    df = pd.DataFrame(rows, columns=columns)
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='凭证导入', index=False)
+
+            ws = writer.sheets['凭证导入']
+            for col in ws.columns:
+                max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in col)
+                ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
+
+        logger.info('用友凭证导出成功: %s (共 %d 张凭证，%d 条分录)',
+                    output_path, len(vouchers), len(rows))
+        return output_path
+    except Exception as e:
+        logger.error('导出用友凭证失败: %s', e, exc_info=True)
+        return None
+
+
+def export_kingdee_voucher(vouchers, output_path):
+    """
+    导出金蝶凭证导入格式。
+
+    金蝶K3标准凭证导入格式包含以下字段：
+    凭证字号、凭证日期、附件数、制单人、审核人、过账人、
+    摘要、科目代码、科目名称、借方金额、贷方金额、
+    核算项目类别、核算项目代码、核算项目名称、
+    币别、汇率、原币金额、结算方式、结算号、业务日期
+    """
+    logger = get_logger()
+
+    columns = [
+        '凭证字号', '凭证日期', '附件数',
+        '制单人', '审核人', '过账人',
+        '摘要', '科目代码', '科目名称',
+        '借方金额', '贷方金额',
+        '核算项目类别', '核算项目代码', '核算项目名称',
+        '币别', '汇率', '原币金额',
+        '结算方式', '结算号', '业务日期',
+    ]
+
+    rows = []
+    for voucher in vouchers:
+        for entry in voucher.entries:
+            rows.append({
+                '凭证字号': voucher.voucher_number,
+                '凭证日期': _format_date_for_export(voucher.voucher_date),
+                '附件数': voucher.attachment_count,
+                '制单人': voucher.prepared_by,
+                '审核人': voucher.reviewed_by,
+                '过账人': voucher.posted_by,
+                '摘要': entry.summary,
+                '科目代码': str(entry.subject_code) if entry.subject_code is not None else '',
+                '科目名称': entry.subject_name,
+                '借方金额': entry.debit_amount,
+                '贷方金额': entry.credit_amount,
+                '核算项目类别': '',
+                '核算项目代码': '',
+                '核算项目名称': '',
+                '币别': '人民币',
+                '汇率': 1.0,
+                '原币金额': entry.debit_amount if entry.debit_amount else entry.credit_amount,
+                '结算方式': '银行转账',
+                '结算号': entry.transaction_id,
+                '业务日期': _format_date_for_export(entry.transaction_date),
+            })
+
+    if not rows:
+        logger.warning('无凭证数据可导出')
+        return None
+
+    df = pd.DataFrame(rows, columns=columns)
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='凭证导入', index=False)
+
+            ws = writer.sheets['凭证导入']
+            for col in ws.columns:
+                max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in col)
+                ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
+
+        logger.info('金蝶凭证导出成功: %s (共 %d 张凭证，%d 条分录)',
+                    output_path, len(vouchers), len(rows))
+        return output_path
+    except Exception as e:
+        logger.error('导出金蝶凭证失败: %s', e, exc_info=True)
+        return None
+
+
+def export_bank_journal(vouchers, output_path):
+    """
+    导出银行日记账格式。
+
+    标准银行日记账格式包含以下字段：
+    日期、凭证号、摘要、对方科目、借方金额、贷方金额、方向、余额、
+    银行账号、开户银行、核算主体、对方户名、交易流水号、备注
+    """
+    logger = get_logger()
+
+    columns = [
+        '日期', '凭证号', '摘要', '对方科目',
+        '借方金额', '贷方金额', '方向', '余额',
+        '银行账号', '开户银行', '核算主体',
+        '对方户名', '交易流水号', '备注',
+    ]
+
+    rows = []
+    for voucher in vouchers:
+        bank_entry = None
+        other_entry = None
+
+        for entry in voucher.entries:
+            if '银行' in entry.subject_name or entry.subject_code.startswith('1002'):
+                bank_entry = entry
+            else:
+                other_entry = entry
+
+        if bank_entry is None:
+            continue
+
+        rows.append({
+            '日期': _format_date_for_export(bank_entry.transaction_date),
+            '凭证号': voucher.voucher_number,
+            '摘要': bank_entry.summary,
+            '对方科目': other_entry.subject_name if other_entry else '',
+            '借方金额': bank_entry.debit_amount,
+            '贷方金额': bank_entry.credit_amount,
+            '方向': bank_entry.direction,
+            '余额': bank_entry.balance,
+            '银行账号': bank_entry.bank_account,
+            '开户银行': bank_entry.bank_name,
+            '核算主体': bank_entry.entity,
+            '对方户名': bank_entry.counterparty,
+            '交易流水号': bank_entry.transaction_id,
+            '备注': bank_entry.remark,
+        })
+
+    if not rows:
+        logger.warning('无日记账数据可导出')
+        return None
+
+    df = pd.DataFrame(rows, columns=columns)
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='银行日记账', index=False)
+
+            ws = writer.sheets['银行日记账']
+            for col in ws.columns:
+                max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in col)
+                ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
+
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    if cell.column_letter in ['E', 'F', 'H']:
+                        cell.number_format = '#,##0.00'
+
+        logger.info('银行日记账导出成功: %s (共 %d 条记录)', output_path, len(rows))
+        return output_path
+    except Exception as e:
+        logger.error('导出银行日记账失败: %s', e, exc_info=True)
+        return None
+
+
+def export_financial_template(total_path, template_type, output_dir=None,
+                              account_mapping=None, operator=''):
+    """
+    标准化导出入口：从总表到财务软件模板的统一入口。
+
+    这是在总表之上增加的一步标准化导出流程：
+    总表数据 → 标准化转换 → 模板格式化 → 导出文件
+
+    Args:
+        total_path: 总表文件路径
+        template_type: 模板类型 ('yonyou_voucher', 'kingdee_voucher', 'bank_journal')
+        output_dir: 输出目录，默认为总表所在目录
+        account_mapping: 科目映射字典，可选
+        operator: 制单人名称
+
+    Returns:
+        dict: 导出结果，包含 output_path, voucher_count, entry_count 等信息
+    """
+    logger = get_logger()
+
+    if template_type not in FINANCIAL_EXPORT_TEMPLATES:
+        raise ValueError(f'不支持的导出模板类型: {template_type}')
+
+    template_info = FINANCIAL_EXPORT_TEMPLATES[template_type]
+
+    if output_dir is None:
+        output_dir = os.path.dirname(total_path) or get_script_dir()
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    base_name = os.path.splitext(os.path.basename(total_path))[0]
+    output_filename = f'{base_name}{template_info["file_suffix"]}_{timestamp}.xlsx'
+    output_path = os.path.join(output_dir, output_filename)
+
+    logger.info('开始财务导出: 模板=%s, 总表=%s, 输出=%s',
+                template_info['name'], total_path, output_path)
+
+    total_records = load_total_table(total_path)
+    if not total_records:
+        logger.error('总表无数据可导出')
+        return {'success': False, 'error': '总表无数据', 'output_path': None}
+
+    vouchers = total_to_standard_transactions(total_records, account_mapping, operator)
+    if not vouchers:
+        logger.error('无有效凭证可导出')
+        return {'success': False, 'error': '无有效凭证', 'output_path': None}
+
+    export_func = {
+        'yonyou_voucher': export_yonyou_voucher,
+        'kingdee_voucher': export_kingdee_voucher,
+        'bank_journal': export_bank_journal,
+    }[template_type]
+
+    result = export_func(vouchers, output_path)
+
+    if result:
+        entry_count = sum(len(v.entries) for v in vouchers)
+        return {
+            'success': True,
+            'output_path': result,
+            'voucher_count': len(vouchers),
+            'entry_count': entry_count,
+            'template_type': template_type,
+            'template_name': template_info['name'],
+        }
+    else:
+        return {'success': False, 'error': '导出失败', 'output_path': None}
+
+
+def cli_ask_export_template():
+    """命令行模式下询问导出模板类型"""
+    print('\n请选择导出模板：')
+    for idx, (key, info) in enumerate(FINANCIAL_EXPORT_TEMPLATES.items(), 1):
+        print(f'  {idx}) {info["name"]}')
+        print(f'     {info["description"]}')
+
+    choice = input('\n请输入选项（直接回车默认为 1 用友凭证）: ').strip()
+
+    if not choice:
+        return 'yonyou_voucher'
+
+    if choice.isdigit():
+        keys = list(FINANCIAL_EXPORT_TEMPLATES.keys())
+        idx = int(choice) - 1
+        if 0 <= idx < len(keys):
+            return keys[idx]
+
+    if choice in FINANCIAL_EXPORT_TEMPLATES:
+        return choice
+
+    return 'yonyou_voucher'
+
+
+def run_export_flow(script_dir):
+    """财务导出主流程"""
+    logger = get_logger()
+    logger.info('========== 财务软件对接导出开始 ==========')
+
+    total_path = ask_file('请选择【银行流水总表】文件')
+    if not total_path:
+        show_info('提示', '未选择总表文件，程序退出。')
+        logger.info('用户未选择总表文件，退出导出流程')
+        return
+
+    logger.info('用户选择总表文件: %s', total_path)
+
+    template_type = cli_ask_export_template()
+    template_info = FINANCIAL_EXPORT_TEMPLATES[template_type]
+    logger.info('用户选择导出模板: %s', template_info['name'])
+
+    operator = input('请输入制单人名称（可选，直接回车为空）: ').strip()
+
+    output_dir = input(f'请输入输出目录（直接回车默认为总表所在目录）: ').strip()
+    if not output_dir:
+        output_dir = os.path.dirname(total_path) or script_dir
+
+    result = export_financial_template(
+        total_path=total_path,
+        template_type=template_type,
+        output_dir=output_dir,
+        operator=operator,
+    )
+
+    if result['success']:
+        msg = (
+            f'导出完成！\n\n'
+            f'导出模板：{result["template_name"]}\n'
+            f'凭证张数：{result["voucher_count"]}\n'
+            f'分录条数：{result["entry_count"]}\n'
+            f'输出文件：{result["output_path"]}'
+        )
+        show_info('导出成功', msg)
+        logger.info('财务导出完成: %s', result["output_path"])
+    else:
+        msg = f'导出失败：{result.get("error", "未知错误")}'
+        show_warning('导出失败', msg)
+        logger.error('财务导出失败: %s', result.get("error"))
+
+    logger.info('========== 财务软件对接导出结束 ==========')
 
 
 # ──────────────────────────────────────────────
@@ -4970,6 +5618,15 @@ def parse_args_and_run():
     parser.add_argument('--once', action='store_true', help='单次运行后退出(配合--watch-dir使用)')
     parser.add_argument('--interval', type=int, metavar='MINUTES', help='单次运行模式下的间隔分钟数')
     parser.add_argument('--no-incremental', action='store_true', help='禁用增量合并，使用全量覆盖')
+    parser.add_argument('--export', action='store_true', help='进入财务软件对接导出功能')
+    parser.add_argument('--export-template', type=str, metavar='TEMPLATE',
+                       help='指定导出模板类型: yonyou_voucher(用友), kingdee_voucher(金蝶), bank_journal(日记账)')
+    parser.add_argument('--export-total', type=str, metavar='TOTAL_FILE',
+                       help='指定总表文件路径用于导出')
+    parser.add_argument('--export-output', type=str, metavar='OUTPUT_DIR',
+                       help='指定导出文件输出目录')
+    parser.add_argument('--export-operator', type=str, metavar='OPERATOR',
+                       help='指定制单人名称')
 
     args = parser.parse_args()
 
@@ -5073,6 +5730,42 @@ def parse_args_and_run():
         run_scheduler_flow(script_dir)
         return True
 
+    if args.export or args.export_template or args.export_total:
+        if args.export_total and args.export_template:
+            template_type = args.export_template
+            if template_type not in FINANCIAL_EXPORT_TEMPLATES:
+                logger.error('不支持的导出模板类型: %s', template_type)
+                print(f'错误: 不支持的导出模板类型 "{template_type}"')
+                print(f'支持的类型: {", ".join(FINANCIAL_EXPORT_TEMPLATES.keys())}')
+                return True
+
+            total_path = os.path.abspath(args.export_total)
+            if not os.path.exists(total_path):
+                logger.error('总表文件不存在: %s', total_path)
+                print(f'错误: 总表文件不存在: {total_path}')
+                return True
+
+            result = export_financial_template(
+                total_path=total_path,
+                template_type=template_type,
+                output_dir=args.export_output,
+                operator=args.export_operator or '',
+            )
+
+            if result['success']:
+                print(f'\n✅ 导出成功！')
+                print(f'   模板: {result["template_name"]}')
+                print(f'   凭证张数: {result["voucher_count"]}')
+                print(f'   分录条数: {result["entry_count"]}')
+                print(f'   输出文件: {result["output_path"]}\n')
+            else:
+                print(f'\n❌ 导出失败: {result.get("error", "未知错误")}\n')
+
+            return True
+        else:
+            run_export_flow(script_dir)
+            return True
+
     return None
 
 
@@ -5107,6 +5800,8 @@ def main():
         run_monitor_flow(script_dir)
     elif mode == 'scheduler':
         run_scheduler_flow(script_dir)
+    elif mode == 'export':
+        run_export_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
