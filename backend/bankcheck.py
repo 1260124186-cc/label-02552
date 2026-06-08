@@ -86,17 +86,6 @@ def cli_askfile(title='请选择文件'):
     return ''
 
 
-def cli_askmode():
-    """命令行模式下让用户选择运行模式"""
-    print('\n请选择运行模式：')
-    print('  1) 主流程：处理银行流水文件夹，输出总表')
-    print('  2) 变更对比：对比两次总表的差异（新增/删除/变更）')
-    choice = input('请输入选项（1 或 2，直接回车默认为 1）: ').strip()
-    if choice == '2':
-        return 'diff'
-    return 'pipeline'
-
-
 def gui_askdirectory(title='请选择银行流水文件夹'):
     """GUI 模式选择文件夹"""
     root = tk.Tk()
@@ -138,17 +127,31 @@ def gui_askfile(title='请选择总表文件'):
     return filepath
 
 
+def cli_askmode():
+    """命令行模式下让用户选择运行模式"""
+    print('\n请选择运行模式：')
+    print('  1) 主流程：处理银行流水文件夹，输出总表')
+    print('  2) 变更对比：对比两次总表的差异（新增/删除/变更）')
+    print('  3) 监控面板：运行监控与告警管理')
+    choice = input('请输入选项（1、2 或 3，直接回车默认为 1）: ').strip()
+    if choice == '2':
+        return 'diff'
+    elif choice == '3':
+        return 'monitor'
+    return 'pipeline'
+
+
 def gui_askmode():
     """GUI 模式下让用户选择运行模式"""
     root = tk.Tk()
     root.withdraw()
     choice = messagebox.askyesnocancel(
         '选择运行模式',
-        '是 = 主流程：处理流水文件夹，输出总表\n\n否 = 变更对比：对比两次总表的差异',
+        '是 = 主流程：处理流水文件夹，输出总表\n\n否 = 变更对比：对比两次总表的差异\n\n取消 = 监控面板：运行监控与告警',
     )
     root.destroy()
     if choice is None:
-        return None
+        return 'monitor'
     return 'pipeline' if choice else 'diff'
 
 
@@ -1195,6 +1198,80 @@ def init_audit_db(db_path=None):
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_lookup_snapshots_file ON lookup_snapshots(lookup_file)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_lookup_snapshots_created ON lookup_snapshots(created_at)')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS alert_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id TEXT NOT NULL UNIQUE,
+            rule_name TEXT NOT NULL,
+            rule_type TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            threshold REAL NOT NULL,
+            window_minutes INTEGER DEFAULT 60,
+            severity TEXT DEFAULT 'warning',
+            enabled INTEGER DEFAULT 1,
+            description TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT NOT NULL
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_id TEXT NOT NULL UNIQUE,
+            rule_id TEXT NOT NULL,
+            rule_name TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            current_value REAL,
+            threshold REAL,
+            operator TEXT,
+            window_minutes INTEGER,
+            description TEXT,
+            triggered_at TEXT NOT NULL,
+            resolved_at TEXT,
+            status TEXT DEFAULT 'active',
+            acknowledged INTEGER DEFAULT 0,
+            acknowledged_by TEXT,
+            acknowledged_at TEXT,
+            audit_log_id TEXT,
+            details TEXT,
+            FOREIGN KEY (rule_id) REFERENCES alert_rules (rule_id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS file_processing_details (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            detail_id TEXT NOT NULL UNIQUE,
+            audit_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            bank TEXT,
+            file_size INTEGER,
+            record_count INTEGER DEFAULT 0,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            processing_duration_ms INTEGER,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY (audit_id) REFERENCES audit_logs (audit_id)
+        )
+    ''')
+
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_alert_rules_type ON alert_rules(rule_type)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled ON alert_rules(enabled)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_alerts_triggered ON alerts(triggered_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_details_audit ON file_processing_details(audit_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_details_status ON file_processing_details(status)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_details_bank ON file_processing_details(bank)')
+
     conn.commit()
     conn.close()
 
@@ -2161,6 +2238,1245 @@ def export_config_changes(output_path, script_dir=None, expand_details=False, **
     return output_path
 
 
+# ──────────────────────────────────────────────
+# 文件处理详情记录
+# ──────────────────────────────────────────────
+
+def record_file_processing_detail(audit_id, file_path, file_name, bank=None,
+                                  status='processing', error_message=None,
+                                  record_count=0, processing_duration_ms=None,
+                                  started_at=None, completed_at=None, script_dir=None):
+    """记录单个文件的处理详情"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+    init_audit_db(db_path)
+
+    detail_id = f"FPD{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    file_size = None
+    try:
+        if os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+    except Exception:
+        pass
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO file_processing_details (
+            detail_id, audit_id, file_path, file_name, bank, file_size,
+            record_count, status, error_message, processing_duration_ms,
+            started_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        detail_id, audit_id, file_path, file_name, bank, file_size,
+        record_count, status, error_message, processing_duration_ms,
+        started_at or now, completed_at
+    ))
+    conn.commit()
+    conn.close()
+    return detail_id
+
+
+def update_file_processing_detail(detail_id, status=None, error_message=None,
+                                  record_count=None, processing_duration_ms=None,
+                                  completed_at=None, script_dir=None):
+    """更新文件处理详情"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    updates = []
+    params = []
+    if status is not None:
+        updates.append('status = ?')
+        params.append(status)
+    if error_message is not None:
+        updates.append('error_message = ?')
+        params.append(error_message)
+    if record_count is not None:
+        updates.append('record_count = ?')
+        params.append(record_count)
+    if processing_duration_ms is not None:
+        updates.append('processing_duration_ms = ?')
+        params.append(processing_duration_ms)
+    if completed_at is not None:
+        updates.append('completed_at = ?')
+        params.append(completed_at)
+
+    if not updates:
+        conn.close()
+        return
+
+    params.append(detail_id)
+    query = f"UPDATE file_processing_details SET {', '.join(updates)} WHERE detail_id = ?"
+    cursor.execute(query, params)
+    conn.commit()
+    conn.close()
+
+
+# ──────────────────────────────────────────────
+# 告警规则管理
+# ──────────────────────────────────────────────
+
+@dataclass
+class AlertRule:
+    rule_id: str
+    rule_name: str
+    rule_type: str
+    metric: str
+    operator: str
+    threshold: float
+    window_minutes: int = 60
+    severity: str = 'warning'
+    enabled: bool = True
+    description: Optional[str] = None
+
+
+DEFAULT_ALERT_RULES = [
+    {
+        'rule_name': '处理成功率过低',
+        'rule_type': 'pipeline',
+        'metric': 'success_rate',
+        'operator': '<',
+        'threshold': 80.0,
+        'window_minutes': 60,
+        'severity': 'critical',
+        'description': '最近1小时处理成功率低于80%',
+    },
+    {
+        'rule_name': '单次运行耗时过长',
+        'rule_type': 'pipeline',
+        'metric': 'duration_ms',
+        'operator': '>',
+        'threshold': 300000,
+        'window_minutes': 1,
+        'severity': 'warning',
+        'description': '单次运行耗时超过5分钟',
+    },
+    {
+        'rule_name': '错误文件过多',
+        'rule_type': 'pipeline',
+        'metric': 'error_files',
+        'operator': '>',
+        'threshold': 5,
+        'window_minutes': 60,
+        'severity': 'warning',
+        'description': '最近1小时错误文件数超过5个',
+    },
+    {
+        'rule_name': '无法识别文件过多',
+        'rule_type': 'pipeline',
+        'metric': 'unprocessed_files',
+        'operator': '>',
+        'threshold': 10,
+        'window_minutes': 60,
+        'severity': 'warning',
+        'description': '最近1小时无法识别文件数超过10个',
+    },
+    {
+        'rule_name': '连续运行失败',
+        'rule_type': 'pipeline',
+        'metric': 'consecutive_failures',
+        'operator': '>=',
+        'threshold': 3,
+        'window_minutes': 120,
+        'severity': 'critical',
+        'description': '最近2小时内连续3次运行失败',
+    },
+    {
+        'rule_name': '处理量突增',
+        'rule_type': 'pipeline',
+        'metric': 'processed_files',
+        'operator': '>',
+        'threshold': 100,
+        'window_minutes': 60,
+        'severity': 'info',
+        'description': '最近1小时处理文件数超过100个',
+    },
+]
+
+
+def init_default_alert_rules(script_dir=None, username=None):
+    """初始化默认告警规则"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+    init_audit_db(db_path)
+
+    username = username or get_current_user()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+    created_count = 0
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    for rule_def in DEFAULT_ALERT_RULES:
+        cursor.execute('SELECT rule_id FROM alert_rules WHERE rule_name = ?',
+                       (rule_def['rule_name'],))
+        if cursor.fetchone():
+            continue
+
+        rule_id = f"RUL{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
+        cursor.execute('''
+            INSERT INTO alert_rules (
+                rule_id, rule_name, rule_type, metric, operator, threshold,
+                window_minutes, severity, enabled, description, created_at, updated_at, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            rule_id, rule_def['rule_name'], rule_def['rule_type'], rule_def['metric'],
+            rule_def['operator'], rule_def['threshold'], rule_def['window_minutes'],
+            rule_def['severity'], 1, rule_def.get('description'),
+            now, now, username
+        ))
+        created_count += 1
+
+    conn.commit()
+    conn.close()
+
+    if created_count > 0:
+        logger = get_logger()
+        logger.info('已初始化 %d 条默认告警规则', created_count)
+    return created_count
+
+
+def query_alert_rules(script_dir=None, rule_type=None, enabled=None, limit=100):
+    """查询告警规则"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    if not os.path.exists(db_path):
+        return []
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = 'SELECT * FROM alert_rules WHERE 1=1'
+    params = []
+
+    if rule_type:
+        query += ' AND rule_type = ?'
+        params.append(rule_type)
+    if enabled is not None:
+        query += ' AND enabled = ?'
+        params.append(1 if enabled else 0)
+
+    query += ' ORDER BY created_at DESC LIMIT ?'
+    params.append(limit)
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def create_alert_rule(rule_name, rule_type, metric, operator, threshold,
+                      window_minutes=60, severity='warning', description=None,
+                      script_dir=None, username=None):
+    """创建新的告警规则"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+    init_audit_db(db_path)
+
+    username = username or get_current_user()
+    rule_id = f"RUL{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO alert_rules (
+            rule_id, rule_name, rule_type, metric, operator, threshold,
+            window_minutes, severity, enabled, description, created_at, updated_at, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        rule_id, rule_name, rule_type, metric, operator, threshold,
+        window_minutes, severity, 1, description, now, now, username
+    ))
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.info('已创建告警规则 [%s] %s', rule_id, rule_name)
+    return rule_id
+
+
+def toggle_alert_rule(rule_id, enabled, script_dir=None):
+    """启用/禁用告警规则"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE alert_rules SET enabled = ?, updated_at = ? WHERE rule_id = ?
+    ''', (1 if enabled else 0, datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'), rule_id))
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.info('告警规则 [%s] 已%s', rule_id, '启用' if enabled else '禁用')
+
+
+def delete_alert_rule(rule_id, script_dir=None):
+    """删除告警规则"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM alert_rules WHERE rule_id = ?', (rule_id,))
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.info('告警规则 [%s] 已删除', rule_id)
+
+
+# ──────────────────────────────────────────────
+# 告警检测引擎
+# ──────────────────────────────────────────────
+
+def _evaluate_condition(current_value, operator, threshold):
+    """评估告警条件"""
+    if current_value is None:
+        return False
+
+    ops = {
+        '>': lambda a, b: a > b,
+        '>=': lambda a, b: a >= b,
+        '<': lambda a, b: a < b,
+        '<=': lambda a, b: a <= b,
+        '==': lambda a, b: a == b,
+        '!=': lambda a, b: a != b,
+    }
+
+    func = ops.get(operator)
+    if func is None:
+        return False
+    return func(current_value, threshold)
+
+
+def _get_metric_value(metric, records):
+    """从审计记录中计算指标值"""
+    if not records:
+        return None
+
+    if metric == 'success_rate':
+        total = len(records)
+        success = sum(1 for r in records if r['status'] == 'success')
+        return (success / total * 100) if total > 0 else 100.0
+
+    if metric == 'duration_ms':
+        latest = max(records, key=lambda r: r['started_at'] or '')
+        return latest.get('duration_ms')
+
+    if metric == 'error_files':
+        return sum(r.get('error_files', 0) for r in records)
+
+    if metric == 'unprocessed_files':
+        return sum(r.get('unprocessed_files', 0) for r in records)
+
+    if metric == 'processed_files':
+        return sum(r.get('processed_files', 0) for r in records)
+
+    if metric == 'consecutive_failures':
+        count = 0
+        for r in sorted(records, key=lambda x: x['started_at'] or '', reverse=True):
+            if r['status'] == 'failed':
+                count += 1
+            else:
+                break
+        return count
+
+    return None
+
+
+def create_alert(rule, current_value, audit_log_id=None, details=None, script_dir=None):
+    """创建告警记录"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+    init_audit_db(db_path)
+
+    alert_id = f"ALT{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    description = rule.get('description', '')
+    if current_value is not None:
+        description += f' 当前值: {current_value}, 阈值: {rule["operator"]}{rule["threshold"]}'
+
+    details_json = json.dumps(details, ensure_ascii=False) if details else None
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT alert_id FROM alerts
+        WHERE rule_id = ? AND status = 'active'
+        ORDER BY triggered_at DESC LIMIT 1
+    ''', (rule['rule_id'],))
+    existing = cursor.fetchone()
+
+    if existing:
+        conn.close()
+        return None
+
+    cursor.execute('''
+        INSERT INTO alerts (
+            alert_id, rule_id, rule_name, severity, alert_type, metric,
+            current_value, threshold, operator, window_minutes, description,
+            triggered_at, status, audit_log_id, details
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        alert_id, rule['rule_id'], rule['rule_name'], rule['severity'],
+        rule['rule_type'], rule['metric'], current_value, rule['threshold'],
+        rule['operator'], rule['window_minutes'], description,
+        now, 'active', audit_log_id, details_json
+    ))
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.warning('告警触发 [%s] %s: %s', alert_id, rule['severity'].upper(),
+                   rule['rule_name'])
+    return alert_id
+
+
+def run_alert_detection(script_dir=None, username=None):
+    """运行告警检测，检查所有启用的规则"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    logger = get_logger()
+
+    init_default_alert_rules(script_dir, username)
+
+    rules = query_alert_rules(script_dir=script_dir, enabled=True)
+    if not rules:
+        return []
+
+    triggered_alerts = []
+
+    for rule in rules:
+        window_minutes = rule['window_minutes']
+        from datetime import timedelta
+        start_time = (datetime.now() - timedelta(minutes=window_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+
+        records = query_audit_logs(
+            script_dir=script_dir,
+            start_date=start_time.split(' ')[0],
+            limit=1000
+        )
+
+        records_in_window = [
+            r for r in records
+            if r.get('started_at') and r['started_at'] >= start_time
+        ]
+
+        if not records_in_window:
+            continue
+
+        current_value = _get_metric_value(rule['metric'], records_in_window)
+        if current_value is None:
+            continue
+
+        if _evaluate_condition(current_value, rule['operator'], rule['threshold']):
+            latest_record = max(records_in_window, key=lambda r: r['started_at'] or '')
+            alert_id = create_alert(
+                rule, current_value,
+                audit_log_id=latest_record.get('audit_id'),
+                details={'records_analyzed': len(records_in_window)},
+                script_dir=script_dir
+            )
+            if alert_id:
+                triggered_alerts.append({
+                    'alert_id': alert_id,
+                    'rule': rule,
+                    'current_value': current_value
+                })
+
+    if triggered_alerts:
+        logger.warning('告警检测完成，触发 %d 条告警', len(triggered_alerts))
+    else:
+        logger.info('告警检测完成，无异常')
+
+    return triggered_alerts
+
+
+def query_alerts(script_dir=None, status=None, severity=None, limit=100):
+    """查询告警记录"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    if not os.path.exists(db_path):
+        return []
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = 'SELECT * FROM alerts WHERE 1=1'
+    params = []
+
+    if status:
+        query += ' AND status = ?'
+        params.append(status)
+    if severity:
+        query += ' AND severity = ?'
+        params.append(severity)
+
+    query += ' ORDER BY triggered_at DESC LIMIT ?'
+    params.append(limit)
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for row in rows:
+        record = dict(row)
+        if record.get('details'):
+            try:
+                record['details'] = json.loads(record['details'])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        result.append(record)
+    return result
+
+
+def acknowledge_alert(alert_id, script_dir=None, username=None):
+    """确认告警"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    username = username or get_current_user()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE alerts SET acknowledged = 1, acknowledged_by = ?, acknowledged_at = ?
+        WHERE alert_id = ?
+    ''', (username, now, alert_id))
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.info('告警 [%s] 已由 %s 确认', alert_id, username)
+
+
+def resolve_alert(alert_id, script_dir=None, username=None):
+    """解决告警"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    username = username or get_current_user()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE alerts SET status = 'resolved', resolved_at = ?,
+                   acknowledged = 1, acknowledged_by = ?, acknowledged_at = ?
+        WHERE alert_id = ?
+    ''', (now, username, now, alert_id))
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.info('告警 [%s] 已由 %s 标记为已解决', alert_id, username)
+
+
+# ──────────────────────────────────────────────
+# 监控统计分析
+# ──────────────────────────────────────────────
+
+@dataclass
+class MonitorStats:
+    total_runs: int = 0
+    success_count: int = 0
+    failed_count: int = 0
+    success_rate: float = 0.0
+    avg_duration_ms: float = 0.0
+    max_duration_ms: int = 0
+    min_duration_ms: int = 0
+    total_processed_files: int = 0
+    total_extracted_records: int = 0
+    total_error_files: int = 0
+    total_unprocessed_files: int = 0
+
+
+def get_monitor_stats(script_dir=None, days=7):
+    """获取指定天数内的监控统计数据"""
+    from datetime import timedelta
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+    records = query_audit_logs(
+        script_dir=script_dir,
+        start_date=start_date,
+        limit=10000
+    )
+
+    if not records:
+        return MonitorStats()
+
+    durations = [r['duration_ms'] for r in records if r.get('duration_ms') is not None]
+
+    stats = MonitorStats(
+        total_runs=len(records),
+        success_count=sum(1 for r in records if r['status'] == 'success'),
+        failed_count=sum(1 for r in records if r['status'] == 'failed'),
+        total_processed_files=sum(r.get('processed_files', 0) for r in records),
+        total_extracted_records=sum(r.get('extracted_records', 0) for r in records),
+        total_error_files=sum(r.get('error_files', 0) for r in records),
+        total_unprocessed_files=sum(r.get('unprocessed_files', 0) for r in records),
+    )
+
+    if stats.total_runs > 0:
+        stats.success_rate = (stats.success_count / stats.total_runs) * 100
+
+    if durations:
+        stats.avg_duration_ms = sum(durations) / len(durations)
+        stats.max_duration_ms = max(durations)
+        stats.min_duration_ms = min(durations)
+
+    return stats
+
+
+def get_daily_trend(script_dir=None, days=7):
+    """获取每日运行趋势数据"""
+    from datetime import timedelta
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    if not os.path.exists(db_path):
+        return []
+
+    start_date = (datetime.now() - timedelta(days=days - 1)).strftime('%Y-%m-%d')
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT
+            date(started_at) as run_date,
+            COUNT(*) as total_runs,
+            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
+            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+            AVG(duration_ms) as avg_duration_ms,
+            SUM(processed_files) as total_processed_files,
+            SUM(extracted_records) as total_extracted_records,
+            SUM(error_files) as total_error_files,
+            SUM(unprocessed_files) as total_unprocessed_files
+        FROM audit_logs
+        WHERE date(started_at) >= date(?)
+        GROUP BY date(started_at)
+        ORDER BY run_date DESC
+    ''', (start_date,))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    trend_data = []
+    for row in rows:
+        data = dict(row)
+        total = data['total_runs'] or 0
+        success = data['success_count'] or 0
+        data['success_rate'] = (success / total * 100) if total > 0 else 0
+        trend_data.append(data)
+
+    return trend_data
+
+
+def get_bank_distribution(script_dir=None, days=7):
+    """获取各银行处理分布"""
+    from datetime import timedelta
+    if script_dir is None:
+        script_dir = get_script_dir()
+    db_path = get_audit_db_path(script_dir)
+
+    if not os.path.exists(db_path):
+        return []
+
+    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT
+            fpd.bank,
+            COUNT(*) as file_count,
+            SUM(fpd.record_count) as total_records,
+            AVG(fpd.processing_duration_ms) as avg_duration_ms,
+            SUM(CASE WHEN fpd.status = 'success' THEN 1 ELSE 0 END) as success_count,
+            SUM(CASE WHEN fpd.status = 'error' THEN 1 ELSE 0 END) as error_count
+        FROM file_processing_details fpd
+        JOIN audit_logs al ON fpd.audit_id = al.audit_id
+        WHERE date(al.started_at) >= date(?) AND fpd.bank IS NOT NULL
+        GROUP BY fpd.bank
+        ORDER BY file_count DESC
+    ''', (start_date,))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for row in rows:
+        data = dict(row)
+        total = data['file_count'] or 0
+        success = data['success_count'] or 0
+        data['success_rate'] = (success / total * 100) if total > 0 else 0
+        result.append(data)
+
+    return result
+
+
+def get_recent_runs(script_dir=None, limit=10):
+    """获取最近运行记录列表"""
+    records = query_audit_logs(script_dir=script_dir, limit=limit)
+    return records
+
+
+def get_active_alerts_summary(script_dir=None):
+    """获取活跃告警摘要"""
+    alerts = query_alerts(script_dir=script_dir, status='active', limit=100)
+    summary = {
+        'total': len(alerts),
+        'critical': sum(1 for a in alerts if a['severity'] == 'critical'),
+        'warning': sum(1 for a in alerts if a['severity'] == 'warning'),
+        'info': sum(1 for a in alerts if a['severity'] == 'info'),
+        'alerts': alerts
+    }
+    return summary
+
+
+# ──────────────────────────────────────────────
+# 运行监控面板
+# ──────────────────────────────────────────────
+
+def _format_duration(ms):
+    """格式化毫秒为可读时间"""
+    if ms is None:
+        return 'N/A'
+    seconds = ms / 1000
+    if seconds < 60:
+        return f'{seconds:.1f}秒'
+    minutes = seconds / 60
+    if minutes < 60:
+        return f'{minutes:.1f}分钟'
+    hours = minutes / 60
+    return f'{hours:.2f}小时'
+
+
+def _format_rate(rate):
+    """格式化百分比"""
+    if rate is None:
+        return 'N/A'
+    return f'{rate:.2f}%'
+
+
+def _get_severity_color(severity):
+    """获取告警严重度显示符号"""
+    colors = {
+        'critical': '🔴',
+        'warning': '🟡',
+        'info': '🔵',
+    }
+    return colors.get(severity, '⚪')
+
+
+def _get_status_symbol(status):
+    """获取状态显示符号"""
+    symbols = {
+        'success': '✅',
+        'failed': '❌',
+        'running': '⏳',
+        'active': '🔴',
+        'resolved': '✅',
+        'acknowledged': '🟡',
+    }
+    return symbols.get(status, '⚪')
+
+
+def render_monitor_dashboard(script_dir=None):
+    """渲染监控面板主界面"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    init_default_alert_rules(script_dir)
+
+    stats = get_monitor_stats(script_dir, days=7)
+    daily_trend = get_daily_trend(script_dir, days=7)
+    recent_runs = get_recent_runs(script_dir, limit=5)
+    alerts_summary = get_active_alerts_summary(script_dir)
+    bank_dist = get_bank_distribution(script_dir, days=7)
+
+    print('\n' + '=' * 80)
+    print('📊 运行监控与告警面板'.center(70))
+    print('=' * 80)
+    print(f'统计周期: 最近7天')
+    print()
+
+    print('┌' + '─' * 78 + '┐')
+    print('│  📈 运行概览' + ' ' * 65 + '│')
+    print('├' + '─' * 78 + '┤')
+    print(f'│  总运行次数: {stats.total_runs:<10}  |  成功: {stats.success_count:<10}  |  失败: {stats.failed_count:<10}  |  成功率: {_format_rate(stats.success_rate):>10} │')
+    print(f'│  平均耗时: {_format_duration(stats.avg_duration_ms):<15} |  最大: {_format_duration(stats.max_duration_ms):<15} |  最小: {_format_duration(stats.min_duration_ms):<15} │')
+    print(f'│  处理文件: {stats.total_processed_files:<10} |  提取记录: {stats.total_extracted_records:<10} |  错误文件: {stats.total_error_files:<10} |  未识别: {stats.total_unprocessed_files:<10} │')
+    print('└' + '─' * 78 + '┘')
+    print()
+
+    if alerts_summary['total'] > 0:
+        print('┌' + '─' * 78 + '┐')
+        print(f'│  🚨 活跃告警 ({alerts_summary["total"]}条)' + ' ' * 56 + '│')
+        print('├' + '─' * 78 + '┤')
+        print(f'│  🔴 严重: {alerts_summary["critical"]:<5} | 🟡 警告: {alerts_summary["warning"]:<5} | 🔵 信息: {alerts_summary["info"]:<5}' + ' ' * 45 + '│')
+        for alert in alerts_summary['alerts'][:3]:
+            sev = _get_severity_color(alert['severity'])
+            short_desc = alert.get('description', '')[:60]
+            print(f'│  {sev} [{alert["alert_id"]}] {alert["rule_name"]}: {short_desc} │')
+        if alerts_summary['total'] > 3:
+            print(f'│  ... 还有 {alerts_summary["total"] - 3} 条告警，请查看详情' + ' ' * 38 + '│')
+        print('└' + '─' * 78 + '┘')
+        print()
+
+    if daily_trend:
+        print('┌' + '─' * 78 + '┐')
+        print('│  📅 每日运行趋势' + ' ' * 63 + '│')
+        print('├' + '─' * 78 + '┤')
+        print(f'│  {"日期":<12} {"次数":<8} {"成功":<8} {"失败":<8} {"成功率":<10} {"平均耗时":<12} {"处理量":<8} │')
+        print('│' + '─' * 78 + '│')
+        for day in daily_trend[:7]:
+            print(f'│  {day["run_date"]:<12} {day["total_runs"]:<8} {day["success_count"]:<8} {day["failed_count"]:<8} {_format_rate(day["success_rate"]):<10} {_format_duration(day["avg_duration_ms"]):<12} {day["total_processed_files"]:<8} │')
+        print('└' + '─' * 78 + '┘')
+        print()
+
+    if bank_dist:
+        print('┌' + '─' * 78 + '┐')
+        print('│  🏦 银行处理分布' + ' ' * 63 + '│')
+        print('├' + '─' * 78 + '┤')
+        print(f'│  {"银行":<12} {"文件数":<8} {"记录数":<10} {"成功率":<10} {"平均耗时":<12} {"错误数":<8} │')
+        print('│' + '─' * 78 + '│')
+        for bank in bank_dist:
+            name = bank.get('bank', '未知')[:10]
+            print(f'│  {name:<12} {bank["file_count"]:<8} {bank["total_records"]:<10} {_format_rate(bank["success_rate"]):<10} {_format_duration(bank["avg_duration_ms"]):<12} {bank["error_count"]:<8} │')
+        print('└' + '─' * 78 + '┘')
+        print()
+
+    if recent_runs:
+        print('┌' + '─' * 78 + '┐')
+        print('│  🕐 最近运行记录' + ' ' * 63 + '│')
+        print('├' + '─' * 78 + '┤')
+        print(f'│  {"审计ID":<14} {"时间":<20} {"类型":<10} {"状态":<8} {"耗时":<12} {"文件":<6} │')
+        print('│' + '─' * 78 + '│')
+        for run in recent_runs:
+            status_sym = _get_status_symbol(run['status'])
+            audit_id = run['audit_id'][:12]
+            start_time = run.get('started_at', '')[:19]
+            op_type = run.get('operation_type', '')[:8]
+            duration = _format_duration(run.get('duration_ms'))
+            files = run.get('processed_files', 0)
+            print(f'│  {audit_id:<14} {start_time:<20} {op_type:<10} {status_sym} {run["status"]:<6} {duration:<12} {files:<6} │')
+        print('└' + '─' * 78 + '┘')
+    print()
+
+
+def show_monitor_menu(script_dir=None):
+    """显示监控面板菜单并处理用户选择"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    logger = get_logger()
+
+    while True:
+        run_alert_detection(script_dir)
+        render_monitor_dashboard(script_dir)
+
+        print('\n请选择操作：')
+        print('  1) 🔄 刷新面板')
+        print('  2) 🚨 查看所有告警')
+        print('  3) 📋 查看详细运行历史')
+        print('  4) ⚙️  告警规则管理')
+        print('  5) 📊 导出监控报告')
+        print('  6) ✅ 确认/解决告警')
+        print('  0) 返回主菜单')
+
+        choice = input('\n请输入选项: ').strip()
+
+        if choice == '0':
+            break
+        elif choice == '1':
+            continue
+        elif choice == '2':
+            _show_all_alerts(script_dir)
+        elif choice == '3':
+            _show_run_history(script_dir)
+        elif choice == '4':
+            _show_alert_rules_menu(script_dir)
+        elif choice == '5':
+            _export_monitor_report(script_dir)
+        elif choice == '6':
+            _acknowledge_alert_menu(script_dir)
+        else:
+            print('无效选项，请重试')
+            input('\n按回车继续...')
+
+
+def _show_all_alerts(script_dir=None):
+    """显示所有告警列表"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    alerts = query_alerts(script_dir=script_dir, limit=50)
+
+    print('\n' + '=' * 80)
+    print('📋 告警记录列表'.center(70))
+    print('=' * 80)
+    print(f'{"告警ID":<16} {"时间":<20} {"严重度":<8} {"规则名称":<20} {"状态":<10}')
+    print('-' * 80)
+
+    for alert in alerts:
+        sev = _get_severity_color(alert['severity'])
+        status_sym = _get_status_symbol(alert['status'])
+        alert_id = alert['alert_id'][:14]
+        triggered = alert.get('triggered_at', '')[:19]
+        rule_name = alert.get('rule_name', '')[:18]
+        status = alert.get('status', '')
+        print(f'{alert_id:<16} {triggered:<20} {sev} {alert["severity"]:<6} {rule_name:<20} {status_sym} {status:<8}')
+        print(f'  → {alert.get("description", "")[:70]}')
+
+    if not alerts:
+        print('暂无告警记录')
+
+    input('\n按回车继续...')
+
+
+def _show_run_history(script_dir=None):
+    """显示详细运行历史"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    days_input = input('查看最近几天的记录 (默认7): ').strip()
+    days = int(days_input) if days_input.isdigit() else 7
+
+    records = query_audit_logs(script_dir=script_dir, limit=50)
+    daily_trend = get_daily_trend(script_dir, days=days)
+
+    print('\n' + '=' * 80)
+    print(f'📊 运行历史记录 (最近{days}天)'.center(70))
+    print('=' * 80)
+    print(f'{"审计ID":<14} {"开始时间":<20} {"类型":<10} {"状态":<8} {"耗时":<12} {"文件":<6} {"记录":<8}')
+    print('-' * 80)
+
+    for run in records:
+        status_sym = _get_status_symbol(run['status'])
+        audit_id = run['audit_id'][:12]
+        start_time = run.get('started_at', '')[:19]
+        op_type = run.get('operation_type', '')[:8]
+        duration = _format_duration(run.get('duration_ms'))
+        files = run.get('processed_files', 0)
+        recs = run.get('extracted_records', 0)
+        print(f'{audit_id:<14} {start_time:<20} {op_type:<10} {status_sym} {run["status"]:<6} {duration:<12} {files:<6} {recs:<8}')
+
+    if daily_trend:
+        print('\n' + '=' * 80)
+        print('📈 处理量趋势图 (ASCII)'.center(70))
+        print('=' * 80)
+        max_files = max(d.get('total_processed_files', 0) for d in daily_trend) or 1
+        for day in reversed(daily_trend):
+            date = day['run_date']
+            files = day.get('total_processed_files', 0)
+            bar_len = int((files / max_files) * 40)
+            bar = '█' * bar_len
+            print(f'{date} | {bar:<40} | {files:>5} 文件')
+
+    input('\n按回车继续...')
+
+
+def _show_alert_rules_menu(script_dir=None):
+    """告警规则管理菜单"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    while True:
+        rules = query_alert_rules(script_dir=script_dir)
+
+        print('\n' + '=' * 80)
+        print('⚙️  告警规则管理'.center(70))
+        print('=' * 80)
+        print(f'{"规则ID":<12} {"名称":<20} {"指标":<16} {"条件":<16} {"严重度":<8} {"状态":<8}')
+        print('-' * 80)
+
+        for rule in rules:
+            rid = rule['rule_id'][:10]
+            name = rule['rule_name'][:18]
+            metric = rule['metric'][:14]
+            condition = f'{rule["operator"]}{rule["threshold"]}'
+            enabled = '✅启用' if rule['enabled'] else '❌禁用'
+            print(f'{rid:<12} {name:<20} {metric:<16} {condition:<16} {rule["severity"]:<8} {enabled:<8}')
+
+        print('\n请选择操作：')
+        print('  1) 启用/禁用规则')
+        print('  2) 新增规则')
+        print('  3) 删除规则')
+        print('  4) 重置为默认规则')
+        print('  0) 返回')
+
+        choice = input('\n请输入选项: ').strip()
+
+        if choice == '0':
+            break
+        elif choice == '1':
+            rule_id = input('请输入规则ID: ').strip()
+            rule = next((r for r in rules if r['rule_id'] == rule_id), None)
+            if rule:
+                new_state = not rule['enabled']
+                toggle_alert_rule(rule_id, new_state, script_dir)
+                print(f'规则已{"启用" if new_state else "禁用"}')
+            else:
+                print('未找到该规则')
+        elif choice == '2':
+            _create_new_rule_interactive(script_dir)
+        elif choice == '3':
+            rule_id = input('请输入要删除的规则ID: ').strip()
+            confirm = input(f'确认删除规则 {rule_id}? (y/N): ').strip().lower()
+            if confirm == 'y':
+                delete_alert_rule(rule_id, script_dir)
+                print('规则已删除')
+        elif choice == '4':
+            confirm = input('确认重置所有规则为默认? (y/N): ').strip().lower()
+            if confirm == 'y':
+                conn = sqlite3.connect(get_audit_db_path(script_dir))
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM alert_rules')
+                conn.commit()
+                conn.close()
+                init_default_alert_rules(script_dir)
+                print('已重置为默认规则')
+        input('\n按回车继续...')
+
+
+def _create_new_rule_interactive(script_dir=None):
+    """交互式创建新告警规则"""
+    print('\n--- 新建告警规则 ---')
+    rule_name = input('规则名称: ').strip()
+    if not rule_name:
+        print('名称不能为空')
+        return
+
+    print('\n指标类型:')
+    print('  success_rate - 成功率')
+    print('  duration_ms - 运行耗时(ms)')
+    print('  error_files - 错误文件数')
+    print('  unprocessed_files - 未识别文件数')
+    print('  processed_files - 处理文件数')
+    print('  consecutive_failures - 连续失败次数')
+    metric = input('请输入指标: ').strip()
+
+    print('\n操作符: >, >=, <, <=, ==, !=')
+    operator = input('请输入操作符: ').strip()
+
+    threshold_input = input('阈值: ').strip()
+    try:
+        threshold = float(threshold_input)
+    except ValueError:
+        print('阈值必须是数字')
+        return
+
+    window_input = input('时间窗口(分钟，默认60): ').strip()
+    window_minutes = int(window_input) if window_input.isdigit() else 60
+
+    print('\n严重度: critical, warning, info')
+    severity = input('严重度 (默认warning): ').strip() or 'warning'
+
+    description = input('描述 (可选): ').strip() or None
+
+    rule_id = create_alert_rule(
+        rule_name=rule_name,
+        rule_type='pipeline',
+        metric=metric,
+        operator=operator,
+        threshold=threshold,
+        window_minutes=window_minutes,
+        severity=severity,
+        description=description,
+        script_dir=script_dir
+    )
+    print(f'规则已创建，ID: {rule_id}')
+
+
+def _acknowledge_alert_menu(script_dir=None):
+    """确认/解决告警菜单"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    alerts = query_alerts(script_dir=script_dir, status='active', limit=50)
+
+    if not alerts:
+        print('\n没有活跃的告警需要处理')
+        input('按回车继续...')
+        return
+
+    print('\n' + '=' * 80)
+    print('✅ 告警处理'.center(70))
+    print('=' * 80)
+    print(f'{"告警ID":<16} {"时间":<20} {"严重度":<8} {"规则名称":<20}')
+    print('-' * 80)
+
+    for alert in alerts:
+        sev = _get_severity_color(alert['severity'])
+        alert_id = alert['alert_id'][:14]
+        triggered = alert.get('triggered_at', '')[:19]
+        rule_name = alert.get('rule_name', '')[:18]
+        print(f'{alert_id:<16} {triggered:<20} {sev} {alert["severity"]:<6} {rule_name:<20}')
+        print(f'  → {alert.get("description", "")[:70]}')
+
+    alert_id = input('\n请输入要处理的告警ID: ').strip()
+    if not alert_id:
+        return
+
+    alert = next((a for a in alerts if a['alert_id'] == alert_id), None)
+    if not alert:
+        print('未找到该告警')
+        input('按回车继续...')
+        return
+
+    print('\n请选择操作：')
+    print('  1) 确认告警')
+    print('  2) 标记为已解决')
+    action = input('请输入选项: ').strip()
+
+    if action == '1':
+        acknowledge_alert(alert_id, script_dir)
+        print('告警已确认')
+    elif action == '2':
+        resolve_alert(alert_id, script_dir)
+        print('告警已标记为已解决')
+
+    input('按回车继续...')
+
+
+def _export_monitor_report(script_dir=None):
+    """导出监控报告到Excel"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    logger = get_logger()
+
+    days_input = input('导出最近几天的数据 (默认7): ').strip()
+    days = int(days_input) if days_input.isdigit() else 7
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_path = os.path.join(script_dir, f'监控报告_{timestamp}.xlsx')
+
+    stats = get_monitor_stats(script_dir, days=days)
+    daily_trend = get_daily_trend(script_dir, days=days)
+    bank_dist = get_bank_distribution(script_dir, days=days)
+    alerts = query_alerts(script_dir=script_dir, limit=1000)
+    runs = query_audit_logs(script_dir=script_dir, limit=1000)
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            summary_data = [{
+                '统计项目': '总运行次数',
+                '数值': stats.total_runs,
+            }, {
+                '统计项目': '成功次数',
+                '数值': stats.success_count,
+            }, {
+                '统计项目': '失败次数',
+                '数值': stats.failed_count,
+            }, {
+                '统计项目': '成功率(%)',
+                '数值': round(stats.success_rate, 2),
+            }, {
+                '统计项目': '平均耗时(秒)',
+                '数值': round(stats.avg_duration_ms / 1000, 2) if stats.avg_duration_ms else None,
+            }, {
+                '统计项目': '最大耗时(秒)',
+                '数值': round(stats.max_duration_ms / 1000, 2) if stats.max_duration_ms else None,
+            }, {
+                '统计项目': '最小耗时(秒)',
+                '数值': round(stats.min_duration_ms / 1000, 2) if stats.min_duration_ms else None,
+            }, {
+                '统计项目': '总处理文件数',
+                '数值': stats.total_processed_files,
+            }, {
+                '统计项目': '总提取记录数',
+                '数值': stats.total_extracted_records,
+            }, {
+                '统计项目': '总错误文件数',
+                '数值': stats.total_error_files,
+            }, {
+                '统计项目': '总未识别文件数',
+                '数值': stats.total_unprocessed_files,
+            }, {
+                '统计项目': '活跃告警数',
+                '数值': sum(1 for a in alerts if a['status'] == 'active'),
+            }, {
+                '统计项目': '严重告警数',
+                '数值': sum(1 for a in alerts if a['status'] == 'active' and a['severity'] == 'critical'),
+            }]
+            pd.DataFrame(summary_data).to_excel(writer, sheet_name='概览', index=False)
+
+            if daily_trend:
+                df_trend = pd.DataFrame(daily_trend)
+                df_trend.to_excel(writer, sheet_name='每日趋势', index=False)
+
+            if bank_dist:
+                df_bank = pd.DataFrame(bank_dist)
+                df_bank.to_excel(writer, sheet_name='银行分布', index=False)
+
+            if runs:
+                df_runs = pd.DataFrame(runs)
+                df_runs.to_excel(writer, sheet_name='运行历史', index=False)
+
+            if alerts:
+                for a in alerts:
+                    if isinstance(a.get('details'), (dict, list)):
+                        a['details'] = json.dumps(a['details'], ensure_ascii=False)
+                df_alerts = pd.DataFrame(alerts)
+                df_alerts.to_excel(writer, sheet_name='告警记录', index=False)
+
+        logger.info('监控报告已导出: %s', output_path)
+        print(f'\n✅ 监控报告已导出到: {output_path}')
+    except Exception as e:
+        logger.error('导出监控报告失败: %s', e)
+        print(f'\n❌ 导出失败: {e}')
+
+    input('\n按回车继续...')
+
+
+def run_monitor_flow(script_dir):
+    """监控面板流程"""
+    logger = get_logger()
+    logger.info('========== 运行监控面板启动 ==========')
+
+    init_default_alert_rules(script_dir)
+    run_alert_detection(script_dir)
+    show_monitor_menu(script_dir)
+
+    logger.info('========== 运行监控面板关闭 ==========')
+
+
 def run_pipeline_flow(script_dir):
     """主流程：处理银行流水文件夹，输出总表"""
     logger = get_logger()
@@ -2273,6 +3589,8 @@ def main():
     script_dir = get_script_dir()
 
     init_audit_db(get_audit_db_path(script_dir))
+    init_default_alert_rules(script_dir)
+    run_alert_detection(script_dir)
     logger.info('当前操作用户: %s', get_current_user())
 
     mode = ask_mode()
@@ -2286,6 +3604,8 @@ def main():
         run_pipeline_flow(script_dir)
     elif mode == 'diff':
         run_diff_flow(script_dir)
+    elif mode == 'monitor':
+        run_monitor_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
