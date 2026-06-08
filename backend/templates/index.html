@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>主体查找表管理系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>主体查找表管理系统</h1>
+            <p class="subtitle">银行账号与主体映射关系可视化管理</p>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-messages">
+                    {% for category, message in messages %}
+                        <div class="flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <div class="stats-bar">
+            <div class="stat-card">
+                <span class="stat-value">{{ stats.total }}</span>
+                <span class="stat-label">总记录数</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value">{{ stats.subjects }}</span>
+                <span class="stat-label">主体数量</span>
+            </div>
+            <div class="stat-card {% if stats.duplicates > 0 %}warning{% endif %}">
+                <span class="stat-value">{{ stats.duplicates }}</span>
+                <span class="stat-label">重复账号</span>
+            </div>
+            <div class="stat-card file-info">
+                <span class="stat-label">查找表路径</span>
+                <span class="stat-path">{{ lookup_file }}</span>
+            </div>
+        </div>
+
+        {% if duplicates %}
+        <div class="duplicates-alert">
+            <h3>⚠️ 检测到重复账号</h3>
+            <ul>
+                {% for dup in duplicates %}
+                <li>
+                    <strong>账号 {{ dup.account }}</strong> 出现 {{ dup.count }} 次，
+                    对应主体: {{ dup.subjects | join(', ') }}
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <div class="toolbar">
+            <div class="search-box">
+                <form method="GET" action="{{ url_for('index') }}">
+                    <input type="text" name="keyword" placeholder="搜索主体名称或银行账号..."
+                           value="{{ keyword }}" class="search-input">
+                    <button type="submit" class="btn btn-secondary">搜索</button>
+                    {% if keyword %}
+                        <a href="{{ url_for('index') }}" class="btn btn-link">清除</a>
+                    {% endif %}
+                </form>
+            </div>
+            <div class="action-buttons">
+                <button type="button" class="btn btn-primary" onclick="openAddModal()">
+                    ➕ 新增条目
+                </button>
+                <button type="button" class="btn btn-success" onclick="openImportModal()">
+                    📥 导入 Excel
+                </button>
+                <a href="{{ url_for('api_export') }}" class="btn btn-info">
+                    📤 导出 Excel
+                </a>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th style="width: 60px;">序号</th>
+                        <th>主体名称</th>
+                        <th>银行账号</th>
+                        <th style="width: 160px;">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% if entries %}
+                        {% for entry in entries %}
+                        <tr>
+                            <td>{{ loop.index }}</td>
+                            <td>{{ entry.subject }}</td>
+                            <td><code>{{ entry.account }}</code></td>
+                            <td>
+                                <button type="button" class="btn btn-sm btn-edit"
+                                        onclick="openEditModal('{{ entry.account }}', '{{ entry.subject }}')">
+                                    编辑
+                                </button>
+                                <button type="button" class="btn btn-sm btn-delete"
+                                        onclick="confirmDelete('{{ entry.account }}', '{{ entry.subject }}')">
+                                    删除
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                        <tr>
+                            <td colspan="4" class="empty-state">
+                                {% if keyword %}
+                                    未找到匹配的记录，请尝试其他搜索关键词
+                                {% else %}
+                                    暂无数据，请点击"新增条目"添加记录
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="footer">
+            <p>提示：系统自动兼容账号格式（支持整数、浮点数、带前导零的字符串等多种格式）</p>
+        </div>
+    </div>
+
+    <!-- 新增/编辑 模态框 -->
+    <div id="entryModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle">新增条目</h2>
+                <button type="button" class="close-btn" onclick="closeModal()">&times;</button>
+            </div>
+            <form id="entryForm" method="POST" action="{{ url_for('web_add_entry') }}">
+                <input type="hidden" id="oldAccount" name="old_account" value="">
+                <div class="form-group">
+                    <label for="subject">主体名称 <span class="required">*</span></label>
+                    <input type="text" id="subject" name="subject" required
+                           placeholder="请输入主体名称，如：北京XX科技有限公司">
+                </div>
+                <div class="form-group">
+                    <label for="account">银行账号 <span class="required">*</span></label>
+                    <input type="text" id="account" name="account" required
+                           placeholder="请输入银行账号">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 导入 模态框 -->
+    <div id="importModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>导入 Excel</h2>
+                <button type="button" class="close-btn" onclick="closeImportModal()">&times;</button>
+            </div>
+            <form method="POST" action="{{ url_for('web_import') }}" enctype="multipart/form-data">
+                <div class="form-group">
+                    <label for="importFile">选择 Excel 文件 <span class="required">*</span></label>
+                    <input type="file" id="importFile" name="file" accept=".xlsx,.xls" required>
+                    <small class="help-text">
+                        文件格式：A列为主体名称，B列为银行账号（第一行为表头）
+                    </small>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="overwrite">
+                        <span>全量覆盖（勾选后将清空现有数据，用导入数据替换）</span>
+                    </label>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeImportModal()">取消</button>
+                    <button type="submit" class="btn btn-success">开始导入</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 删除确认 模态框 -->
+    <div id="deleteModal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h2>确认删除</h2>
+                <button type="button" class="close-btn" onclick="closeDeleteModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>确定要删除以下条目吗？</p>
+                <div class="delete-info">
+                    <p><strong>主体名称：</strong><span id="deleteSubject"></span></p>
+                    <p><strong>银行账号：</strong><code id="deleteAccount"></code></p>
+                </div>
+                <p class="warning-text">此操作不可撤销，请谨慎操作。</p>
+            </div>
+            <form id="deleteForm" method="POST" action="">
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeDeleteModal()">取消</button>
+                    <button type="submit" class="btn btn-danger">确认删除</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        function openAddModal() {
+            document.getElementById('modalTitle').textContent = '新增条目';
+            document.getElementById('entryForm').action = "{{ url_for('web_add_entry') }}";
+            document.getElementById('oldAccount').value = '';
+            document.getElementById('subject').value = '';
+            document.getElementById('account').value = '';
+            document.getElementById('entryModal').style.display = 'block';
+        }
+
+        function openEditModal(account, subject) {
+            document.getElementById('modalTitle').textContent = '编辑条目';
+            document.getElementById('entryForm').action = '/update/' + encodeURIComponent(account);
+            document.getElementById('oldAccount').value = account;
+            document.getElementById('subject').value = subject;
+            document.getElementById('account').value = account;
+            document.getElementById('entryModal').style.display = 'block';
+        }
+
+        function closeModal() {
+            document.getElementById('entryModal').style.display = 'none';
+        }
+
+        function openImportModal() {
+            document.getElementById('importModal').style.display = 'block';
+        }
+
+        function closeImportModal() {
+            document.getElementById('importModal').style.display = 'none';
+        }
+
+        function confirmDelete(account, subject) {
+            document.getElementById('deleteSubject').textContent = subject;
+            document.getElementById('deleteAccount').textContent = account;
+            document.getElementById('deleteForm').action = '/delete/' + encodeURIComponent(account);
+            document.getElementById('deleteModal').style.display = 'block';
+        }
+
+        function closeDeleteModal() {
+            document.getElementById('deleteModal').style.display = 'none';
+        }
+
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.style.display = 'none';
+            }
+        }
+
+        setTimeout(function() {
+            var flashes = document.querySelectorAll('.flash');
+            flashes.forEach(function(flash) {
+                flash.style.opacity = '0';
+                setTimeout(function() {
+                    flash.style.display = 'none';
+                }, 300);
+            });
+        }, 5000);
+    </script>
+</body>
+</html>
