@@ -651,15 +651,196 @@ class ProcessingResult:
     output_path: Optional[str] = None
     lookup_missing: bool = False
     folder_empty: bool = False
+    incremental_mode: bool = False
+    existing_record_count: int = 0
+    new_record_count: int = 0
+    duplicate_record_count: int = 0
 
 
-def run_pipeline(folder, script_dir):
+# ──────────────────────────────────────────────
+# 增量合并模块
+# ──────────────────────────────────────────────
+
+SUMMARY_TABLE_FILENAME = '银行流水总表.xlsx'
+
+
+def get_summary_table_path(script_dir):
+    """获取历史总表文件路径"""
+    return os.path.join(script_dir, SUMMARY_TABLE_FILENAME)
+
+
+def load_existing_keys(summary_path):
+    """
+    读取历史总表，提取所有记录的匹配键集合。
+    用于快速检测新记录是否已存在。
+
+    Args:
+        summary_path: 历史总表文件路径
+
+    Returns:
+        tuple: (existing_keys_set, existing_records_list)
+            - existing_keys_set: 匹配键集合，用于 O(1) 复杂度的存在性检测
+            - existing_records_list: 历史记录列表，用于合并输出
+    """
+    logger = get_logger()
+
+    if not summary_path or not os.path.exists(summary_path):
+        logger.info('未找到历史总表，将以全量模式运行')
+        return set(), []
+
+    try:
+        df = pd.read_excel(summary_path, engine='openpyxl')
+        if df.empty:
+            logger.info('历史总表为空，将以全量模式运行')
+            return set(), []
+
+        required_cols = ['银行账号', '交易流水号', '交易日期', '付款', '收款']
+        for col in required_cols:
+            if col not in df.columns:
+                logger.warning('历史总表缺少必要列「%s」，无法进行增量检测，将以全量模式运行', col)
+                return set(), []
+
+        existing_keys = set()
+        existing_records = []
+
+        for _, row in df.iterrows():
+            row_dict = row.to_dict()
+            key = _make_match_key(row_dict)
+            existing_keys.add(key)
+            existing_records.append(row_dict)
+
+        logger.info('已加载历史总表，共 %d 条记录，%d 个唯一匹配键',
+                    len(existing_records), len(existing_keys))
+        return existing_keys, existing_records
+
+    except Exception as e:
+        logger.error('读取历史总表失败: %s，将以全量模式运行', e, exc_info=True)
+        return set(), []
+
+
+def filter_incremental_records(new_rows, existing_keys):
+    """
+    过滤新提取的记录，只返回增量（未在历史总表中出现过的）记录。
+
+    Args:
+        new_rows: 新提取的记录列表
+        existing_keys: 历史总表的匹配键集合
+
+    Returns:
+        tuple: (incremental_rows, duplicate_count)
+            - incremental_rows: 增量记录列表
+            - duplicate_count: 检测到的重复记录数量
+    """
+    logger = get_logger()
+
+    if not existing_keys:
+        logger.info('无历史记录，所有 %d 条记录均为新增', len(new_rows))
+        return new_rows, 0
+
+    incremental_rows = []
+    duplicate_count = 0
+
+    for row in new_rows:
+        key = _make_match_key(row)
+        if key in existing_keys:
+            duplicate_count += 1
+            logger.debug('检测到重复记录，匹配键: %s', key)
+        else:
+            incremental_rows.append(row)
+            existing_keys.add(key)
+
+    logger.info('增量过滤完成: 新记录 %d 条，重复 %d 条，实际新增 %d 条',
+                len(new_rows), duplicate_count, len(incremental_rows))
+    return incremental_rows, duplicate_count
+
+
+def merge_and_export_summary(existing_records, incremental_rows, script_dir):
+    """
+    合并历史记录与增量记录，并输出到总表。
+
+    Args:
+        existing_records: 历史记录列表
+        incremental_rows: 新增记录列表
+        script_dir: 脚本目录
+
+    Returns:
+        str: 输出文件路径
+    """
+    logger = get_logger()
+
+    columns = [
+        '唯一id', '银行', '银行账号', '主体', '交易日期',
+        '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+    ]
+
+    merged_records = existing_records + incremental_rows
+
+    if not merged_records:
+        logger.warning('无任何记录可输出')
+        return None
+
+    df = pd.DataFrame(merged_records, columns=columns)
+    output_path = get_summary_table_path(script_dir)
+    df.to_excel(output_path, index=False, engine='openpyxl')
+
+    logger.info('总表输出完成: %s（历史 %d 条 + 新增 %d 条 = 共 %d 条）',
+                output_path, len(existing_records), len(incremental_rows), len(merged_records))
+    return output_path
+
+
+def cli_ask_incremental_mode():
+    """命令行模式下询问用户是否启用增量合并"""
+    print('\n请选择运行模式：')
+    print('  1) 增量合并（推荐）：检测历史记录，仅追加新增数据')
+    print('  2) 全量覆盖：重新生成总表，覆盖历史数据')
+    choice = input('请输入选项（直接回车默认为 1 增量模式）: ').strip()
+    return choice != '2'
+
+
+def gui_ask_incremental_mode():
+    """GUI 模式下询问用户是否启用增量合并"""
+    root = tk.Tk()
+    root.withdraw()
+    choice = messagebox.askyesnocancel(
+        '选择运行模式',
+        '是 = 增量合并（推荐）：检测历史记录，仅追加新增数据\n\n'
+        '否 = 全量覆盖：重新生成总表，覆盖历史数据\n\n'
+        '取消 = 返回主菜单',
+    )
+    root.destroy()
+    if choice is None:
+        return None
+    return choice
+
+
+if HAS_TKINTER:
+    ask_incremental_mode = gui_ask_incremental_mode
+else:
+    ask_incremental_mode = cli_ask_incremental_mode
+
+
+def run_pipeline(folder, script_dir, incremental=True):
     logger = get_logger()
 
     lookup_file = find_lookup_file(script_dir)
     lookup_missing = lookup_file is None
     if lookup_missing:
         logger.warning('未找到主体查找表，"主体"列将为空')
+
+    existing_keys = set()
+    existing_records = []
+    actual_incremental = False
+    duplicate_count = 0
+    new_record_count = 0
+
+    if incremental:
+        summary_path = get_summary_table_path(script_dir)
+        existing_keys, existing_records = load_existing_keys(summary_path)
+        actual_incremental = len(existing_records) > 0
+        if actual_incremental:
+            logger.info('===== 增量合并模式已启用 =====')
+        else:
+            logger.info('无历史数据，将以全量模式运行')
 
     folder_name = os.path.basename(folder.rstrip('/\\'))
     parent_dir = os.path.dirname(folder.rstrip('/\\'))
@@ -674,7 +855,12 @@ def run_pipeline(folder, script_dir):
     excel_files = scan_excel_files(new_folder)
     if not excel_files:
         logger.warning('检验版文件夹中未发现任何 Excel 文件')
-        return ProcessingResult(lookup_missing=lookup_missing, folder_empty=True)
+        return ProcessingResult(
+            lookup_missing=lookup_missing,
+            folder_empty=True,
+            incremental_mode=actual_incremental,
+            existing_record_count=len(existing_records),
+        )
 
     all_rows = []
     processed_files = []
@@ -700,25 +886,42 @@ def run_pipeline(folder, script_dir):
     delete_processed_files(excel_files, set(unprocessed_files) | error_file_paths)
 
     output_path = None
+    final_rows = []
+
     if all_rows:
-        columns = [
-            '唯一id', '银行', '银行账号', '主体', '交易日期',
-            '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
-        ]
-        df = pd.DataFrame(all_rows, columns=columns)
-        output_path = os.path.join(script_dir, '银行流水总表.xlsx')
-        df.to_excel(output_path, index=False, engine='openpyxl')
-        logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
+        if actual_incremental:
+            incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
+            new_record_count = len(incremental_rows)
+            output_path = merge_and_export_summary(existing_records, incremental_rows, script_dir)
+            final_rows = existing_records + incremental_rows
+        else:
+            columns = [
+                '唯一id', '银行', '银行账号', '主体', '交易日期',
+                '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+            ]
+            df = pd.DataFrame(all_rows, columns=columns)
+            output_path = get_summary_table_path(script_dir)
+            df.to_excel(output_path, index=False, engine='openpyxl')
+            logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
+            final_rows = all_rows
+            new_record_count = len(all_rows)
     else:
         logger.warning('未提取到任何银行流水记录')
+        if existing_records:
+            output_path = merge_and_export_summary(existing_records, [], script_dir)
+            final_rows = existing_records
 
     return ProcessingResult(
-        all_rows=all_rows,
+        all_rows=final_rows,
         processed_files=processed_files,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
         output_path=output_path,
         lookup_missing=lookup_missing,
+        incremental_mode=actual_incremental,
+        existing_record_count=len(existing_records),
+        new_record_count=new_record_count,
+        duplicate_record_count=duplicate_count,
     )
 
 
@@ -727,14 +930,36 @@ def format_result_message(result):
         return '文件夹中未发现任何 Excel 文件。'
 
     if result.all_rows:
-        msg = (
-            f'处理完成！\n\n'
-            f'已处理文件数：{len(result.processed_files)}\n'
-            f'提取记录数：{len(result.all_rows)}\n'
-            f'总表路径：{result.output_path}'
-        )
+        if result.incremental_mode:
+            msg = (
+                f'增量合并处理完成！\n\n'
+                f'运行模式：增量合并\n'
+                f'已处理文件数：{len(result.processed_files)}\n'
+                f'历史总记录数：{result.existing_record_count}\n'
+                f'本次新提取记录数：{result.new_record_count + result.duplicate_record_count}\n'
+                f'├─ 重复记录（已跳过）：{result.duplicate_record_count}\n'
+                f'└─ 新增记录（已追加）：{result.new_record_count}\n'
+                f'总表当前总记录数：{len(result.all_rows)}\n'
+                f'总表路径：{result.output_path}'
+            )
+        else:
+            msg = (
+                f'处理完成！\n\n'
+                f'运行模式：全量覆盖\n'
+                f'已处理文件数：{len(result.processed_files)}\n'
+                f'提取记录数：{len(result.all_rows)}\n'
+                f'总表路径：{result.output_path}'
+            )
     else:
-        msg = '未提取到任何银行流水记录。'
+        if result.incremental_mode and result.existing_record_count > 0:
+            msg = (
+                f'本次未提取到任何新增银行流水记录。\n\n'
+                f'运行模式：增量合并\n'
+                f'历史记录保留：{result.existing_record_count} 条\n'
+                f'总表路径：{result.output_path}'
+            )
+        else:
+            msg = '未提取到任何银行流水记录。'
 
     if result.unprocessed_files:
         names = '\n  '.join(os.path.basename(f) for f in result.unprocessed_files)
@@ -1043,7 +1268,13 @@ def run_pipeline_flow(script_dir):
 
     logger.info('用户选择文件夹: %s', folder)
 
-    result = run_pipeline(folder, script_dir)
+    incremental = ask_incremental_mode()
+    if incremental is None:
+        logger.info('用户取消增量模式选择，返回主菜单')
+        return
+    logger.info('用户选择运行模式: %s', '增量合并' if incremental else '全量覆盖')
+
+    result = run_pipeline(folder, script_dir, incremental=incremental)
 
     if result.lookup_missing:
         show_warning(
@@ -3530,10 +3761,16 @@ def run_pipeline_flow(script_dir):
         show_warning('查找表变更提醒', warning_msg)
         logger.warning('查找表变更已记录: %s', change_result.change_id)
 
+    incremental = ask_incremental_mode()
+    if incremental is None:
+        logger.info('用户取消增量模式选择，返回主菜单')
+        return
+    logger.info('用户选择运行模式: %s', '增量合并' if incremental else '全量覆盖')
+
     with AuditLogger('pipeline', script_dir) as audit:
         audit.record_input(folder)
 
-        result = run_pipeline(folder, script_dir)
+        result = run_pipeline(folder, script_dir, incremental=incremental)
         audit.record_result(result)
 
         if result.lookup_missing:

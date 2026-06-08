@@ -81,11 +81,11 @@ class TestGUIAskMode:
              mock.patch.object(bankcheck.messagebox, 'askyesnocancel', return_value=False):
             assert bankcheck.gui_askmode() == 'diff'
 
-    def test_cancel_returns_none(self):
+    def test_cancel_returns_monitor(self):
         with mock.patch.object(bankcheck, 'tk', create=True), \
              mock.patch.object(bankcheck, 'messagebox', create=True), \
              mock.patch.object(bankcheck.messagebox, 'askyesnocancel', return_value=None):
-            assert bankcheck.gui_askmode() is None
+            assert bankcheck.gui_askmode() == 'monitor'
 
 
 class TestRunPipelineFlow:
@@ -98,6 +98,7 @@ class TestRunPipelineFlow:
         _create_lookup_table(script_dir / '主体查找表.xlsx')
 
         with mock.patch.object(bankcheck, 'ask_directory', return_value=str(source_folder)), \
+             mock.patch.object(bankcheck, 'ask_incremental_mode', return_value=True), \
              mock.patch.object(bankcheck, 'show_info') as mock_show:
             bankcheck.run_pipeline_flow(str(script_dir))
             assert mock_show.called
