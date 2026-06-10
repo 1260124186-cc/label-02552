@@ -367,6 +367,11 @@ def upload_page():
     return render_template('upload.html', recent_tasks=task_list)
 
 
+@app.route('/counterparty-rules')
+def counterparty_rules_page():
+    return render_template('counterparty_rules.html')
+
+
 def _safe_filename(filename):
     safe = filename.replace('\\', '/').replace('../', '').replace('..\\', '')
     safe = os.path.basename(safe)

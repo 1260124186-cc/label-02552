@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>银行流水检验 - Web 上传服务</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='upload.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>银行流水检验 - Web 上传服务</h1>
+            <p class="subtitle">上传银行流水 Excel 文件，异步处理后下载总表</p>
+        </header>
+
+        <div class="stats-bar" id="statsBar">
+            <div class="stat-card">
+                <span class="stat-value" id="statTotal">-</span>
+                <span class="stat-label">总任务数</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statCompleted">-</span>
+                <span class="stat-label">已完成</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statProcessing">-</span>
+                <span class="stat-label">处理中</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statRecords">-</span>
+                <span class="stat-label">总记录数</span>
+            </div>
+        </div>
+
+        <section class="upload-section">
+            <h2 class="section-title">上传文件</h2>
+
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📁</div>
+                <p class="upload-hint">拖拽文件到此处，或点击选择文件</p>
+                <p class="upload-sub-hint">支持 .xlsx / .xls 格式，可选择整个文件夹</p>
+                <input type="file" id="fileInput" name="files" multiple
+                       accept=".xlsx,.xls" webkitdirectory directory
+                       style="display: none;">
+                <div class="upload-buttons">
+                    <button type="button" class="btn btn-primary" id="btnSelectFiles">选择文件</button>
+                    <button type="button" class="btn btn-secondary" id="btnSelectFolder">选择文件夹</button>
+                </div>
+            </div>
+
+            <div class="file-list" id="fileList" style="display: none;">
+                <div class="file-list-header">
+                    <h3>已选择的文件 (<span id="fileCount">0</span>)</h3>
+                    <button type="button" class="btn btn-sm btn-link" id="btnClearFiles">清除</button>
+                </div>
+                <ul id="fileNameList"></ul>
+            </div>
+
+            <div class="upload-options">
+                <div class="form-group">
+                    <label for="operator">操作员（可选）</label>
+                    <input type="text" id="operator" name="operator"
+                           placeholder="请输入姓名，便于追溯">
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="incremental" name="incremental" checked>
+                        <span>增量合并模式（推荐：仅追加新记录，跳过重复数据）</span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="upload-actions">
+                <button type="button" class="btn btn-primary btn-lg" id="btnUpload" disabled>
+                    开始上传并处理
+                </button>
+            </div>
+        </section>
+
+        <div class="progress-section" id="progressSection" style="display: none;">
+            <h2 class="section-title">处理进度</h2>
+            <div class="progress-card">
+                <div class="progress-header">
+                    <span class="task-id" id="progressTaskId">-</span>
+                    <div class="progress-header-actions">
+                        <span class="status-badge" id="progressStatus">处理中</span>
+                        <button type="button" class="btn btn-sm btn-cancel-task" id="btnCancelCurrent" style="display:none;">取消任务</button>
+                    </div>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+                </div>
+                <div class="progress-detail" id="progressDetail">正在处理...</div>
+                <div class="progress-stage" id="progressStage"></div>
+            </div>
+        </div>
+
+        <section class="tasks-section">
+            <h2 class="section-title">历史任务</h2>
+            <div class="tasks-toolbar">
+                <select id="statusFilter" class="filter-select">
+                    <option value="">全部状态</option>
+                    <option value="completed">已完成</option>
+                    <option value="processing">处理中</option>
+                    <option value="pending">等待中</option>
+                    <option value="failed">失败</option>
+                    <option value="cancelled">已取消</option>
+                </select>
+                <button type="button" class="btn btn-sm btn-secondary" id="btnRefresh">刷新</button>
+            </div>
+            <div class="table-container">
+                <table class="data-table" id="tasksTable">
+                    <thead>
+                        <tr>
+                            <th>任务ID</th>
+                            <th>状态</th>
+                            <th>文件数</th>
+                            <th>记录数</th>
+                            <th>进度</th>
+                            <th>操作员</th>
+                            <th>创建时间</th>
+                            <th>完成时间</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tasksBody">
+                        <tr>
+                            <td colspan="9" class="empty-state">暂无任务记录</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <footer class="footer">
+            <p>银行流水检验工具 Web 服务 | 支持 .xlsx / .xls 格式 | 增量合并自动去重 | SSE 实时进度 | <a href="/counterparty-rules" style="color:#4facfe;text-decoration:none;font-weight:500;">对方户名规则管理</a></p>
+        </footer>
+    </div>
+
+    <div id="toast" class="toast" style="display: none;"></div>
+
+    <div id="detailModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>任务详情</h2>
+                <button type="button" class="close-btn" onclick="closeDetailModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="detailBody"></div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        var selectedFiles = [];
+        var currentTaskId = null;
+        var eventSource = null;
+
+        var fileInput = document.getElementById('fileInput');
+        var uploadArea = document.getElementById('uploadArea');
+        var fileList = document.getElementById('fileList');
+        var fileCount = document.getElementById('fileCount');
+        var fileNameList = document.getElementById('fileNameList');
+        var btnSelectFiles = document.getElementById('btnSelectFiles');
+        var btnSelectFolder = document.getElementById('btnSelectFolder');
+        var btnClearFiles = document.getElementById('btnClearFiles');
+        var btnUpload = document.getElementById('btnUpload');
+        var btnRefresh = document.getElementById('btnRefresh');
+        var btnCancelCurrent = document.getElementById('btnCancelCurrent');
+        var progressSection = document.getElementById('progressSection');
+        var progressTaskId = document.getElementById('progressTaskId');
+        var progressStatus = document.getElementById('progressStatus');
+        var progressBar = document.getElementById('progressBar');
+        var progressDetail = document.getElementById('progressDetail');
+        var progressStage = document.getElementById('progressStage');
+        var statusFilter = document.getElementById('statusFilter');
+
+        function isExcelFile(name) {
+            var n = name.toLowerCase();
+            return n.endsWith('.xlsx') || n.endsWith('.xls');
+        }
+
+        function filterExcelFiles(files) {
+            var result = [];
+            for (var i = 0; i < files.length; i++) {
+                if (!files[i].name.startsWith('.') && isExcelFile(files[i].name)) {
+                    result.push(files[i]);
+                }
+            }
+            return result;
+        }
+
+        function updateFileList() {
+            if (selectedFiles.length === 0) {
+                fileList.style.display = 'none';
+                btnUpload.disabled = true;
+                return;
+            }
+            fileList.style.display = 'block';
+            btnUpload.disabled = false;
+            fileCount.textContent = selectedFiles.length;
+            fileNameList.innerHTML = '';
+            var maxShow = 10;
+            for (var i = 0; i < Math.min(selectedFiles.length, maxShow); i++) {
+                var li = document.createElement('li');
+                var relPath = selectedFiles[i].webkitRelativePath || selectedFiles[i].name;
+                li.textContent = relPath;
+                li.className = 'file-item';
+                li.title = relPath;
+                fileNameList.appendChild(li);
+            }
+            if (selectedFiles.length > maxShow) {
+                var li = document.createElement('li');
+                li.textContent = '... 还有 ' + (selectedFiles.length - maxShow) + ' 个文件';
+                li.className = 'file-item file-more';
+                fileNameList.appendChild(li);
+            }
+        }
+
+        function handleFileSelect(files) {
+            var excelFiles = filterExcelFiles(files);
+            if (excelFiles.length === 0) {
+                showToast('未检测到 Excel 文件（.xlsx/.xls）', 'error');
+                return;
+            }
+            selectedFiles = excelFiles;
+            updateFileList();
+            showToast('已选择 ' + excelFiles.length + ' 个 Excel 文件', 'success');
+        }
+
+        btnSelectFiles.addEventListener('click', function() {
+            fileInput.removeAttribute('webkitdirectory');
+            fileInput.removeAttribute('directory');
+            fileInput.click();
+        });
+
+        btnSelectFolder.addEventListener('click', function() {
+            fileInput.setAttribute('webkitdirectory', '');
+            fileInput.setAttribute('directory', '');
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', function(e) {
+            if (e.target.files && e.target.files.length > 0) {
+                handleFileSelect(e.target.files);
+            }
+        });
+
+        btnClearFiles.addEventListener('click', function() {
+            selectedFiles = [];
+            fileInput.value = '';
+            updateFileList();
+        });
+
+        uploadArea.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            uploadArea.classList.add('drag-over');
+        });
+
+        uploadArea.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            uploadArea.classList.remove('drag-over');
+        });
+
+        uploadArea.addEventListener('drop', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            uploadArea.classList.remove('drag-over');
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                handleFileSelect(e.dataTransfer.files);
+            }
+        });
+
+        btnUpload.addEventListener('click', function() {
+            if (selectedFiles.length === 0) return;
+
+            var formData = new FormData();
+            for (var i = 0; i < selectedFiles.length; i++) {
+                formData.append('files', selectedFiles[i]);
+                var relPath = selectedFiles[i].webkitRelativePath || '';
+                if (relPath) {
+                    formData.append('relpath_' + i, relPath);
+                }
+            }
+            formData.append('incremental', document.getElementById('incremental').checked ? 'true' : 'false');
+            formData.append('operator', document.getElementById('operator').value.trim());
+
+            btnUpload.disabled = true;
+            btnUpload.textContent = '上传中...';
+
+            fetch('/api/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(function(resp) {
+                if (resp.status === 429) {
+                    return resp.json().then(function(d) {
+                        throw new Error(d.message || '排队任务过多，请稍后重试');
+                    });
+                }
+                return resp.json();
+            })
+            .then(function(data) {
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    currentTaskId = data.task_id;
+                    showProgress(data.task_id);
+                    connectSSE(data.task_id);
+                    selectedFiles = [];
+                    fileInput.value = '';
+                    updateFileList();
+                    loadTasks();
+                } else {
+                    showToast(data.message, 'error');
+                }
+            })
+            .catch(function(err) {
+                showToast('上传失败: ' + err.message, 'error');
+            })
+            .finally(function() {
+                btnUpload.disabled = false;
+                btnUpload.textContent = '开始上传并处理';
+            });
+        });
+
+        function showProgress(taskId) {
+            progressSection.style.display = 'block';
+            progressTaskId.textContent = taskId;
+            progressStatus.textContent = '处理中';
+            progressStatus.className = 'status-badge status-processing';
+            progressBar.style.width = '5%';
+            progressBar.className = 'progress-bar';
+            progressDetail.textContent = '文件已上传，正在处理...';
+            progressStage.textContent = '';
+            btnCancelCurrent.style.display = 'inline-flex';
+            progressSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        function connectSSE(taskId) {
+            disconnectSSE();
+
+            var sseUrl = '/api/tasks/' + taskId + '/stream';
+            eventSource = new EventSource(sseUrl);
+
+            eventSource.onmessage = function(event) {
+                try {
+                    var data = JSON.parse(event.data);
+                    handleSSEData(data);
+                } catch (e) {}
+            };
+
+            eventSource.onerror = function() {
+                disconnectSSE();
+                if (currentTaskId === taskId) {
+                    progressDetail.textContent = 'SSE 连接断开，回退到轮询模式...';
+                    startFallbackPolling(taskId);
+                }
+            };
+        }
+
+        function disconnectSSE() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+        }
+
+        var fallbackTimer = null;
+
+        function startFallbackPolling(taskId) {
+            if (fallbackTimer) clearInterval(fallbackTimer);
+            fallbackTimer = setInterval(function() {
+                fetch('/api/tasks/' + taskId)
+                    .then(function(resp) { return resp.json(); })
+                    .then(function(data) {
+                        if (!data.success) return;
+                        var task = data.data;
+                        updateProgressFromTask(task);
+                        if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
+                            clearInterval(fallbackTimer);
+                            fallbackTimer = null;
+                            loadTasks();
+                        }
+                    })
+                    .catch(function() {});
+            }, 3000);
+        }
+
+        function handleSSEData(data) {
+            if (data.type === 'connected') {
+                progressDetail.textContent = 'SSE 连接已建立，等待处理...';
+                return;
+            }
+
+            if (data.type === 'progress') {
+                progressBar.style.width = data.percent + '%';
+                progressDetail.textContent = data.message;
+                progressStage.textContent = getStageLabel(data.stage);
+                progressStatus.textContent = '处理中';
+                progressStatus.className = 'status-badge status-processing';
+                return;
+            }
+
+            if (data.type === 'completed') {
+                progressBar.style.width = '100%';
+                progressBar.className = 'progress-bar';
+                progressStatus.textContent = '已完成';
+                progressStatus.className = 'status-badge status-completed';
+                btnCancelCurrent.style.display = 'none';
+                if (data.data) {
+                    progressDetail.textContent =
+                        '处理完成：' + data.data.processed_files + ' 个文件，' +
+                        data.data.new_records + ' 条新增记录，' +
+                        data.data.duplicate_records + ' 条重复跳过';
+                }
+                progressStage.textContent = '';
+                disconnectSSE();
+                loadTasks();
+                return;
+            }
+
+            if (data.type === 'cancelled') {
+                progressBar.style.width = progressBar.style.width;
+                progressBar.className = 'progress-bar progress-bar-cancelled';
+                progressStatus.textContent = '已取消';
+                progressStatus.className = 'status-badge status-cancelled';
+                btnCancelCurrent.style.display = 'none';
+                progressDetail.textContent = '任务已取消';
+                progressStage.textContent = '';
+                disconnectSSE();
+                loadTasks();
+                return;
+            }
+
+            if (data.type === 'error' || data.type === 'failed') {
+                progressBar.style.width = '100%';
+                progressBar.className = 'progress-bar progress-bar-error';
+                progressStatus.textContent = '失败';
+                progressStatus.className = 'status-badge status-failed';
+                btnCancelCurrent.style.display = 'none';
+                progressDetail.textContent = '处理失败: ' + (data.message || '未知错误');
+                progressStage.textContent = '';
+                disconnectSSE();
+                loadTasks();
+                return;
+            }
+        }
+
+        function updateProgressFromTask(task) {
+            progressTaskId.textContent = task.task_id;
+            if (task.progress_percent) {
+                progressBar.style.width = task.progress_percent + '%';
+            }
+            if (task.progress_message) {
+                progressDetail.textContent = task.progress_message;
+            }
+            if (task.progress_stage) {
+                progressStage.textContent = getStageLabel(task.progress_stage);
+            }
+
+            if (task.status === 'completed') {
+                progressBar.style.width = '100%';
+                progressBar.className = 'progress-bar';
+                progressStatus.textContent = '已完成';
+                progressStatus.className = 'status-badge status-completed';
+                btnCancelCurrent.style.display = 'none';
+                progressStage.textContent = '';
+            } else if (task.status === 'failed') {
+                progressBar.style.width = '100%';
+                progressBar.className = 'progress-bar progress-bar-error';
+                progressStatus.textContent = '失败';
+                progressStatus.className = 'status-badge status-failed';
+                btnCancelCurrent.style.display = 'none';
+                progressStage.textContent = '';
+            } else if (task.status === 'cancelled') {
+                progressBar.className = 'progress-bar progress-bar-cancelled';
+                progressStatus.textContent = '已取消';
+                progressStatus.className = 'status-badge status-cancelled';
+                btnCancelCurrent.style.display = 'none';
+                progressStage.textContent = '';
+            } else if (task.status === 'processing') {
+                progressStatus.textContent = '处理中';
+                progressStatus.className = 'status-badge status-processing';
+                btnCancelCurrent.style.display = 'inline-flex';
+            }
+        }
+
+        function getStageLabel(stage) {
+            var labels = {
+                'pending': '等待中',
+                'scanning': '扫描文件',
+                'processing': '解析流水',
+                'exporting': '导出总表',
+                'completed': '已完成',
+                'failed': '失败',
+                'cancelled': '已取消'
+            };
+            return labels[stage] || stage;
+        }
+
+        btnCancelCurrent.addEventListener('click', function() {
+            if (!currentTaskId) return;
+            if (!confirm('确定要取消当前任务？')) return;
+            cancelTask(currentTaskId);
+        });
+
+        function cancelTask(taskId) {
+            fetch('/api/tasks/' + taskId + '/cancel', { method: 'POST' })
+                .then(function(resp) { return resp.json(); })
+                .then(function(data) {
+                    showToast(data.message, data.success ? 'success' : 'error');
+                    if (data.success) {
+                        btnCancelCurrent.style.display = 'none';
+                    }
+                    loadTasks();
+                })
+                .catch(function(err) {
+                    showToast('取消失败: ' + err.message, 'error');
+                });
+        }
+
+        function loadTasks() {
+            var status = statusFilter.value;
+            var url = '/api/tasks?limit=20';
+            if (status) url += '&status=' + status;
+
+            fetch(url)
+                .then(function(resp) { return resp.json(); })
+                .then(function(data) {
+                    if (data.success) {
+                        renderTasks(data.data);
+                    }
+                })
+                .catch(function() {});
+        }
+
+        function renderTasks(tasks) {
+            var tbody = document.getElementById('tasksBody');
+            if (!tasks || tasks.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="empty-state">暂无任务记录</td></tr>';
+                return;
+            }
+
+            var html = '';
+            for (var i = 0; i < tasks.length; i++) {
+                var t = tasks[i];
+                var statusHtml = getStatusBadge(t.status);
+                var actionHtml = getActionButtons(t);
+                var progressHtml = getProgressCell(t);
+
+                html += '<tr>' +
+                    '<td class="task-id-cell" title="' + t.task_id + '">' + t.task_id + '</td>' +
+                    '<td>' + statusHtml + '</td>' +
+                    '<td>' + t.total_files + '</td>' +
+                    '<td>' + t.total_records + '</td>' +
+                    '<td>' + progressHtml + '</td>' +
+                    '<td>' + (t.operator || '-') + '</td>' +
+                    '<td>' + (t.created_at || '-') + '</td>' +
+                    '<td>' + (t.finished_at || '-') + '</td>' +
+                    '<td>' + actionHtml + '</td>' +
+                    '</tr>';
+            }
+            tbody.innerHTML = html;
+            bindTaskActions();
+        }
+
+        function getProgressCell(task) {
+            if (task.status === 'completed') return '<span class="mini-progress done">100%</span>';
+            if (task.status === 'failed') return '<span class="mini-progress fail">失败</span>';
+            if (task.status === 'cancelled') return '<span class="mini-progress cancelled">取消</span>';
+            if (task.progress_percent > 0) return '<span class="mini-progress">' + task.progress_percent + '%</span>';
+            return '-';
+        }
+
+        function getStatusBadge(status) {
+            var map = {
+                'pending': '<span class="status-badge status-pending">等待中</span>',
+                'processing': '<span class="status-badge status-processing">处理中</span>',
+                'completed': '<span class="status-badge status-completed">已完成</span>',
+                'failed': '<span class="status-badge status-failed">失败</span>',
+                'cancelled': '<span class="status-badge status-cancelled">已取消</span>'
+            };
+            return map[status] || '<span class="status-badge">' + status + '</span>';
+        }
+
+        function getActionButtons(task) {
+            var btns = '';
+            if (task.status === 'completed' && task.output_path) {
+                btns += '<button class="btn btn-sm btn-download" data-task-id="' + task.task_id + '">下载</button>';
+            }
+            btns += '<button class="btn btn-sm btn-detail" data-task-id="' + task.task_id + '">详情</button>';
+            if (task.status === 'pending' || task.status === 'processing') {
+                btns += '<button class="btn btn-sm btn-cancel-task" data-task-id="' + task.task_id + '">取消</button>';
+            }
+            if (task.status !== 'processing' && task.status !== 'pending') {
+                btns += '<button class="btn btn-sm btn-delete-task" data-task-id="' + task.task_id + '">删除</button>';
+            }
+            return btns;
+        }
+
+        function bindTaskActions() {
+            var downloadBtns = document.querySelectorAll('.btn-download');
+            for (var i = 0; i < downloadBtns.length; i++) {
+                downloadBtns[i].addEventListener('click', function() {
+                    window.location.href = '/api/download/' + this.getAttribute('data-task-id');
+                });
+            }
+
+            var detailBtns = document.querySelectorAll('.btn-detail');
+            for (var i = 0; i < detailBtns.length; i++) {
+                detailBtns[i].addEventListener('click', function() {
+                    showTaskDetail(this.getAttribute('data-task-id'));
+                });
+            }
+
+            var cancelBtns = document.querySelectorAll('.btn-cancel-task');
+            for (var i = 0; i < cancelBtns.length; i++) {
+                cancelBtns[i].addEventListener('click', function() {
+                    if (confirm('确定要取消此任务？')) {
+                        cancelTask(this.getAttribute('data-task-id'));
+                    }
+                });
+            }
+
+            var deleteBtns = document.querySelectorAll('.btn-delete-task');
+            for (var i = 0; i < deleteBtns.length; i++) {
+                deleteBtns[i].addEventListener('click', function() {
+                    if (confirm('确定删除此任务记录？')) {
+                        deleteTask(this.getAttribute('data-task-id'));
+                    }
+                });
+            }
+        }
+
+        function showTaskDetail(taskId) {
+            fetch('/api/tasks/' + taskId)
+                .then(function(resp) { return resp.json(); })
+                .then(function(data) {
+                    if (!data.success) {
+                        showToast('获取详情失败', 'error');
+                        return;
+                    }
+                    var t = data.data;
+                    var rows = [
+                        ['任务ID', t.task_id],
+                        ['状态', t.status],
+                        ['进度阶段', t.progress_stage || '-'],
+                        ['进度信息', t.progress_message || '-'],
+                        ['文件数', t.total_files],
+                        ['已处理', t.processed_files],
+                        ['未识别', t.unprocessed_files],
+                        ['出错', t.error_files],
+                        ['总记录', t.total_records],
+                        ['新增', t.new_records],
+                        ['重复跳过', t.duplicate_records],
+                        ['入库', t.db_inserted],
+                        ['入库去重', t.db_duplicates],
+                        ['操作员', t.operator || '-'],
+                        ['创建', t.created_at || '-'],
+                        ['开始', t.started_at || '-'],
+                        ['完成', t.finished_at || '-'],
+                    ];
+                    if (t.error_message) {
+                        rows.push(['错误信息', t.error_message]);
+                    }
+
+                    var html = '<table class="detail-table">';
+                    for (var i = 0; i < rows.length; i++) {
+                        html += '<tr><td class="detail-label">' + rows[i][0] + '</td><td>' + rows[i][1] + '</td></tr>';
+                    }
+                    html += '</table>';
+
+                    document.getElementById('detailBody').innerHTML = html;
+                    document.getElementById('detailModal').style.display = 'block';
+                });
+        }
+
+        window.closeDetailModal = function() {
+            document.getElementById('detailModal').style.display = 'none';
+        };
+
+        function deleteTask(taskId) {
+            fetch('/api/tasks/' + taskId, { method: 'DELETE' })
+                .then(function(resp) { return resp.json(); })
+                .then(function(data) {
+                    showToast(data.message, data.success ? 'success' : 'error');
+                    loadTasks();
+                })
+                .catch(function(err) {
+                    showToast('删除失败: ' + err.message, 'error');
+                });
+        }
+
+        function loadStats() {
+            fetch('/api/stats')
+                .then(function(resp) { return resp.json(); })
+                .then(function(data) {
+                    if (data.success) {
+                        var s = data.data;
+                        document.getElementById('statTotal').textContent = s.total_tasks;
+                        document.getElementById('statCompleted').textContent = s.completed_tasks;
+                        document.getElementById('statProcessing').textContent = s.processing_tasks + s.pending_tasks;
+                        document.getElementById('statRecords').textContent = s.total_records;
+                    }
+                })
+                .catch(function() {});
+        }
+
+        function showToast(message, type) {
+            var toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast toast-' + (type || 'info');
+            toast.style.display = 'block';
+            setTimeout(function() {
+                toast.style.display = 'none';
+            }, 4000);
+        }
+
+        btnRefresh.addEventListener('click', function() { loadTasks(); });
+        statusFilter.addEventListener('change', function() { loadTasks(); });
+
+        window.onclick = function(event) {
+            if (event.target.id === 'detailModal') {
+                document.getElementById('detailModal').style.display = 'none';
+            }
+        };
+
+        loadStats();
+        loadTasks();
+
+        setInterval(function() { loadStats(); }, 30000);
+    })();
+    </script>
+</body>
+</html>

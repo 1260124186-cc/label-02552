@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>对方户名规则管理</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+        .tag-blacklist { background: #ffe0e0; color: #c0392b; }
+        .tag-whitelist { background: #d4edda; color: #155724; }
+        .tag-enabled { background: #d4edda; color: #155724; }
+        .tag-disabled { background: #f1f3f5; color: #6c757d; }
+        .tag-severity-high { background: #f8d7da; color: #721c24; }
+        .tag-severity-medium { background: #fff3cd; color: #856404; }
+        .tag-severity-low { background: #d1ecf1; color: #0c5460; }
+        .keyword-tag { display: inline-block; background: #e8f0fe; color: #1a73e8; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin: 2px; }
+        .filter-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .filter-bar select, .filter-bar input { padding: 8px 12px; border: 2px solid #e9ecef; border-radius: 8px; font-size: 14px; }
+        .filter-bar select:focus, .filter-bar input:focus { outline: none; border-color: #4facfe; }
+        .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+        .toggle-switch input { opacity: 0; width: 0; height: 0; }
+        .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #ccc; border-radius: 24px; transition: 0.3s; }
+        .toggle-slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.3s; }
+        .toggle-switch input:checked + .toggle-slider { background: #28a745; }
+        .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
+        .stats-bar { grid-template-columns: repeat(5, 1fr); }
+        .apply-result { background: #f0f7ff; border-left: 4px solid #4facfe; padding: 16px 20px; border-radius: 8px; margin: 16px 40px; }
+        .apply-result h4 { color: #0066cc; margin-bottom: 8px; }
+        .apply-result .result-stats { display: flex; gap: 24px; flex-wrap: wrap; }
+        .apply-result .result-stat { text-align: center; }
+        .apply-result .result-stat .num { font-size: 24px; font-weight: 700; color: #4facfe; }
+        .apply-result .result-stat .label { font-size: 12px; color: #6c757d; }
+        .btn-toggle { background: #6c757d; color: white; }
+        .btn-toggle:hover { background: #5a6268; }
+        .btn-apply { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .btn-apply:hover { opacity: 0.9; }
+        .desc-text { color: #6c757d; font-size: 13px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .modal-content.wide { max-width: 620px; }
+        .keywords-editor { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; border: 2px solid #e9ecef; border-radius: 8px; min-height: 44px; align-items: center; cursor: text; }
+        .keywords-editor:focus-within { border-color: #4facfe; }
+        .keywords-editor .keyword-chip { display: inline-flex; align-items: center; background: #e8f0fe; color: #1a73e8; padding: 4px 10px; border-radius: 16px; font-size: 13px; gap: 4px; }
+        .keywords-editor .keyword-chip .remove-keyword { cursor: pointer; font-weight: bold; color: #1a73e8; opacity: 0.6; }
+        .keywords-editor .keyword-chip .remove-keyword:hover { opacity: 1; }
+        .keywords-editor input { border: none; outline: none; font-size: 14px; flex: 1; min-width: 120px; padding: 2px; }
+        .form-group textarea { width: 100%; padding: 10px 14px; border: 2px solid #e9ecef; border-radius: 8px; font-size: 14px; resize: vertical; min-height: 60px; }
+        .form-group textarea:focus { outline: none; border-color: #4facfe; }
+        .form-group select { width: 100%; padding: 10px 14px; border: 2px solid #e9ecef; border-radius: 8px; font-size: 14px; background: white; }
+        .form-group select:focus { outline: none; border-color: #4facfe; }
+        .form-row { display: flex; gap: 16px; }
+        .form-row .form-group { flex: 1; }
+        @media (max-width: 768px) {
+            .stats-bar { grid-template-columns: repeat(2, 1fr); }
+            .filter-bar { flex-direction: column; align-items: stretch; }
+            .form-row { flex-direction: column; gap: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>对方户名规则管理</h1>
+            <p class="subtitle">黑名单 / 白名单关键词规则维护，对交易自动打标筛查关联方与异常对手方</p>
+        </header>
+
+        <div id="flashArea"></div>
+
+        <div class="stats-bar" id="statsBar">
+            <div class="stat-card">
+                <span class="stat-value" id="statTotal">-</span>
+                <span class="stat-label">规则总数</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statBlacklist">-</span>
+                <span class="stat-label">黑名单规则</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statWhitelist">-</span>
+                <span class="stat-label">白名单规则</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statEnabled">-</span>
+                <span class="stat-label">已启用</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statDisabled">-</span>
+                <span class="stat-label">已禁用</span>
+            </div>
+        </div>
+
+        <div class="toolbar">
+            <div class="filter-bar">
+                <select id="filterType" onchange="loadRules()">
+                    <option value="">全部类型</option>
+                    <option value="blacklist">黑名单</option>
+                    <option value="whitelist">白名单</option>
+                </select>
+                <select id="filterEnabled" onchange="loadRules()">
+                    <option value="">全部状态</option>
+                    <option value="true">已启用</option>
+                    <option value="false">已禁用</option>
+                </select>
+                <input type="text" id="filterKeyword" placeholder="搜索规则名称/关键词..." oninput="loadRules()">
+            </div>
+            <div class="action-buttons">
+                <button type="button" class="btn btn-primary" onclick="openAddModal()">+ 新增规则</button>
+                <button type="button" class="btn btn-apply" onclick="applyRules()">一键应用打标</button>
+                <a href="/api/counterparty-rules/export" class="btn btn-info">导出命中记录</a>
+            </div>
+        </div>
+
+        <div id="applyResultArea"></div>
+
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th style="width:50px;">状态</th>
+                        <th>规则名称</th>
+                        <th style="width:80px;">类型</th>
+                        <th>关键词</th>
+                        <th style="width:90px;">匹配模式</th>
+                        <th style="width:70px;">级别</th>
+                        <th>说明</th>
+                        <th style="width:170px;">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="rulesTableBody">
+                    <tr><td colspan="8" class="empty-state">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="footer">
+            <p>匹配模式说明：contains=包含, exact=精确, startswith=前缀, endswith=后缀, regex=正则 | <a href="/upload" style="color:#4facfe;text-decoration:none;font-weight:500;">返回上传页</a></p>
+        </div>
+    </div>
+
+    <!-- 新增/编辑 规则模态框 -->
+    <div id="ruleModal" class="modal">
+        <div class="modal-content wide">
+            <div class="modal-header">
+                <h2 id="ruleModalTitle">新增规则</h2>
+                <button type="button" class="close-btn" onclick="closeRuleModal()">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>规则名称 <span class="required">*</span></label>
+                <input type="text" id="ruleName" placeholder="如：关联方筛查-子公司">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>规则类型 <span class="required">*</span></label>
+                    <select id="ruleType">
+                        <option value="blacklist">黑名单</option>
+                        <option value="whitelist">白名单</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>匹配模式 <span class="required">*</span></label>
+                    <select id="ruleMatchMode">
+                        <option value="contains">包含 (contains)</option>
+                        <option value="exact">精确 (exact)</option>
+                        <option value="startswith">前缀 (startswith)</option>
+                        <option value="endswith">后缀 (endswith)</option>
+                        <option value="regex">正则 (regex)</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>严重级别</label>
+                    <select id="ruleSeverity">
+                        <option value="medium">中</option>
+                        <option value="high">高</option>
+                        <option value="low">低</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>分类标签</label>
+                    <input type="text" id="ruleCategory" placeholder="如：关联方、空壳公司">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>关键词 <span class="required">*</span></label>
+                <div class="keywords-editor" id="keywordsEditor" onclick="document.getElementById('keywordInput').focus()">
+                    <input type="text" id="keywordInput" placeholder="输入关键词后按回车添加">
+                </div>
+                <small class="help-text">输入关键词后按回车添加，支持多个关键词</small>
+            </div>
+            <div class="form-group">
+                <label>描述说明</label>
+                <textarea id="ruleDescription" placeholder="可选，描述此规则的用途"></textarea>
+            </div>
+            <input type="hidden" id="editRuleId" value="">
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeRuleModal()">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveRule()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 删除确认 模态框 -->
+    <div id="deleteModal" class="modal">
+        <div class="modal-content modal-small">
+            <div class="modal-header">
+                <h2>确认删除</h2>
+                <button type="button" class="close-btn" onclick="closeDeleteModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>确定要删除规则 <strong id="deleteRuleName"></strong> 吗？</p>
+                <p class="warning-text">此操作不可撤销。</p>
+            </div>
+            <input type="hidden" id="deleteRuleId" value="">
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeDeleteModal()">取消</button>
+                <button type="button" class="btn btn-danger" onclick="confirmDelete()">确认删除</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allRules = [];
+        let currentKeywords = [];
+
+        function flash(msg, type) {
+            var area = document.getElementById('flashArea');
+            var div = document.createElement('div');
+            div.className = 'flash-messages';
+            div.innerHTML = '<div class="flash ' + type + '">' + msg + '</div>';
+            area.appendChild(div);
+            setTimeout(function() {
+                div.style.opacity = '0';
+                div.style.transition = 'opacity 0.3s';
+                setTimeout(function() { div.remove(); }, 300);
+            }, 4000);
+        }
+
+        function loadRules() {
+            var params = new URLSearchParams();
+            var ft = document.getElementById('filterType').value;
+            var fe = document.getElementById('filterEnabled').value;
+            if (ft) params.set('rule_type', ft);
+            if (fe) params.set('enabled', fe);
+            fetch('/api/counterparty-rules?' + params.toString())
+                .then(function(r) { return r.json(); })
+                .then(function(resp) {
+                    if (!resp.success) return;
+                    allRules = resp.data || [];
+                    var kw = document.getElementById('filterKeyword').value.trim().toLowerCase();
+                    if (kw) {
+                        allRules = allRules.filter(function(r) {
+                            return (r.name || '').toLowerCase().indexOf(kw) >= 0 ||
+                                   (r.keywords || []).some(function(k) { return k.toLowerCase().indexOf(kw) >= 0; });
+                        });
+                    }
+                    renderRules();
+                    updateStats();
+                });
+        }
+
+        function updateStats() {
+            fetch('/api/counterparty-rules')
+                .then(function(r) { return r.json(); })
+                .then(function(resp) {
+                    if (!resp.success) return;
+                    var rules = resp.data || [];
+                    document.getElementById('statTotal').textContent = rules.length;
+                    document.getElementById('statBlacklist').textContent = rules.filter(function(r) { return r.rule_type === 'blacklist'; }).length;
+                    document.getElementById('statWhitelist').textContent = rules.filter(function(r) { return r.rule_type === 'whitelist'; }).length;
+                    document.getElementById('statEnabled').textContent = rules.filter(function(r) { return r.enabled; }).length;
+                    document.getElementById('statDisabled').textContent = rules.filter(function(r) { return !r.enabled; }).length;
+                });
+        }
+
+        var matchModeLabel = { contains: '包含', exact: '精确', startswith: '前缀', endswith: '后缀', regex: '正则' };
+
+        function renderRules() {
+            var tbody = document.getElementById('rulesTableBody');
+            if (!allRules.length) {
+                tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无规则，点击"新增规则"添加</td></tr>';
+                return;
+            }
+            var html = '';
+            allRules.forEach(function(r) {
+                var typeTag = r.rule_type === 'blacklist'
+                    ? '<span class="tag tag-blacklist">黑名单</span>'
+                    : '<span class="tag tag-whitelist">白名单</span>';
+                var statusTag = r.enabled
+                    ? '<span class="tag tag-enabled">启用</span>'
+                    : '<span class="tag tag-disabled">禁用</span>';
+                var sevClass = 'tag-severity-' + (r.severity || 'medium');
+                var sevLabel = { high: '高', medium: '中', low: '低' }[r.severity || 'medium'];
+                var keywordsHtml = (r.keywords || []).map(function(k) {
+                    return '<span class="keyword-tag">' + escHtml(k) + '</span>';
+                }).join('');
+                var desc = r.description || r.category || '';
+                html += '<tr>' +
+                    '<td>' + statusTag + '</td>' +
+                    '<td><strong>' + escHtml(r.name || '') + '</strong></td>' +
+                    '<td>' + typeTag + '</td>' +
+                    '<td>' + keywordsHtml + '</td>' +
+                    '<td>' + (matchModeLabel[r.match_mode] || r.match_mode) + '</td>' +
+                    '<td><span class="tag ' + sevClass + '">' + sevLabel + '</span></td>' +
+                    '<td><span class="desc-text" title="' + escHtml(desc) + '">' + escHtml(desc) + '</span></td>' +
+                    '<td>' +
+                        '<label class="toggle-switch" title="' + (r.enabled ? '点击禁用' : '点击启用') + '">' +
+                            '<input type="checkbox" ' + (r.enabled ? 'checked' : '') + ' onchange="toggleRule(\'' + r.rule_id + '\',' + !r.enabled + ')">' +
+                            '<span class="toggle-slider"></span>' +
+                        '</label> ' +
+                        '<button type="button" class="btn btn-sm btn-edit" onclick="openEditModal(\'' + r.rule_id + '\')">编辑</button> ' +
+                        '<button type="button" class="btn btn-sm btn-delete" onclick="openDeleteModal(\'' + r.rule_id + '\',\'' + escHtml(r.name || '') + '\')">删除</button>' +
+                    '</td>' +
+                '</tr>';
+            });
+            tbody.innerHTML = html;
+        }
+
+        function escHtml(s) {
+            var d = document.createElement('div');
+            d.appendChild(document.createTextNode(s));
+            return d.innerHTML;
+        }
+
+        function toggleRule(ruleId, enabled) {
+            fetch('/api/counterparty-rules/' + ruleId + '/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: enabled })
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(resp) {
+                if (resp.success) {
+                    flash(resp.message, 'success');
+                    loadRules();
+                } else {
+                    flash(resp.message, 'error');
+                }
+            });
+        }
+
+        function openAddModal() {
+            document.getElementById('ruleModalTitle').textContent = '新增规则';
+            document.getElementById('editRuleId').value = '';
+            document.getElementById('ruleName').value = '';
+            document.getElementById('ruleType').value = 'blacklist';
+            document.getElementById('ruleMatchMode').value = 'contains';
+            document.getElementById('ruleSeverity').value = 'medium';
+            document.getElementById('ruleCategory').value = '';
+            document.getElementById('ruleDescription').value = '';
+            currentKeywords = [];
+            renderKeywordChips();
+            document.getElementById('ruleModal').style.display = 'block';
+        }
+
+        function openEditModal(ruleId) {
+            var rule = allRules.find(function(r) { return r.rule_id === ruleId; });
+            if (!rule) return;
+            document.getElementById('ruleModalTitle').textContent = '编辑规则';
+            document.getElementById('editRuleId').value = ruleId;
+            document.getElementById('ruleName').value = rule.name || '';
+            document.getElementById('ruleType').value = rule.rule_type || 'blacklist';
+            document.getElementById('ruleMatchMode').value = rule.match_mode || 'contains';
+            document.getElementById('ruleSeverity').value = rule.severity || 'medium';
+            document.getElementById('ruleCategory').value = rule.category || '';
+            document.getElementById('ruleDescription').value = rule.description || '';
+            currentKeywords = (rule.keywords || []).slice();
+            renderKeywordChips();
+            document.getElementById('ruleModal').style.display = 'block';
+        }
+
+        function closeRuleModal() {
+            document.getElementById('ruleModal').style.display = 'none';
+        }
+
+        function renderKeywordChips() {
+            var editor = document.getElementById('keywordsEditor');
+            var input = document.getElementById('keywordInput');
+            var chips = editor.querySelectorAll('.keyword-chip');
+            chips.forEach(function(c) { c.remove(); });
+            currentKeywords.forEach(function(kw, idx) {
+                var chip = document.createElement('span');
+                chip.className = 'keyword-chip';
+                chip.innerHTML = escHtml(kw) + ' <span class="remove-keyword" onclick="removeKeyword(' + idx + ')">&times;</span>';
+                editor.insertBefore(chip, input);
+            });
+        }
+
+        function removeKeyword(idx) {
+            currentKeywords.splice(idx, 1);
+            renderKeywordChips();
+        }
+
+        document.getElementById('keywordInput').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                var val = this.value.trim();
+                if (val && currentKeywords.indexOf(val) < 0) {
+                    currentKeywords.push(val);
+                    renderKeywordChips();
+                }
+                this.value = '';
+            }
+            if (e.key === 'Backspace' && !this.value && currentKeywords.length) {
+                currentKeywords.pop();
+                renderKeywordChips();
+            }
+        });
+
+        function saveRule() {
+            var editId = document.getElementById('editRuleId').value;
+            var body = {
+                name: document.getElementById('ruleName').value.trim(),
+                rule_type: document.getElementById('ruleType').value,
+                match_mode: document.getElementById('ruleMatchMode').value,
+                severity: document.getElementById('ruleSeverity').value,
+                category: document.getElementById('ruleCategory').value.trim(),
+                description: document.getElementById('ruleDescription').value.trim(),
+                keywords: currentKeywords
+            };
+            if (!body.name) { flash('规则名称不能为空', 'error'); return; }
+            if (!body.keywords.length) { flash('至少需要一个关键词', 'error'); return; }
+
+            var url, method;
+            if (editId) {
+                url = '/api/counterparty-rules/' + editId;
+                method = 'PUT';
+            } else {
+                url = '/api/counterparty-rules';
+                method = 'POST';
+            }
+            fetch(url, {
+                method: method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(resp) {
+                if (resp.success) {
+                    flash(resp.message, 'success');
+                    closeRuleModal();
+                    loadRules();
+                } else {
+                    flash(resp.message, 'error');
+                }
+            });
+        }
+
+        function openDeleteModal(ruleId, ruleName) {
+            document.getElementById('deleteRuleId').value = ruleId;
+            document.getElementById('deleteRuleName').textContent = ruleName;
+            document.getElementById('deleteModal').style.display = 'block';
+        }
+
+        function closeDeleteModal() {
+            document.getElementById('deleteModal').style.display = 'none';
+        }
+
+        function confirmDelete() {
+            var ruleId = document.getElementById('deleteRuleId').value;
+            fetch('/api/counterparty-rules/' + ruleId, { method: 'DELETE' })
+                .then(function(r) { return r.json(); })
+                .then(function(resp) {
+                    if (resp.success) {
+                        flash(resp.message, 'success');
+                        closeDeleteModal();
+                        loadRules();
+                    } else {
+                        flash(resp.message, 'error');
+                    }
+                });
+        }
+
+        function applyRules() {
+            if (!confirm('确认对银行流水总表中的所有记录应用黑白名单规则打标？')) return;
+            var btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '应用中...';
+            fetch('/api/counterparty-rules/apply', { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(resp) {
+                    btn.disabled = false;
+                    btn.textContent = '一键应用打标';
+                    if (resp.success) {
+                        var s = resp.data || {};
+                        var area = document.getElementById('applyResultArea');
+                        area.innerHTML =
+                            '<div class="apply-result">' +
+                                '<h4>打标完成</h4>' +
+                                '<div class="result-stats">' +
+                                    '<div class="result-stat"><div class="num">' + (s.total_records || 0) + '</div><div class="label">总记录数</div></div>' +
+                                    '<div class="result-stat"><div class="num">' + (s.tagged_count || 0) + '</div><div class="label">命中记录</div></div>' +
+                                    '<div class="result-stat"><div class="num" style="color:#c0392b">' + (s.blacklist_hits || 0) + '</div><div class="label">黑名单命中</div></div>' +
+                                    '<div class="result-stat"><div class="num" style="color:#155724">' + (s.whitelist_hits || 0) + '</div><div class="label">白名单命中</div></div>' +
+                                '</div>' +
+                            '</div>';
+                        flash('规则应用成功', 'success');
+                    } else {
+                        flash(resp.message || '应用失败', 'error');
+                    }
+                })
+                .catch(function() {
+                    btn.disabled = false;
+                    btn.textContent = '一键应用打标';
+                    flash('请求失败', 'error');
+                });
+        }
+
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.style.display = 'none';
+            }
+        };
+
+        loadRules();
+    </script>
+</body>
+</html>
