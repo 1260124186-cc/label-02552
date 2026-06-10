@@ -156,7 +156,8 @@ def cli_askmode():
     print('  8) 批次管理：查看历史批次与版本回溯')
     print('  9) 预设管理：管理任务配置预设，一键加载常用方案')
     print('  10)主体汇总分析：按主体/银行/月份统计收支净额与笔数')
-    choice = input('请输入选项（1-10，直接回车默认为 1）: ').strip()
+    print('  11)余额连续性校验：逐笔核对余额连续性，识别断裂或跳变')
+    choice = input('请输入选项（1-11，直接回车默认为 1）: ').strip()
     if choice == '2':
         return 'diff'
     elif choice == '3':
@@ -175,6 +176,8 @@ def cli_askmode():
         return 'preset'
     elif choice == '10':
         return 'subject_summary'
+    elif choice == '11':
+        return 'balance_check'
     return 'pipeline'
 
 
@@ -216,7 +219,7 @@ def _gui_askmode_full():
         raise RuntimeError('Mock Tk detected')
 
     root.title('银行流水检验工具 - 选择功能')
-    root.geometry('480x600')
+    root.geometry('480x680')
     root.resizable(False, False)
 
     result = {'mode': None}
@@ -237,6 +240,7 @@ def _gui_askmode_full():
         ('定时调度', 'scheduler', '定时批处理调度管理', '#9C27B0'),
         ('财务导出', 'export', '按用友/金蝶等模板导出', '#607D8B'),
         ('主体汇总', 'subject_summary', '按主体/银行/月份统计', '#3F51B5'),
+        ('余额校验', 'balance_check', '逐笔核对余额连续性', '#8BC34A'),
         ('数据库查询', 'db_query', '按条件查询流水记录', '#00BCD4'),
         ('数据库统计', 'db_stats', '查看数据汇总统计', '#795548'),
         ('批次管理', 'batch_history', '历史批次与版本回溯', '#E91E63'),
@@ -915,6 +919,7 @@ class ProcessingResult:
     error_files: List[Tuple[str, str]] = field(default_factory=list)
     output_path: Optional[str] = None
     subject_summary_path: Optional[str] = None
+    balance_check_path: Optional[str] = None
     lookup_missing: bool = False
     folder_empty: bool = False
     incremental_mode: bool = False
@@ -1223,6 +1228,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
             logger.error('数据库持久化失败: %s', e, exc_info=True)
 
     subject_summary_path = None
+    balance_check_path = None
     if final_rows:
         try:
             output_dir = script_dir
@@ -1244,6 +1250,26 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
             logger.error('自动生成主体汇总分析失败: %s', e, exc_info=True)
             subject_summary_path = None
 
+        try:
+            output_dir = script_dir
+            if output_path:
+                output_dir = os.path.dirname(output_path) or script_dir
+            source_info = {
+                '数据来源': '主流程自动生成',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            balance_check_path = generate_balance_check_from_records(
+                final_rows, output_dir, source_info
+            )
+            if balance_check_path:
+                logger.info('余额连续性校验报告已自动生成: %s', balance_check_path)
+        except Exception as e:
+            logger.error('自动生成余额连续性校验报告失败: %s', e, exc_info=True)
+            balance_check_path = None
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -1251,6 +1277,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         error_files=error_files,
         output_path=output_path,
         subject_summary_path=subject_summary_path,
+        balance_check_path=balance_check_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -1296,6 +1323,9 @@ def format_result_message(result):
 
         if result.subject_summary_path:
             msg += f'\n\n主体汇总分析：{result.subject_summary_path}'
+
+        if result.balance_check_path:
+            msg += f'\n\n余额连续性校验：{result.balance_check_path}'
     else:
         if result.incremental_mode and result.existing_record_count > 0:
             msg = (
@@ -5986,6 +6016,14 @@ def parse_args_and_run():
                        help='指定总表文件直接生成主体维度汇总分析')
     parser.add_argument('--summary-output', type=str, metavar='OUTPUT_DIR',
                        help='指定主体汇总分析输出目录')
+    parser.add_argument('--balance-check', action='store_true',
+                       help='进入余额连续性校验功能')
+    parser.add_argument('--balance-total', type=str, metavar='TOTAL_FILE',
+                       help='指定总表文件直接生成余额连续性校验报告')
+    parser.add_argument('--balance-output', type=str, metavar='OUTPUT_DIR',
+                       help='指定余额连续性校验报告输出目录')
+    parser.add_argument('--balance-tolerance', type=float, metavar='TOLERANCE',
+                       help='指定余额校验容差（元），默认 0.01')
 
     args = parser.parse_args()
 
@@ -6210,6 +6248,32 @@ def parse_args_and_run():
             return True
         else:
             run_subject_summary_flow(script_dir)
+            return True
+
+    if args.balance_check or args.balance_total:
+        if args.balance_total:
+            total_path = os.path.abspath(args.balance_total)
+            if not os.path.exists(total_path):
+                logger.error('总表文件不存在: %s', total_path)
+                print(f'错误: 总表文件不存在: {total_path}')
+                return True
+
+            output_dir = None
+            if args.balance_output:
+                output_dir = os.path.abspath(args.balance_output)
+                os.makedirs(output_dir, exist_ok=True)
+
+            tolerance = args.balance_tolerance if args.balance_tolerance is not None else 0.01
+
+            result_path = generate_balance_check_from_total(total_path, output_dir, tolerance)
+            if result_path:
+                print(f'\n✅ 余额连续性校验报告已生成！')
+                print(f'   输出文件: {result_path}\n')
+            else:
+                print(f'\n❌ 生成失败，请检查总表文件是否有数据\n')
+            return True
+        else:
+            run_balance_check_flow(script_dir)
             return True
 
     return None
@@ -6524,6 +6588,8 @@ def main():
         run_preset_flow(script_dir)
     elif mode == 'subject_summary':
         run_subject_summary_flow(script_dir)
+    elif mode == 'balance_check':
+        run_balance_check_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
@@ -7384,6 +7450,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             logger.error('数据库持久化失败: %s', e, exc_info=True)
 
     subject_summary_path = None
+    balance_check_path = None
     if final_rows:
         try:
             output_dir_for_summary = output_dir or script_dir
@@ -7407,6 +7474,28 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             logger.error('自动生成主体汇总分析失败: %s', e, exc_info=True)
             subject_summary_path = None
 
+        try:
+            output_dir_for_check = output_dir or script_dir
+            if output_path:
+                output_dir_for_check = os.path.dirname(output_path) or output_dir_for_check
+            source_info = {
+                '数据来源': '主流程自动生成(预设)',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '启用银行': ', '.join(enabled_banks) if enabled_banks else '全部',
+                '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            balance_check_path = generate_balance_check_from_records(
+                final_rows, output_dir_for_check, source_info
+            )
+            if balance_check_path:
+                logger.info('余额连续性校验报告已自动生成: %s', balance_check_path)
+        except Exception as e:
+            logger.error('自动生成余额连续性校验报告失败: %s', e, exc_info=True)
+            balance_check_path = None
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -7414,6 +7503,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         error_files=error_files,
         output_path=output_path,
         subject_summary_path=subject_summary_path,
+        balance_check_path=balance_check_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -8614,6 +8704,525 @@ def run_subject_summary_flow(script_dir):
         logger.error('主体维度汇总分析导出失败: %s', e, exc_info=True)
 
     logger.info('========== 主体维度汇总分析结束 ==========')
+
+
+# ──────────────────────────────────────────────
+# 余额连续性校验模块
+# ──────────────────────────────────────────────
+
+@dataclass
+class BalanceBreakRecord:
+    """余额断裂记录"""
+    bank_account: str
+    subject: str
+    bank: str
+    transaction_date: Optional[datetime]
+    prev_balance: float
+    receipt: float
+    payment: float
+    expected_balance: float
+    actual_balance: float
+    diff_amount: float
+    transaction_id: str
+    summary: str
+
+
+@dataclass
+class BalanceCheckResult:
+    """余额连续性校验结果"""
+    total_accounts: int = 0
+    checked_accounts: int = 0
+    skipped_accounts: int = 0
+    break_count: int = 0
+    break_records: List[BalanceBreakRecord] = field(default_factory=list)
+    accounts_with_breaks: List[str] = field(default_factory=list)
+    check_summary: Dict[str, Any] = field(default_factory=dict)
+
+
+def _parse_transaction_date(value) -> Optional[datetime]:
+    """解析交易日期，支持多种格式"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+    return _normalize_date(value)
+
+
+def _safe_float(value) -> float:
+    """安全转换为 float，空值或无效值返回 0.0"""
+    result = to_float(value)
+    return result if result is not None else 0.0
+
+
+def check_balance_continuity(records: List[Dict[str, Any]],
+                             tolerance: float = 0.01) -> BalanceCheckResult:
+    """
+    余额连续性校验。
+
+    校验逻辑：
+    1. 按银行账号分组
+    2. 每组内按交易日期排序
+    3. 逐笔核对：上期余额 + 收款 - 付款 = 当期余额
+    4. 对断裂或跳变的记录生成异常清单
+
+    Args:
+        records: 交易记录列表
+        tolerance: 容差，默认 0.01 元
+
+    Returns:
+        BalanceCheckResult: 校验结果
+    """
+    logger = get_logger()
+    result = BalanceCheckResult()
+
+    if not records:
+        logger.warning('无交易记录可校验')
+        result.check_summary = {'status': '无数据'}
+        return result
+
+    account_groups: Dict[str, List[Dict[str, Any]]] = {}
+    for record in records:
+        account = str(record.get('银行账号', '')).strip()
+        if not account:
+            continue
+        if account not in account_groups:
+            account_groups[account] = []
+        account_groups[account].append(record)
+
+    result.total_accounts = len(account_groups)
+    logger.info('共 %d 个账号待校验', result.total_accounts)
+
+    for account, account_records in account_groups.items():
+        logger.debug('校验账号: %s, 记录数: %d', account, len(account_records))
+
+        parsed_records = []
+        for r in account_records:
+            parsed = r.copy()
+            parsed['_date'] = _parse_transaction_date(r.get('交易日期'))
+            parsed['_balance'] = _safe_float(r.get('余额'))
+            parsed['_receipt'] = _safe_float(r.get('收款'))
+            parsed['_payment'] = _safe_float(r.get('付款'))
+            parsed_records.append(parsed)
+
+        has_valid_date = any(r['_date'] is not None for r in parsed_records)
+        if not has_valid_date:
+            logger.warning('账号 %s 无有效交易日期，跳过', account)
+            result.skipped_accounts += 1
+            continue
+
+        parsed_records.sort(key=lambda r: (r['_date'] or datetime.min, str(r.get('交易流水号', ''))))
+        result.checked_accounts += 1
+
+        has_break = False
+        for i in range(1, len(parsed_records)):
+            prev = parsed_records[i - 1]
+            curr = parsed_records[i]
+
+            prev_balance = prev['_balance']
+            receipt = curr['_receipt']
+            payment = curr['_payment']
+            actual_balance = curr['_balance']
+
+            expected_balance = prev_balance + receipt - payment
+            diff = abs(actual_balance - expected_balance)
+
+            if diff > tolerance:
+                has_break = True
+                result.break_count += 1
+
+                break_record = BalanceBreakRecord(
+                    bank_account=account,
+                    subject=str(curr.get('主体', '')),
+                    bank=str(curr.get('银行', '')),
+                    transaction_date=curr['_date'],
+                    prev_balance=prev_balance,
+                    receipt=receipt,
+                    payment=payment,
+                    expected_balance=expected_balance,
+                    actual_balance=actual_balance,
+                    diff_amount=actual_balance - expected_balance,
+                    transaction_id=str(curr.get('交易流水号', '')),
+                    summary=str(curr.get('摘要', ''))
+                )
+                result.break_records.append(break_record)
+                logger.debug(
+                    '余额断裂 - 账号: %s, 日期: %s, 预期: %.2f, 实际: %.2f, 差异: %.2f',
+                    account, curr['_date'], expected_balance, actual_balance, actual_balance - expected_balance
+                )
+
+        if has_break and account not in result.accounts_with_breaks:
+            result.accounts_with_breaks.append(account)
+
+    result.check_summary = {
+        'total_accounts': result.total_accounts,
+        'checked_accounts': result.checked_accounts,
+        'skipped_accounts': result.skipped_accounts,
+        'break_count': result.break_count,
+        'accounts_with_breaks_count': len(result.accounts_with_breaks),
+        'tolerance': tolerance,
+        'check_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    logger.info(
+        '余额连续性校验完成 - 总账号: %d, 已校验: %d, 跳过: %d, 异常笔数: %d, 异常账号: %d',
+        result.total_accounts, result.checked_accounts, result.skipped_accounts,
+        result.break_count, len(result.accounts_with_breaks)
+    )
+
+    return result
+
+
+def export_balance_check_result(check_result: BalanceCheckResult,
+                                output_path: str,
+                                source_info: Optional[Dict[str, Any]] = None) -> str:
+    """
+    导出余额连续性校验结果为 Excel 文件。
+
+    输出的 Sheet 包括：
+    1. 校验总览 - 整体统计信息
+    2. 异常明细 - 所有余额断裂的交易记录
+    3. 异常账号清单 - 存在余额断裂的账号列表
+
+    Args:
+        check_result: check_balance_continuity 返回的校验结果
+        output_path: 输出 Excel 文件路径
+        source_info: 可选，数据源信息
+
+    Returns:
+        str: 输出文件路径
+    """
+    logger = get_logger()
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            overview_data = []
+            summary = check_result.check_summary
+
+            overview_items = [
+                ('校验项', '数值'),
+                ('账号总数', summary.get('total_accounts', 0)),
+                ('已校验账号数', summary.get('checked_accounts', 0)),
+                ('跳过账号数', summary.get('skipped_accounts', 0)),
+                ('余额断裂笔数', summary.get('break_count', 0)),
+                ('异常账号数', summary.get('accounts_with_breaks_count', 0)),
+                ('容差(元)', summary.get('tolerance', 0.01)),
+                ('校验时间', summary.get('check_time', '')),
+            ]
+            if source_info:
+                for k, v in source_info.items():
+                    overview_items.append((k, v))
+
+            overview_df = pd.DataFrame(overview_items[1:], columns=overview_items[0])
+            overview_df.to_excel(writer, sheet_name='校验总览', index=False)
+
+            if check_result.break_records:
+                break_data = []
+                for br in check_result.break_records:
+                    break_data.append({
+                        '主体': br.subject,
+                        '银行': br.bank,
+                        '银行账号': br.bank_account,
+                        '交易日期': br.transaction_date.strftime('%Y-%m-%d') if br.transaction_date else '',
+                        '上期余额(元)': br.prev_balance,
+                        '本期收款(元)': br.receipt,
+                        '本期付款(元)': br.payment,
+                        '预期余额(元)': br.expected_balance,
+                        '实际余额(元)': br.actual_balance,
+                        '差异(元)': br.diff_amount,
+                        '交易流水号': br.transaction_id,
+                        '摘要': br.summary,
+                    })
+
+                break_df = pd.DataFrame(break_data)
+                break_df = break_df[[
+                    '主体', '银行', '银行账号', '交易日期', '上期余额(元)',
+                    '本期收款(元)', '本期付款(元)', '预期余额(元)', '实际余额(元)',
+                    '差异(元)', '交易流水号', '摘要'
+                ]]
+                break_df.to_excel(writer, sheet_name='异常明细', index=False)
+
+                ws = writer.sheets['异常明细']
+                amount_cols = set()
+                for idx, col_name in enumerate(break_df.columns, 1):
+                    col_letter = openpyxl.utils.get_column_letter(idx)
+                    if '元' in str(col_name):
+                        amount_cols.add(col_letter)
+                    max_len = max(
+                        len(str(col_name)),
+                        max((len(str(v)) for v in break_df.iloc[:, idx - 1].astype(str)), default=0)
+                    )
+                    ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+                for row in ws.iter_rows(min_row=2):
+                    for cell in row:
+                        col_letter = cell.column_letter
+                        if col_letter in amount_cols:
+                            cell.number_format = '#,##0.00'
+
+            if check_result.accounts_with_breaks:
+                account_data = []
+                for account in check_result.accounts_with_breaks:
+                    account_breaks = [br for br in check_result.break_records if br.bank_account == account]
+                    sample = account_breaks[0] if account_breaks else None
+                    max_diff = max((abs(br.diff_amount) for br in account_breaks), default=0)
+                    account_data.append({
+                        '序号': len(account_data) + 1,
+                        '主体': sample.subject if sample else '',
+                        '银行': sample.bank if sample else '',
+                        '银行账号': account,
+                        '异常笔数': len(account_breaks),
+                        '最大差异(元)': max_diff,
+                        '首笔异常日期': account_breaks[0].transaction_date.strftime('%Y-%m-%d')
+                        if account_breaks and account_breaks[0].transaction_date else '',
+                    })
+
+                account_df = pd.DataFrame(account_data)
+                account_df.to_excel(writer, sheet_name='异常账号清单', index=False)
+
+                ws = writer.sheets['异常账号清单']
+                amount_cols = set()
+                count_cols = set()
+                for idx, col_name in enumerate(account_df.columns, 1):
+                    col_letter = openpyxl.utils.get_column_letter(idx)
+                    if '元' in str(col_name):
+                        amount_cols.add(col_letter)
+                    elif '笔数' in str(col_name) or '序号' in str(col_name):
+                        count_cols.add(col_letter)
+                    max_len = max(
+                        len(str(col_name)),
+                        max((len(str(v)) for v in account_df.iloc[:, idx - 1].astype(str)), default=0)
+                    )
+                    ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+                for row in ws.iter_rows(min_row=2):
+                    for cell in row:
+                        col_letter = cell.column_letter
+                        if col_letter in amount_cols:
+                            cell.number_format = '#,##0.00'
+                        elif col_letter in count_cols:
+                            cell.number_format = '#,##0'
+
+            ws_overview = writer.sheets['校验总览']
+            for col_idx in range(1, 3):
+                col_letter = openpyxl.utils.get_column_letter(col_idx)
+                ws_overview.column_dimensions[col_letter].width = 25
+
+            for row in ws_overview.iter_rows(min_row=2):
+                for cell in row:
+                    if cell.column == 2:
+                        val = cell.value
+                        if isinstance(val, (int, float)):
+                            if isinstance(val, float):
+                                cell.number_format = '#,##0.00'
+                            else:
+                                cell.number_format = '#,##0'
+
+        logger.info('余额连续性校验结果已导出: %s', output_path)
+        return output_path
+
+    except Exception as e:
+        logger.error('导出余额连续性校验结果失败: %s', e, exc_info=True)
+        raise
+
+
+def generate_balance_check_from_records(records: List[Dict[str, Any]],
+                                        output_dir: Optional[str] = None,
+                                        source_info: Optional[Dict[str, Any]] = None,
+                                        tolerance: float = 0.01) -> Optional[str]:
+    """
+    从交易记录列表直接生成余额连续性校验报告。
+
+    Args:
+        records: 交易记录列表
+        output_dir: 输出目录
+        source_info: 数据源信息
+        tolerance: 容差
+
+    Returns:
+        str: 生成的文件路径，如无数据则返回 None
+    """
+    logger = get_logger()
+
+    if not records:
+        logger.warning('无交易记录，跳过余额连续性校验')
+        return None
+
+    if output_dir is None:
+        output_dir = get_script_dir()
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'余额连续性校验报告_{timestamp}.xlsx'
+    output_path = os.path.join(output_dir, filename)
+
+    check_result = check_balance_continuity(records, tolerance=tolerance)
+
+    return export_balance_check_result(check_result, output_path, source_info)
+
+
+def generate_balance_check_from_total(total_path: str,
+                                      output_dir: Optional[str] = None,
+                                      tolerance: float = 0.01) -> Optional[str]:
+    """
+    从银行流水总表文件生成余额连续性校验报告。
+
+    Args:
+        total_path: 银行流水总表 Excel 文件路径
+        output_dir: 输出目录
+        tolerance: 容差
+
+    Returns:
+        str: 生成的文件路径，失败则返回 None
+    """
+    logger = get_logger()
+
+    records = load_total_table(total_path)
+    if not records:
+        logger.warning('总表无数据: %s', total_path)
+        return None
+
+    if output_dir is None:
+        output_dir = os.path.dirname(total_path) or get_script_dir()
+
+    source_info = {
+        '数据来源文件': os.path.basename(total_path),
+        '总表记录数': len(records),
+        '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    return generate_balance_check_from_records(records, output_dir, source_info, tolerance)
+
+
+def run_balance_check_flow(script_dir):
+    """余额连续性校验 CLI 流程"""
+    logger = get_logger()
+    logger.info('========== 余额连续性校验开始 ==========')
+
+    print('\n' + '=' * 70)
+    print('余额连续性校验 - 逐笔核对余额连续性，识别断裂或跳变')
+    print('=' * 70)
+    print('\n请选择数据来源：')
+    print('  1) 从银行流水总表文件（Excel）')
+    print('  2) 从数据库（按条件查询后校验）')
+    print('  0) 返回主菜单')
+
+    choice = input('\n请输入选项（默认 1）: ').strip() or '1'
+
+    records = []
+    source_info = {}
+
+    if choice == '0':
+        return
+    elif choice == '1':
+        total_path = ask_file('请选择【银行流水总表】文件')
+        if not total_path:
+            show_info('提示', '未选择总表文件，返回。')
+            return
+        logger.info('用户选择总表文件: %s', total_path)
+        records = load_total_table(total_path)
+        if not records:
+            show_warning('错误', '总表文件无数据或读取失败。')
+            return
+        source_info = {
+            '数据来源文件': os.path.basename(total_path),
+            '总表记录数': len(records),
+            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    elif choice == '2':
+        if not HAS_DATABASE:
+            show_warning('错误', '数据库模块不可用。')
+            return
+
+        print('\n输入查询条件（直接回车表示不限制）：')
+        subject = input('主体名称: ').strip() or None
+        bank = input('银行名称: ').strip() or None
+        account = input('银行账号: ').strip() or None
+        start_date = input('开始日期 (YYYY-MM-DD): ').strip() or None
+        end_date = input('结束日期 (YYYY-MM-DD): ').strip() or None
+
+        try:
+            qr = db_module.query_transactions(
+                subject=subject, bank=bank, account=account,
+                start_date=start_date, end_date=end_date,
+                limit=999999, script_dir=script_dir
+            )
+            records = [r.to_dict() for r in qr.records]
+        except Exception as e:
+            show_warning('错误', f'数据库查询失败: {e}')
+            logger.error('数据库查询失败: %s', e, exc_info=True)
+            return
+
+        if not records:
+            show_info('提示', '查询结果为空。')
+            return
+
+        source_info = {
+            '数据来源': '数据库查询',
+            '查询主体': subject or '全部',
+            '查询银行': bank or '全部',
+            '查询账号': account or '全部',
+            '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+            '记录数': len(records),
+            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    else:
+        print('无效选项')
+        return
+
+    tolerance_input = input('\n请输入容差（元，直接回车默认 0.01）: ').strip()
+    tolerance = 0.01
+    if tolerance_input:
+        try:
+            tolerance = float(tolerance_input)
+        except ValueError:
+            print('输入无效，使用默认容差 0.01 元')
+            tolerance = 0.01
+
+    print(f'\n开始校验，容差: {tolerance} 元...')
+    check_result = check_balance_continuity(records, tolerance=tolerance)
+    summary = check_result.check_summary
+
+    print('\n' + '=' * 70)
+    print('校验结果总览')
+    print('=' * 70)
+    print(f'  账号总数:     {summary.get("total_accounts", 0):,}')
+    print(f'  已校验账号:   {summary.get("checked_accounts", 0):,}')
+    print(f'  跳过账号:     {summary.get("skipped_accounts", 0):,}')
+    print(f'  余额断裂笔数: {summary.get("break_count", 0):,}')
+    print(f'  异常账号数:   {summary.get("accounts_with_breaks_count", 0):,}')
+
+    if check_result.break_count > 0:
+        print(f'\n  ⚠️  发现 {check_result.break_count} 笔余额异常，涉及 {len(check_result.accounts_with_breaks)} 个账号')
+        for account in check_result.accounts_with_breaks[:10]:
+            account_breaks = [br for br in check_result.break_records if br.bank_account == account]
+            sample = account_breaks[0] if account_breaks else None
+            print(f'    - {account} ({sample.subject if sample else "未知主体"}): {len(account_breaks)} 笔异常')
+        if len(check_result.accounts_with_breaks) > 10:
+            print(f'    ... 还有 {len(check_result.accounts_with_breaks) - 10} 个账号，详见导出文件')
+    else:
+        print(f'\n  ✅ 所有账号余额连续性校验通过！')
+
+    output_dir = input('\n请输入输出目录（直接回车默认当前目录）: ').strip()
+    if not output_dir:
+        output_dir = script_dir
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_path = os.path.join(output_dir, f'余额连续性校验报告_{timestamp}.xlsx')
+
+    try:
+        export_balance_check_result(check_result, output_path, source_info)
+        msg = f'校验报告已导出！\n\n输出文件：{output_path}'
+        show_info('导出成功', msg)
+        logger.info('余额连续性校验报告导出完成: %s', output_path)
+    except Exception as e:
+        msg = f'导出失败：{e}'
+        show_warning('导出失败', msg)
+        logger.error('余额连续性校验报告导出失败: %s', e, exc_info=True)
+
+    logger.info('========== 余额连续性校验结束 ==========')
 
 
 if __name__ == '__main__':
