@@ -1188,6 +1188,15 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
                         _cp_tag_summary.get('tagged_count', 0),
                         _cp_tag_summary.get('blacklist_hits', 0),
                         _cp_tag_summary.get('whitelist_hits', 0))
+            if output_path:
+                _cp_columns = [
+                    '唯一id', '银行', '银行账号', '主体', '交易日期',
+                    '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+                    '黑白名单标签', '命中规则名称', '命中关键词',
+                ]
+                pd.DataFrame(final_rows, columns=_cp_columns).to_excel(
+                    output_path, index=False, engine='openpyxl')
+                logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
 
     db_inserted = 0
     db_duplicates = 0
@@ -7282,6 +7291,15 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                         _cp_tag_summary.get('tagged_count', 0),
                         _cp_tag_summary.get('blacklist_hits', 0),
                         _cp_tag_summary.get('whitelist_hits', 0))
+            if output_path:
+                _cp_columns = [
+                    '唯一id', '银行', '银行账号', '主体', '交易日期',
+                    '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+                    '黑白名单标签', '命中规则名称', '命中关键词',
+                ]
+                pd.DataFrame(final_rows, columns=_cp_columns).to_excel(
+                    output_path, index=False, engine='openpyxl')
+                logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
 
     db_inserted = 0
     db_duplicates = 0
