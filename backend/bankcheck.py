@@ -155,7 +155,8 @@ def cli_askmode():
     print('  7) 数据库统计：查看数据汇总统计信息')
     print('  8) 批次管理：查看历史批次与版本回溯')
     print('  9) 预设管理：管理任务配置预设，一键加载常用方案')
-    choice = input('请输入选项（1-9，直接回车默认为 1）: ').strip()
+    print('  10)主体汇总分析：按主体/银行/月份统计收支净额与笔数')
+    choice = input('请输入选项（1-10，直接回车默认为 1）: ').strip()
     if choice == '2':
         return 'diff'
     elif choice == '3':
@@ -172,6 +173,8 @@ def cli_askmode():
         return 'batch_history'
     elif choice == '9':
         return 'preset'
+    elif choice == '10':
+        return 'subject_summary'
     return 'pipeline'
 
 
@@ -213,7 +216,7 @@ def _gui_askmode_full():
         raise RuntimeError('Mock Tk detected')
 
     root.title('银行流水检验工具 - 选择功能')
-    root.geometry('480x520')
+    root.geometry('480x600')
     root.resizable(False, False)
 
     result = {'mode': None}
@@ -233,6 +236,7 @@ def _gui_askmode_full():
         ('监控面板', 'monitor', '运行监控与告警管理', '#FF9800'),
         ('定时调度', 'scheduler', '定时批处理调度管理', '#9C27B0'),
         ('财务导出', 'export', '按用友/金蝶等模板导出', '#607D8B'),
+        ('主体汇总', 'subject_summary', '按主体/银行/月份统计', '#3F51B5'),
         ('数据库查询', 'db_query', '按条件查询流水记录', '#00BCD4'),
         ('数据库统计', 'db_stats', '查看数据汇总统计', '#795548'),
         ('批次管理', 'batch_history', '历史批次与版本回溯', '#E91E63'),
@@ -910,6 +914,7 @@ class ProcessingResult:
     unprocessed_files: List[str] = field(default_factory=list)
     error_files: List[Tuple[str, str]] = field(default_factory=list)
     output_path: Optional[str] = None
+    subject_summary_path: Optional[str] = None
     lookup_missing: bool = False
     folder_empty: bool = False
     incremental_mode: bool = False
@@ -1217,12 +1222,35 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         except Exception as e:
             logger.error('数据库持久化失败: %s', e, exc_info=True)
 
+    subject_summary_path = None
+    if final_rows:
+        try:
+            output_dir = script_dir
+            if output_path:
+                output_dir = os.path.dirname(output_path) or script_dir
+            source_info = {
+                '数据来源': '主流程自动生成',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            subject_summary_path = generate_subject_summary_from_records(
+                final_rows, output_dir, source_info
+            )
+            if subject_summary_path:
+                logger.info('主体维度汇总分析已自动生成: %s', subject_summary_path)
+        except Exception as e:
+            logger.error('自动生成主体汇总分析失败: %s', e, exc_info=True)
+            subject_summary_path = None
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
         output_path=output_path,
+        subject_summary_path=subject_summary_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -1265,6 +1293,9 @@ def format_result_message(result):
                 f'├─ 新增入库：{result.db_inserted_count} 条\n'
                 f'└─ 重复跳过：{result.db_duplicate_count} 条'
             )
+
+        if result.subject_summary_path:
+            msg += f'\n\n主体汇总分析：{result.subject_summary_path}'
     else:
         if result.incremental_mode and result.existing_record_count > 0:
             msg = (
@@ -5949,6 +5980,12 @@ def parse_args_and_run():
                        help='应用指定ID的预设，需配合--watch-dir使用')
     parser.add_argument('--save-preset', type=str, metavar='NAME',
                        help='保存当前配置为新预设')
+    parser.add_argument('--subject-summary', action='store_true',
+                       help='进入主体维度汇总分析功能')
+    parser.add_argument('--summary-total', type=str, metavar='TOTAL_FILE',
+                       help='指定总表文件直接生成主体维度汇总分析')
+    parser.add_argument('--summary-output', type=str, metavar='OUTPUT_DIR',
+                       help='指定主体汇总分析输出目录')
 
     args = parser.parse_args()
 
@@ -6149,6 +6186,30 @@ def parse_args_and_run():
             return True
         else:
             run_export_flow(script_dir)
+            return True
+
+    if args.subject_summary or args.summary_total:
+        if args.summary_total:
+            total_path = os.path.abspath(args.summary_total)
+            if not os.path.exists(total_path):
+                logger.error('总表文件不存在: %s', total_path)
+                print(f'错误: 总表文件不存在: {total_path}')
+                return True
+
+            output_dir = None
+            if args.summary_output:
+                output_dir = os.path.abspath(args.summary_output)
+                os.makedirs(output_dir, exist_ok=True)
+
+            result_path = generate_subject_summary_from_total(total_path, output_dir)
+            if result_path:
+                print(f'\n✅ 主体维度汇总分析已生成！')
+                print(f'   输出文件: {result_path}\n')
+            else:
+                print(f'\n❌ 生成失败，请检查总表文件是否有数据\n')
+            return True
+        else:
+            run_subject_summary_flow(script_dir)
             return True
 
     return None
@@ -6461,6 +6522,8 @@ def main():
         run_batch_history_flow(script_dir)
     elif mode == 'preset':
         run_preset_flow(script_dir)
+    elif mode == 'subject_summary':
+        run_subject_summary_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
@@ -7320,12 +7383,37 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         except Exception as e:
             logger.error('数据库持久化失败: %s', e, exc_info=True)
 
+    subject_summary_path = None
+    if final_rows:
+        try:
+            output_dir_for_summary = output_dir or script_dir
+            if output_path:
+                output_dir_for_summary = os.path.dirname(output_path) or output_dir_for_summary
+            source_info = {
+                '数据来源': '主流程自动生成(预设)',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '启用银行': ', '.join(enabled_banks) if enabled_banks else '全部',
+                '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            subject_summary_path = generate_subject_summary_from_records(
+                final_rows, output_dir_for_summary, source_info
+            )
+            if subject_summary_path:
+                logger.info('主体维度汇总分析已自动生成: %s', subject_summary_path)
+        except Exception as e:
+            logger.error('自动生成主体汇总分析失败: %s', e, exc_info=True)
+            subject_summary_path = None
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
         output_path=output_path,
+        subject_summary_path=subject_summary_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -7911,6 +7999,621 @@ def _print_preset_detail(preset):
     print(f'创建时间: {preset.get("created_at", "")}')
     print(f'更新时间: {preset.get("updated_at", "")}')
     print('=' * 50)
+
+
+# ──────────────────────────────────────────────
+# 主体维度汇总分析模块
+# ──────────────────────────────────────────────
+
+SUBJECT_SUMMARY_FILENAME = '主体维度汇总分析.xlsx'
+
+
+@dataclass
+class SubjectDimensionSummary:
+    """主体维度汇总数据"""
+    subject: str = ''
+    bank: str = ''
+    year_month: str = ''
+    total_income: float = 0.0
+    total_expense: float = 0.0
+    net_amount: float = 0.0
+    transaction_count: int = 0
+    income_count: int = 0
+    expense_count: int = 0
+
+
+@dataclass
+class SubjectSummaryResult:
+    """汇总分析结果容器"""
+    by_subject: List[Dict[str, Any]] = field(default_factory=list)
+    by_subject_bank: List[Dict[str, Any]] = field(default_factory=list)
+    by_subject_month: List[Dict[str, Any]] = field(default_factory=list)
+    by_subject_bank_month: List[Dict[str, Any]] = field(default_factory=list)
+    by_bank: List[Dict[str, Any]] = field(default_factory=list)
+    by_month: List[Dict[str, Any]] = field(default_factory=list)
+    overall_summary: Dict[str, Any] = field(default_factory=dict)
+
+
+def _extract_year_month(trade_date) -> str:
+    """从交易日期提取年月，格式 YYYY-MM"""
+    if trade_date is None:
+        return '未知'
+
+    s = str(trade_date).strip()
+    if not s:
+        return '未知'
+
+    dt = _normalize_date(trade_date)
+    if dt is None:
+        if len(s) >= 7:
+            if s[4] in '-/.' and len(s) >= 7:
+                return s[:7]
+            elif s.isdigit() and len(s) >= 6:
+                return f'{s[:4]}-{s[4:6]}'
+        return '未知'
+
+    try:
+        return dt.strftime('%Y-%m')
+    except Exception:
+        if len(s) >= 7 and s[4] in '-/.' and len(s) >= 7:
+            return s[:7]
+        return '未知'
+
+
+def summarize_transactions(records: List[Dict[str, Any]]) -> SubjectSummaryResult:
+    """
+    对交易记录进行多维度汇总分析。
+
+    维度组合：
+    1. 按主体
+    2. 按主体 + 银行
+    3. 按主体 + 月份
+    4. 按主体 + 银行 + 月份
+    5. 按银行
+    6. 按月份
+
+    每个维度统计：收入总额、支出总额、净额、交易笔数、收入笔数、支出笔数
+
+    Args:
+        records: 交易记录列表，每条包含 '主体', '银行', '交易日期', '付款', '收款' 等字段
+
+    Returns:
+        SubjectSummaryResult: 多维度汇总结果
+    """
+    logger = get_logger()
+
+    empty_overall = {
+        'total_income': 0.0, 'total_expense': 0.0, 'net_amount': 0.0,
+        'transaction_count': 0, 'income_count': 0, 'expense_count': 0,
+        'subject_count': 0, 'bank_count': 0, 'month_count': 0,
+    }
+
+    if not records:
+        logger.warning('无交易记录可汇总')
+        return SubjectSummaryResult(overall_summary=empty_overall)
+
+    agg_3d: Dict[Tuple[str, str, str], SubjectDimensionSummary] = {}
+    agg_subject: Dict[str, SubjectDimensionSummary] = {}
+    agg_subject_bank: Dict[Tuple[str, str], SubjectDimensionSummary] = {}
+    agg_subject_month: Dict[Tuple[str, str], SubjectDimensionSummary] = {}
+    agg_bank: Dict[str, SubjectDimensionSummary] = {}
+    agg_month: Dict[str, SubjectDimensionSummary] = {}
+
+    total_income = 0.0
+    total_expense = 0.0
+    total_count = 0
+    total_income_count = 0
+    total_expense_count = 0
+
+    def _update(entry, income, expense, is_income, is_expense):
+        entry.total_income += income
+        entry.total_expense += expense
+        entry.transaction_count += 1
+        if is_income:
+            entry.income_count += 1
+        if is_expense:
+            entry.expense_count += 1
+
+    for rec in records:
+        subject = str(rec.get('主体') or '').strip() or '未指定主体'
+        bank = str(rec.get('银行') or '').strip() or '未知银行'
+        year_month = _extract_year_month(rec.get('交易日期'))
+
+        payment = to_float(rec.get('付款'))
+        receipt = to_float(rec.get('收款'))
+
+        income = 0.0
+        expense = 0.0
+        is_income = False
+        is_expense = False
+
+        if receipt is not None and receipt > 0:
+            income = receipt
+            is_income = True
+        if payment is not None and payment < 0:
+            expense = abs(payment)
+            is_expense = True
+
+        if not is_income and not is_expense:
+            continue
+
+        total_income += income
+        total_expense += expense
+        total_count += 1
+        if is_income:
+            total_income_count += 1
+        if is_expense:
+            total_expense_count += 1
+
+        if subject not in agg_subject:
+            agg_subject[subject] = SubjectDimensionSummary(subject=subject)
+        _update(agg_subject[subject], income, expense, is_income, is_expense)
+
+        if bank not in agg_bank:
+            agg_bank[bank] = SubjectDimensionSummary(bank=bank)
+        _update(agg_bank[bank], income, expense, is_income, is_expense)
+
+        if year_month not in agg_month:
+            agg_month[year_month] = SubjectDimensionSummary(year_month=year_month)
+        _update(agg_month[year_month], income, expense, is_income, is_expense)
+
+        key_sb = (subject, bank)
+        if key_sb not in agg_subject_bank:
+            agg_subject_bank[key_sb] = SubjectDimensionSummary(subject=subject, bank=bank)
+        _update(agg_subject_bank[key_sb], income, expense, is_income, is_expense)
+
+        key_sm = (subject, year_month)
+        if key_sm not in agg_subject_month:
+            agg_subject_month[key_sm] = SubjectDimensionSummary(subject=subject, year_month=year_month)
+        _update(agg_subject_month[key_sm], income, expense, is_income, is_expense)
+
+        key_3d = (subject, bank, year_month)
+        if key_3d not in agg_3d:
+            agg_3d[key_3d] = SubjectDimensionSummary(subject=subject, bank=bank, year_month=year_month)
+        _update(agg_3d[key_3d], income, expense, is_income, is_expense)
+
+    def finalize(entries):
+        for e in entries:
+            e.net_amount = round(e.total_income - e.total_expense, 2)
+            e.total_income = round(e.total_income, 2)
+            e.total_expense = round(e.total_expense, 2)
+
+    finalize(agg_3d.values())
+    finalize(agg_subject.values())
+    finalize(agg_subject_bank.values())
+    finalize(agg_subject_month.values())
+    finalize(agg_bank.values())
+    finalize(agg_month.values())
+
+    def to_dict_list(entries, fields):
+        result = []
+        for e in entries:
+            d = {}
+            for f in fields:
+                d[f] = getattr(e, f)
+            result.append(d)
+        return result
+
+    fields_all = ['subject', 'bank', 'year_month', 'total_income', 'total_expense',
+                  'net_amount', 'transaction_count', 'income_count', 'expense_count']
+    fields_s = ['subject', 'total_income', 'total_expense', 'net_amount',
+                'transaction_count', 'income_count', 'expense_count']
+    fields_sb = ['subject', 'bank', 'total_income', 'total_expense', 'net_amount',
+                 'transaction_count', 'income_count', 'expense_count']
+    fields_sm = ['subject', 'year_month', 'total_income', 'total_expense', 'net_amount',
+                 'transaction_count', 'income_count', 'expense_count']
+    fields_b = ['bank', 'total_income', 'total_expense', 'net_amount',
+                'transaction_count', 'income_count', 'expense_count']
+    fields_m = ['year_month', 'total_income', 'total_expense', 'net_amount',
+                'transaction_count', 'income_count', 'expense_count']
+
+    result = SubjectSummaryResult(
+        by_subject=sorted(
+            to_dict_list(agg_subject.values(), fields_s),
+            key=lambda x: x['net_amount'], reverse=True
+        ),
+        by_subject_bank=sorted(
+            to_dict_list(agg_subject_bank.values(), fields_sb),
+            key=lambda x: (x['subject'], x['net_amount']), reverse=True
+        ),
+        by_subject_month=sorted(
+            to_dict_list(agg_subject_month.values(), fields_sm),
+            key=lambda x: (x['subject'], x['year_month'])
+        ),
+        by_subject_bank_month=sorted(
+            to_dict_list(agg_3d.values(), fields_all),
+            key=lambda x: (x['subject'], x['bank'], x['year_month'])
+        ),
+        by_bank=sorted(
+            to_dict_list(agg_bank.values(), fields_b),
+            key=lambda x: x['net_amount'], reverse=True
+        ),
+        by_month=sorted(
+            to_dict_list(agg_month.values(), fields_m),
+            key=lambda x: x['year_month']
+        ),
+        overall_summary={
+            'total_income': round(total_income, 2),
+            'total_expense': round(total_expense, 2),
+            'net_amount': round(total_income - total_expense, 2),
+            'transaction_count': total_count,
+            'income_count': total_income_count,
+            'expense_count': total_expense_count,
+            'subject_count': len(agg_subject),
+            'bank_count': len(agg_bank),
+            'month_count': len(agg_month),
+        },
+    )
+
+    logger.info(
+        '主体维度汇总完成: %d 条记录, %d 个主体, %d 家银行, %d 个月份',
+        total_count, len(agg_subject), len(agg_bank), len(agg_month)
+    )
+
+    return result
+
+
+CN_COLUMNS_S = {
+    'subject': '主体',
+    'total_income': '收入总额(元)',
+    'total_expense': '支出总额(元)',
+    'net_amount': '净额(元)',
+    'transaction_count': '交易笔数',
+    'income_count': '收入笔数',
+    'expense_count': '支出笔数',
+}
+
+CN_COLUMNS_SB = {
+    **CN_COLUMNS_S,
+    'bank': '开户银行',
+}
+
+CN_COLUMNS_SM = {
+    **CN_COLUMNS_S,
+    'year_month': '月份',
+}
+
+CN_COLUMNS_ALL = {
+    **CN_COLUMNS_SB,
+    'year_month': '月份',
+}
+
+CN_COLUMNS_B = {
+    'bank': '开户银行',
+    'total_income': '收入总额(元)',
+    'total_expense': '支出总额(元)',
+    'net_amount': '净额(元)',
+    'transaction_count': '交易笔数',
+    'income_count': '收入笔数',
+    'expense_count': '支出笔数',
+}
+
+CN_COLUMNS_M = {
+    'year_month': '月份',
+    'total_income': '收入总额(元)',
+    'total_expense': '支出总额(元)',
+    'net_amount': '净额(元)',
+    'transaction_count': '交易笔数',
+    'income_count': '收入笔数',
+    'expense_count': '支出笔数',
+}
+
+
+def _rename_columns(df, col_map):
+    """重命名 DataFrame 列名为中文，并调整列顺序"""
+    existing = [c for c in col_map.keys() if c in df.columns]
+    df = df[existing]
+    df = df.rename(columns=col_map)
+    return df
+
+
+def _apply_number_format(ws, amount_cols, count_cols):
+    """对工作表应用数字格式"""
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            col_letter = cell.column_letter
+            if col_letter in amount_cols:
+                cell.number_format = '#,##0.00'
+            elif col_letter in count_cols:
+                cell.number_format = '#,##0'
+
+
+def export_subject_summary(summary_result: SubjectSummaryResult,
+                           output_path: str,
+                           source_info: Optional[Dict[str, Any]] = None) -> str:
+    """
+    将主体维度汇总分析结果导出为多 Sheet Excel 文件。
+
+    输出的 Sheet 包括：
+    1. 汇总总览 - 整体统计信息
+    2. 按主体汇总 - 各主体收支净额统计
+    3. 按主体+银行汇总 - 各主体在各银行的收支统计
+    4. 按主体+月份汇总 - 各主体月度收支趋势
+    5. 按主体+银行+月份汇总 - 最细粒度多维分析
+    6. 按银行汇总 - 各银行总体收支
+    7. 按月份汇总 - 全量月度收支趋势
+
+    Args:
+        summary_result: summarize_transactions 返回的汇总结果
+        output_path: 输出 Excel 文件路径
+        source_info: 可选，数据源信息（如总表路径、记录数等）
+
+    Returns:
+        str: 输出文件路径
+    """
+    logger = get_logger()
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            overview_data = []
+            overall = summary_result.overall_summary
+
+            overview_items = [
+                ('统计项', '数值'),
+                ('交易总笔数', overall.get('transaction_count', 0)),
+                ('收入笔数', overall.get('income_count', 0)),
+                ('支出笔数', overall.get('expense_count', 0)),
+                ('收入总额(元)', overall.get('total_income', 0)),
+                ('支出总额(元)', overall.get('total_expense', 0)),
+                ('净额(元)', overall.get('net_amount', 0)),
+                ('涉及主体数', overall.get('subject_count', 0)),
+                ('涉及银行数', overall.get('bank_count', 0)),
+                ('覆盖月份数', overall.get('month_count', 0)),
+            ]
+            if source_info:
+                for k, v in source_info.items():
+                    overview_items.append((k, v))
+
+            overview_df = pd.DataFrame(overview_items[1:], columns=overview_items[0])
+            overview_df.to_excel(writer, sheet_name='汇总总览', index=False)
+
+            sheet_configs = [
+                ('按主体汇总', summary_result.by_subject, CN_COLUMNS_S),
+                ('按主体+银行', summary_result.by_subject_bank, CN_COLUMNS_SB),
+                ('按主体+月份', summary_result.by_subject_month, CN_COLUMNS_SM),
+                ('主体+银行+月份', summary_result.by_subject_bank_month, CN_COLUMNS_ALL),
+                ('按银行汇总', summary_result.by_bank, CN_COLUMNS_B),
+                ('按月份汇总', summary_result.by_month, CN_COLUMNS_M),
+            ]
+
+            for sheet_name, data, col_map in sheet_configs:
+                if not data:
+                    continue
+                df = pd.DataFrame(data)
+                df = _rename_columns(df, col_map)
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+                ws = writer.sheets[sheet_name]
+                amount_cols = set()
+                count_cols = set()
+                for idx, col_name in enumerate(df.columns, 1):
+                    col_letter = openpyxl.utils.get_column_letter(idx)
+                    if '元' in str(col_name):
+                        amount_cols.add(col_letter)
+                    elif '笔数' in str(col_name):
+                        count_cols.add(col_letter)
+                    max_len = max(
+                        len(str(col_name)),
+                        max((len(str(v)) for v in df.iloc[:, idx - 1].astype(str)), default=0)
+                    )
+                    ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+                _apply_number_format(ws, amount_cols, count_cols)
+
+            ws_overview = writer.sheets['汇总总览']
+            for col_idx in range(1, 3):
+                col_letter = openpyxl.utils.get_column_letter(col_idx)
+                ws_overview.column_dimensions[col_letter].width = 25
+
+            for row in ws_overview.iter_rows(min_row=2):
+                for cell in row:
+                    if cell.column == 2:
+                        val = cell.value
+                        if isinstance(val, (int, float)):
+                            if isinstance(val, float):
+                                cell.number_format = '#,##0.00'
+                            else:
+                                cell.number_format = '#,##0'
+
+        logger.info('主体维度汇总分析已导出: %s', output_path)
+        return output_path
+
+    except Exception as e:
+        logger.error('导出主体维度汇总分析失败: %s', e, exc_info=True)
+        raise
+
+
+def generate_subject_summary_from_records(records: List[Dict[str, Any]],
+                                          output_dir: Optional[str] = None,
+                                          source_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """
+    从交易记录列表直接生成汇总分析 Excel 文件。
+
+    Args:
+        records: 交易记录列表
+        output_dir: 输出目录，默认为当前脚本目录
+        source_info: 数据源信息，会写入"汇总总览"Sheet
+
+    Returns:
+        str: 生成的文件路径，如无数据则返回 None
+    """
+    logger = get_logger()
+
+    if not records:
+        logger.warning('无交易记录，跳过汇总分析生成')
+        return None
+
+    if output_dir is None:
+        output_dir = get_script_dir()
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'主体维度汇总分析_{timestamp}.xlsx'
+    output_path = os.path.join(output_dir, filename)
+
+    summary_result = summarize_transactions(records)
+
+    if not summary_result.overall_summary.get('transaction_count'):
+        logger.warning('汇总结果为空，跳过导出')
+        return None
+
+    return export_subject_summary(summary_result, output_path, source_info)
+
+
+def generate_subject_summary_from_total(total_path: str,
+                                        output_dir: Optional[str] = None) -> Optional[str]:
+    """
+    从银行流水总表文件生成汇总分析 Excel。
+
+    Args:
+        total_path: 银行流水总表 Excel 文件路径
+        output_dir: 输出目录，默认为总表所在目录
+
+    Returns:
+        str: 生成的文件路径，失败则返回 None
+    """
+    logger = get_logger()
+
+    records = load_total_table(total_path)
+    if not records:
+        logger.warning('总表无数据: %s', total_path)
+        return None
+
+    if output_dir is None:
+        output_dir = os.path.dirname(total_path) or get_script_dir()
+
+    source_info = {
+        '数据来源文件': os.path.basename(total_path),
+        '总表记录数': len(records),
+        '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    return generate_subject_summary_from_records(records, output_dir, source_info)
+
+
+def run_subject_summary_flow(script_dir):
+    """主体维度汇总分析 CLI 流程"""
+    logger = get_logger()
+    logger.info('========== 主体维度汇总分析开始 ==========')
+
+    print('\n' + '=' * 70)
+    print('主体维度汇总分析 - 按主体/银行/月份统计收支与笔数')
+    print('=' * 70)
+    print('\n请选择数据来源：')
+    print('  1) 从银行流水总表文件（Excel）')
+    print('  2) 从数据库（按条件查询后汇总）')
+    print('  0) 返回主菜单')
+
+    choice = input('\n请输入选项（默认 1）: ').strip() or '1'
+
+    records = []
+    source_info = {}
+
+    if choice == '0':
+        return
+    elif choice == '1':
+        total_path = ask_file('请选择【银行流水总表】文件')
+        if not total_path:
+            show_info('提示', '未选择总表文件，返回。')
+            return
+        logger.info('用户选择总表文件: %s', total_path)
+        records = load_total_table(total_path)
+        if not records:
+            show_warning('错误', '总表文件无数据或读取失败。')
+            return
+        source_info = {
+            '数据来源文件': os.path.basename(total_path),
+            '总表记录数': len(records),
+            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    elif choice == '2':
+        if not HAS_DATABASE:
+            show_warning('错误', '数据库模块不可用。')
+            return
+
+        print('\n输入查询条件（直接回车表示不限制）：')
+        subject = input('主体名称: ').strip() or None
+        bank = input('银行名称: ').strip() or None
+        start_date = input('开始日期 (YYYY-MM-DD): ').strip() or None
+        end_date = input('结束日期 (YYYY-MM-DD): ').strip() or None
+
+        try:
+            qr = db_module.query_transactions(
+                subject=subject, bank=bank,
+                start_date=start_date, end_date=end_date,
+                limit=999999, script_dir=script_dir
+            )
+            records = [r.to_dict() for r in qr.records]
+        except Exception as e:
+            show_warning('错误', f'数据库查询失败: {e}')
+            logger.error('数据库查询失败: %s', e, exc_info=True)
+            return
+
+        if not records:
+            show_info('提示', '查询结果为空。')
+            return
+
+        source_info = {
+            '数据来源': '数据库查询',
+            '查询主体': subject or '全部',
+            '查询银行': bank or '全部',
+            '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+            '记录数': len(records),
+            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    else:
+        print('无效选项')
+        return
+
+    summary_result = summarize_transactions(records)
+    overall = summary_result.overall_summary
+
+    print('\n' + '=' * 70)
+    print('汇总总览')
+    print('=' * 70)
+    print(f'  交易总笔数: {overall.get("transaction_count", 0):,}')
+    print(f'  收入笔数:   {overall.get("income_count", 0):,}')
+    print(f'  支出笔数:   {overall.get("expense_count", 0):,}')
+    print(f'  收入总额:   {overall.get("total_income", 0):>15,.2f} 元')
+    print(f'  支出总额:   {overall.get("total_expense", 0):>15,.2f} 元')
+    print(f'  净　　额:   {overall.get("net_amount", 0):>15,.2f} 元')
+    print(f'  涉及主体:   {overall.get("subject_count", 0)} 个')
+    print(f'  涉及银行:   {overall.get("bank_count", 0)} 家')
+    print(f'  覆盖月份:   {overall.get("month_count", 0)} 个月')
+
+    if summary_result.by_subject:
+        print('\n' + '-' * 70)
+        print('按主体汇总（前 10）')
+        print('-' * 70)
+        print(f'{"主体":<25}{"收入(元)":>18}{"支出(元)":>18}{"净额(元)":>18}{"笔数":>8}')
+        for row in summary_result.by_subject[:10]:
+            print(
+                f'{str(row["subject"])[:23]:<25}'
+                f'{row["total_income"]:>18,.2f}'
+                f'{row["total_expense"]:>18,.2f}'
+                f'{row["net_amount"]:>18,.2f}'
+                f'{row["transaction_count"]:>8,}'
+            )
+
+    output_dir = input(f'\n请输入输出目录（回车使用当前目录）: ').strip()
+    if not output_dir:
+        output_dir = script_dir
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_path = os.path.join(output_dir, f'主体维度汇总分析_{timestamp}.xlsx')
+
+    try:
+        export_subject_summary(summary_result, output_path, source_info)
+        msg = f'汇总分析已导出！\n\n输出文件：{output_path}'
+        show_info('导出成功', msg)
+        logger.info('主体维度汇总分析导出完成: %s', output_path)
+    except Exception as e:
+        msg = f'导出失败：{e}'
+        show_warning('导出失败', msg)
+        logger.error('主体维度汇总分析导出失败: %s', e, exc_info=True)
+
+    logger.info('========== 主体维度汇总分析结束 ==========')
 
 
 if __name__ == '__main__':
