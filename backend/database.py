@@ -90,6 +90,7 @@ TRANSACTION_COLUMNS = [
     '唯一id', '银行', '银行账号', '主体', '交易日期',
     '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
     '导入批次号', '导入时间', '匹配键',
+    '黑白名单标签', '命中规则名称', '命中关键词',
 ]
 
 
@@ -110,6 +111,9 @@ class TransactionRecord:
     导入批次号: Optional[str] = None
     导入时间: Optional[str] = None
     匹配键: Optional[str] = None
+    黑白名单标签: Optional[str] = None
+    命中规则名称: Optional[str] = None
+    命中关键词: Optional[str] = None
 
     @classmethod
     def from_dict(cls, row_dict: Dict[str, Any]) -> 'TransactionRecord':
@@ -129,6 +133,9 @@ class TransactionRecord:
             导入批次号=str(row_dict.get('导入批次号')) if row_dict.get('导入批次号') is not None else None,
             导入时间=str(row_dict.get('导入时间')) if row_dict.get('导入时间') is not None else None,
             匹配键=str(row_dict.get('匹配键')) if row_dict.get('匹配键') is not None else None,
+            黑白名单标签=str(row_dict.get('黑白名单标签')) if row_dict.get('黑白名单标签') is not None else None,
+            命中规则名称=str(row_dict.get('命中规则名称')) if row_dict.get('命中规则名称') is not None else None,
+            命中关键词=str(row_dict.get('命中关键词')) if row_dict.get('命中关键词') is not None else None,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -303,6 +310,9 @@ class SQLiteBackend(DatabaseBackend):
                 导入批次号 TEXT,
                 导入时间 TEXT,
                 匹配键 TEXT UNIQUE,
+                黑白名单标签 TEXT,
+                命中规则名称 TEXT,
+                命中关键词 TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -328,6 +338,7 @@ class SQLiteBackend(DatabaseBackend):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_counterpart ON transactions(对方户名)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_batch ON transactions(导入批次号)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_match_key ON transactions(匹配键)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_counterparty_tag ON transactions(黑白名单标签)')
 
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_batches_date ON import_batches(started_at)')
 
@@ -359,6 +370,9 @@ class SQLiteBackend(DatabaseBackend):
             record.导入批次号,
             import_time,
             match_key,
+            record.黑白名单标签,
+            record.命中规则名称,
+            record.命中关键词,
         )
 
     def insert_records(self, records: List[TransactionRecord],
@@ -408,8 +422,9 @@ class SQLiteBackend(DatabaseBackend):
                 INSERT OR IGNORE INTO transactions (
                     唯一id, 银行, 银行账号, 主体, 交易日期,
                     付款, 收款, 摘要, 对方户名, 余额,
-                    交易流水号, 导入批次号, 导入时间, 匹配键
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    交易流水号, 导入批次号, 导入时间, 匹配键,
+                    黑白名单标签, 命中规则名称, 命中关键词
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', insert_tuples)
 
         completed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
@@ -533,6 +548,9 @@ class SQLiteBackend(DatabaseBackend):
                 '导入批次号': row['导入批次号'],
                 '导入时间': row['导入时间'],
                 '匹配键': row['匹配键'],
+                '黑白名单标签': row['黑白名单标签'],
+                '命中规则名称': row['命中规则名称'],
+                '命中关键词': row['命中关键词'],
             }
             records.append(TransactionRecord.from_dict(record_dict))
 
@@ -765,6 +783,9 @@ class PostgreSQLBackend(DatabaseBackend):
                 导入批次号 VARCHAR(255),
                 导入时间 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 匹配键 VARCHAR(255) UNIQUE,
+                黑白名单标签 VARCHAR(255),
+                命中规则名称 VARCHAR(255),
+                命中关键词 TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -789,6 +810,7 @@ class PostgreSQLBackend(DatabaseBackend):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(交易日期)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_counterpart ON transactions(对方户名)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_batch ON transactions(导入批次号)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_counterparty_tag ON transactions(黑白名单标签)')
 
         self.conn.commit()
         self.logger.debug('PostgreSQL 表结构初始化完成')
@@ -840,14 +862,16 @@ class PostgreSQLBackend(DatabaseBackend):
                     INSERT INTO transactions (
                         唯一id, 银行, 银行账号, 主体, 交易日期,
                         付款, 收款, 摘要, 对方户名, 余额,
-                        交易流水号, 导入批次号, 导入时间, 匹配键
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        交易流水号, 导入批次号, 导入时间, 匹配键,
+                        黑白名单标签, 命中规则名称, 命中关键词
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (匹配键) DO NOTHING
                     RETURNING id
                 ''', (
                     record.唯一id, record.银行, record.银行账号, record.主体, trade_date,
                     record.付款, record.收款, record.摘要, record.对方户名, record.余额,
                     record.交易流水号, record.导入批次号, datetime.now(), record.匹配键,
+                    record.黑白名单标签, record.命中规则名称, record.命中关键词,
                 ))
                 if cursor.fetchone():
                     insert_count += 1

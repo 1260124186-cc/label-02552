@@ -1180,6 +1180,15 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
             output_path = merge_and_export_summary(existing_records, [], script_dir)
             final_rows = existing_records
 
+    if final_rows:
+        final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
+        if _cp_tag_summary.get('tagged_count', 0) > 0:
+            logger.info('对方户名黑白名单打标: 总记录 %d, 命中 %d (黑名单 %d, 白名单 %d)',
+                        _cp_tag_summary.get('total_records', 0),
+                        _cp_tag_summary.get('tagged_count', 0),
+                        _cp_tag_summary.get('blacklist_hits', 0),
+                        _cp_tag_summary.get('whitelist_hits', 0))
+
     db_inserted = 0
     db_duplicates = 0
     if HAS_DATABASE and final_rows:
@@ -6136,6 +6145,272 @@ def parse_args_and_run():
     return None
 
 
+# ──────────────────────────────────────────────
+# 对方户名黑名单/白名单匹配模块
+# ──────────────────────────────────────────────
+
+@dataclass
+class CounterpartyRule:
+    rule_id: str
+    name: str
+    rule_type: str
+    keywords: List[str]
+    match_mode: str = 'contains'
+    category: str = ''
+    severity: str = 'medium'
+    enabled: bool = True
+    description: Optional[str] = None
+    created_at: str = ''
+    updated_at: str = ''
+    created_by: str = ''
+
+
+class CounterpartyRuleConfig:
+
+    def __init__(self, script_dir=None):
+        self.script_dir = script_dir or get_script_dir()
+        self.config_path = os.path.join(self.script_dir, 'counterparty_rules.json')
+        self._rules: List[CounterpartyRule] = []
+        self.load_config()
+
+    def load_config(self):
+        logger = get_logger()
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                self._rules = [CounterpartyRule(**r) for r in data.get('rules', [])]
+                logger.info('对方户名规则配置已加载: %d 条规则', len(self._rules))
+            except Exception as e:
+                logger.error('加载对方户名规则配置失败: %s', e)
+                self._rules = []
+        else:
+            self._rules = []
+            self.save_config()
+
+    def save_config(self):
+        logger = get_logger()
+        try:
+            data = {
+                'rules': [vars(r) for r in self._rules],
+            }
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info('对方户名规则配置已保存: %s', self.config_path)
+        except Exception as e:
+            logger.error('保存对方户名规则配置失败: %s', e)
+
+    def get_rules(self, rule_type=None, enabled=None) -> List[CounterpartyRule]:
+        result = self._rules
+        if rule_type is not None:
+            result = [r for r in result if r.rule_type == rule_type]
+        if enabled is not None:
+            result = [r for r in result if r.enabled == enabled]
+        return result
+
+    def add_rule(self, rule: CounterpartyRule) -> str:
+        if not rule.rule_id:
+            rule.rule_id = f"CPR{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if not rule.created_at:
+            rule.created_at = now
+        rule.updated_at = now
+        self._rules.append(rule)
+        self.save_config()
+        return rule.rule_id
+
+    def update_rule(self, rule_id: str, updates: dict) -> bool:
+        for i, r in enumerate(self._rules):
+            if r.rule_id == rule_id:
+                for k, v in updates.items():
+                    if hasattr(r, k):
+                        setattr(r, k, v)
+                r.updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.save_config()
+                return True
+        return False
+
+    def delete_rule(self, rule_id: str) -> bool:
+        original_len = len(self._rules)
+        self._rules = [r for r in self._rules if r.rule_id != rule_id]
+        if len(self._rules) < original_len:
+            self.save_config()
+            return True
+        return False
+
+    def toggle_rule(self, rule_id: str, enabled: bool) -> bool:
+        for r in self._rules:
+            if r.rule_id == rule_id:
+                r.enabled = enabled
+                r.updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.save_config()
+                return True
+        return False
+
+
+_counterparty_rule_config_instance = None
+
+
+def get_counterparty_rule_config(script_dir=None) -> CounterpartyRuleConfig:
+    global _counterparty_rule_config_instance
+    if _counterparty_rule_config_instance is None:
+        _counterparty_rule_config_instance = CounterpartyRuleConfig(script_dir)
+    return _counterparty_rule_config_instance
+
+
+def _match_counterparty(name: str, rule: CounterpartyRule) -> Optional[str]:
+    if not name:
+        return None
+    import re
+    name = str(name).strip()
+    for kw in rule.keywords:
+        kw = str(kw).strip()
+        if not kw:
+            continue
+        if rule.match_mode == 'exact':
+            if name == kw:
+                return kw
+        elif rule.match_mode == 'startswith':
+            if name.startswith(kw):
+                return kw
+        elif rule.match_mode == 'endswith':
+            if name.endswith(kw):
+                return kw
+        elif rule.match_mode == 'regex':
+            try:
+                if re.search(kw, name):
+                    return kw
+            except re.error:
+                pass
+        else:
+            if kw in name:
+                return kw
+    return None
+
+
+def apply_counterparty_rules(records: List[Dict], script_dir=None) -> Tuple[List[Dict], Dict[str, Any]]:
+    logger = get_logger()
+    config = get_counterparty_rule_config(script_dir)
+    rules = config.get_rules(enabled=True)
+
+    blacklist_hits = 0
+    whitelist_hits = 0
+    rule_hit_counts: Dict[str, int] = {}
+    tagged_count = 0
+
+    for rec in records:
+        tags = []
+        hit_names = []
+        hit_kw = []
+        counterparty = rec.get('对方户名', '')
+        for rule in rules:
+            matched_kw = _match_counterparty(counterparty, rule)
+            if matched_kw:
+                prefix = '黑名单' if rule.rule_type == 'blacklist' else '白名单'
+                cat = f"-{rule.category}" if rule.category else ""
+                label = f"{prefix}:{cat}{rule.name}"
+                tags.append(label)
+                hit_names.append(rule.name)
+                hit_kw.append(matched_kw)
+                rule_hit_counts[rule.name] = rule_hit_counts.get(rule.name, 0) + 1
+                if rule.rule_type == 'blacklist':
+                    blacklist_hits += 1
+                else:
+                    whitelist_hits += 1
+
+        if tags:
+            rec['黑白名单标签'] = ','.join(tags)
+            rec['命中规则名称'] = ','.join(hit_names)
+            rec['命中关键词'] = ','.join(hit_kw)
+            tagged_count += 1
+        else:
+            rec['黑白名单标签'] = ''
+            rec['命中规则名称'] = ''
+            rec['命中关键词'] = ''
+
+    summary = {
+        'total_records': len(records),
+        'tagged_count': tagged_count,
+        'blacklist_hits': blacklist_hits,
+        'whitelist_hits': whitelist_hits,
+        'rule_hit_counts': rule_hit_counts,
+    }
+    logger.info(
+        '对方户名规则匹配完成: 总记录 %d, 命中 %d, 黑名单 %d, 白名单 %d',
+        summary['total_records'], summary['tagged_count'],
+        summary['blacklist_hits'], summary['whitelist_hits'],
+    )
+    return records, summary
+
+
+def export_counterparty_tags(records: List[Dict], output_path: str) -> str:
+    logger = get_logger()
+    tagged = [r for r in records if r.get('黑白名单标签')]
+    if not tagged:
+        logger.info('没有命中对方户名规则的记录，跳过导出')
+        return ''
+
+    import pandas as pd
+    df = pd.DataFrame(tagged)
+
+    cols = list(df.columns)
+    priority_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
+    for pc in reversed(priority_cols):
+        if pc in cols:
+            cols.remove(pc)
+            cols.insert(0, pc)
+    df = df[cols]
+
+    df.to_excel(output_path, index=False, engine='openpyxl')
+
+    wb = openpyxl.load_workbook(output_path)
+    ws = wb.active
+
+    tag_col = None
+    for col_idx in range(1, ws.max_column + 1):
+        if ws.cell(row=1, column=col_idx).value == '黑白名单标签':
+            tag_col = col_idx
+            break
+
+    if tag_col:
+        red_fill = openpyxl.styles.PatternFill(start_color='FFCCCC', end_color='FFCCCC', fill_type='solid')
+        green_fill = openpyxl.styles.PatternFill(start_color='CCFFCC', end_color='CCFFCC', fill_type='solid')
+        for row_idx in range(2, ws.max_row + 1):
+            cell_val = str(ws.cell(row=row_idx, column=tag_col).value or '')
+            if '黑名单' in cell_val:
+                for col_idx in range(1, ws.max_column + 1):
+                    ws.cell(row=row_idx, column=col_idx).fill = red_fill
+            elif '白名单' in cell_val:
+                for col_idx in range(1, ws.max_column + 1):
+                    ws.cell(row=row_idx, column=col_idx).fill = green_fill
+
+    wb.save(output_path)
+    wb.close()
+    logger.info('对方户名标签导出完成: %s (%d 条记录)', output_path, len(tagged))
+    return output_path
+
+
+def add_counterparty_keyword_rule(name, rule_type, keywords, match_mode='contains',
+                                   category='', severity='medium', description=None,
+                                   script_dir=None, username=None) -> str:
+    config = get_counterparty_rule_config(script_dir)
+    rule = CounterpartyRule(
+        rule_id='',
+        name=name,
+        rule_type=rule_type,
+        keywords=keywords,
+        match_mode=match_mode,
+        category=category,
+        severity=severity,
+        enabled=True,
+        description=description,
+        created_at='',
+        updated_at='',
+        created_by=username or get_current_user(),
+    )
+    return config.add_rule(rule)
+
+
 def main():
     result = parse_args_and_run()
     if result is not None:
@@ -6998,6 +7273,15 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         if existing_records:
             output_path = merge_and_export_summary(existing_records, [], script_dir, output_dir)
             final_rows = existing_records
+
+    if final_rows:
+        final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
+        if _cp_tag_summary.get('tagged_count', 0) > 0:
+            logger.info('对方户名黑白名单打标: 总记录 %d, 命中 %d (黑名单 %d, 白名单 %d)',
+                        _cp_tag_summary.get('total_records', 0),
+                        _cp_tag_summary.get('tagged_count', 0),
+                        _cp_tag_summary.get('blacklist_hits', 0),
+                        _cp_tag_summary.get('whitelist_hits', 0))
 
     db_inserted = 0
     db_duplicates = 0
