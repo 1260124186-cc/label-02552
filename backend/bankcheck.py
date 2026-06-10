@@ -8740,14 +8740,23 @@ class BalanceCheckResult:
 
 
 def _parse_transaction_date(value) -> Optional[datetime]:
-    """解析交易日期，支持多种格式"""
+    """解析交易日期，支持多种格式，无效值返回 None"""
     if value is None:
         return None
     if isinstance(value, datetime):
         return value
     if isinstance(value, pd.Timestamp):
+        if pd.isna(value):
+            return None
         return value.to_pydatetime()
-    return _normalize_date(value)
+    parsed = _normalize_date(value)
+    if parsed is None:
+        return None
+    if isinstance(parsed, pd.Timestamp) and pd.isna(parsed):
+        return None
+    if pd.isna(parsed):
+        return None
+    return parsed
 
 
 def _safe_float(value) -> float:
@@ -8764,7 +8773,8 @@ def check_balance_continuity(records: List[Dict[str, Any]],
     校验逻辑：
     1. 按银行账号分组
     2. 每组内按交易日期排序
-    3. 逐笔核对：上期余额 + 收款 - 付款 = 当期余额
+    3. 逐笔核对：上期余额 + 收款 + 付款 = 当期余额
+       （付款字段约定为负数，与银行解析 payment_sign=negative 一致）
     4. 对断裂或跳变的记录生成异常清单
 
     Args:
@@ -8825,7 +8835,7 @@ def check_balance_continuity(records: List[Dict[str, Any]],
             payment = curr['_payment']
             actual_balance = curr['_balance']
 
-            expected_balance = prev_balance + receipt - payment
+            expected_balance = prev_balance + receipt + payment
             diff = abs(actual_balance - expected_balance)
 
             if diff > tolerance:
