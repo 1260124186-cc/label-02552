@@ -7,6 +7,7 @@
 import os
 import sys
 import logging
+import tempfile
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
@@ -226,12 +227,61 @@ def get_lookup_file_path(script_dir=None) -> str:
     return os.path.join(output_dir, '主体查找表.xlsx')
 
 
+XLSX_MAGIC_BYTES = b'PK\x03\x04'
+XLS_MAGIC_BYTES = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
+
+
+def detect_excel_format(filepath):
+    """
+    通过文件头 Magic Bytes 检测 Excel 文件的真实格式。
+    返回 'xlsx' / 'xls' / 'unknown'
+    """
+    logger = get_logger()
+    try:
+        with open(filepath, 'rb') as f:
+            header = f.read(8)
+        if len(header) < 4:
+            return 'unknown'
+        if header.startswith(XLSX_MAGIC_BYTES):
+            return 'xlsx'
+        if header.startswith(XLS_MAGIC_BYTES):
+            return 'xls'
+        return 'unknown'
+    except Exception as e:
+        logger.warning('检测文件格式失败 %s: %s', filepath, e)
+        return 'unknown'
+
+
+def get_extension_format(filepath):
+    """根据文件扩展名判断 Excel 格式"""
+    lower_path = filepath.lower()
+    if lower_path.endswith('.xlsx') or lower_path.endswith('.xlsm'):
+        return 'xlsx'
+    if lower_path.endswith('.xls') and not lower_path.endswith('.xlsx'):
+        return 'xls'
+    return 'unknown'
+
+
 def _open_workbook_compat(filepath):
-    """兼容打开 .xls 和 .xlsx 文件"""
+    """
+    兼容打开 .xls 和 .xlsx 文件。
+    支持基于 Magic Bytes 的自动格式检测，当扩展名与实际格式不一致时按真实格式处理。
+    """
+    logger = get_logger()
     tmp_path = None
-    if filepath.lower().endswith('.xls'):
+
+    ext_format = get_extension_format(filepath)
+    magic_format = detect_excel_format(filepath)
+    actual_format = magic_format if magic_format != 'unknown' else ext_format
+
+    if magic_format != 'unknown' and ext_format != 'unknown' and magic_format != ext_format:
+        logger.warning(
+            '查找表文件「%s」扩展名与实际格式不一致：扩展名为 %s，实际为 %s，将按 %s 格式解析',
+            filepath, ext_format, magic_format, actual_format,
+        )
+
+    if actual_format == 'xls':
         import xlrd
-        import tempfile
         xls_book = xlrd.open_workbook(filepath)
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -240,12 +290,17 @@ def _open_workbook_compat(filepath):
             for col in range(xls_book.sheet_by_index(0).ncols):
                 cell_value = xls_book.sheet_by_index(0).cell_value(row, col)
                 ws.cell(row=row + 1, column=col + 1, value=cell_value)
-        tmp_path = tempfile.mktemp(suffix='.xlsx')
+        fd, tmp_path = tempfile.mkstemp(prefix='lookup_', suffix='.xlsx')
+        os.close(fd)
         wb.save(tmp_path)
         wb.close()
         wb = openpyxl.load_workbook(tmp_path)
     else:
-        wb = openpyxl.load_workbook(filepath)
+        if ext_format == 'xlsx' or ext_format == 'unknown':
+            wb = openpyxl.load_workbook(filepath)
+        else:
+            with open(filepath, 'rb') as f:
+                wb = openpyxl.load_workbook(f)
     return wb, tmp_path
 
 

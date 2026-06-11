@@ -9,7 +9,15 @@ import openpyxl
 import pytest
 
 import bankcheck
-from bankcheck import convert_xls_to_xlsx, open_workbook_compat, cleanup_temp_file
+from bankcheck import (
+    convert_xls_to_xlsx,
+    open_workbook_compat,
+    cleanup_temp_file,
+    detect_excel_format,
+    get_extension_format,
+    XLSX_MAGIC_BYTES,
+    XLS_MAGIC_BYTES,
+)
 
 
 class TestConvertXlsToXlsxBasic:
@@ -418,3 +426,197 @@ class TestTempFileSecurity:
         assert len(random_part) > 0, '临时文件名应包含随机部分'
 
         cleanup_temp_file(path)
+
+
+class TestGetExtensionFormat:
+    def test_xlsx_extension(self):
+        assert get_extension_format('test.xlsx') == 'xlsx'
+
+    def test_xls_extension(self):
+        assert get_extension_format('test.xls') == 'xls'
+
+    def test_xlsm_extension(self):
+        assert get_extension_format('test.xlsm') == 'xlsx'
+
+    def test_case_insensitive(self):
+        assert get_extension_format('TEST.XLSX') == 'xlsx'
+        assert get_extension_format('TEST.XLS') == 'xls'
+
+    def test_unknown_extension(self):
+        assert get_extension_format('test.csv') == 'unknown'
+        assert get_extension_format('test.txt') == 'unknown'
+        assert get_extension_format('test') == 'unknown'
+
+    def test_path_with_directory(self):
+        assert get_extension_format('/path/to/test.xlsx') == 'xlsx'
+        assert get_extension_format('/path/to/test.xls') == 'xls'
+
+    def test_xlsx_not_confused_with_xls(self):
+        assert get_extension_format('test.xlsx') != 'xls'
+
+
+class TestDetectExcelFormat:
+    def test_detect_xlsx_file(self, tmp_dir):
+        xlsx_path = os.path.join(tmp_dir, 'test.xlsx')
+        wb = openpyxl.Workbook()
+        wb.save(xlsx_path)
+        wb.close()
+        assert detect_excel_format(xlsx_path) == 'xlsx'
+
+    def test_detect_xls_file_by_magic_bytes(self, tmp_dir):
+        xls_path = os.path.join(tmp_dir, 'test.xls')
+        with open(xls_path, 'wb') as f:
+            f.write(XLS_MAGIC_BYTES)
+            f.write(b'\x00' * 100)
+        assert detect_excel_format(xls_path) == 'xls'
+
+    def test_detect_unknown_format(self, tmp_dir):
+        txt_path = os.path.join(tmp_dir, 'test.txt')
+        with open(txt_path, 'wb') as f:
+            f.write(b'Hello, World!')
+        assert detect_excel_format(txt_path) == 'unknown'
+
+    def test_detect_empty_file(self, tmp_dir):
+        empty_path = os.path.join(tmp_dir, 'empty.xls')
+        with open(empty_path, 'wb') as f:
+            pass
+        assert detect_excel_format(empty_path) == 'unknown'
+
+    def test_detect_short_file(self, tmp_dir):
+        short_path = os.path.join(tmp_dir, 'short.xls')
+        with open(short_path, 'wb') as f:
+            f.write(b'\x00\x00\x00')
+        assert detect_excel_format(short_path) == 'unknown'
+
+    def test_file_not_exists(self, tmp_dir):
+        missing_path = os.path.join(tmp_dir, 'nonexistent.xlsx')
+        assert detect_excel_format(missing_path) == 'unknown'
+
+    def test_xlsx_with_wrong_extension(self, tmp_dir):
+        xlsx_path = os.path.join(tmp_dir, 'test.xls')
+        wb = openpyxl.Workbook()
+        wb.save(xlsx_path)
+        wb.close()
+        assert detect_excel_format(xlsx_path) == 'xlsx'
+
+    def test_xls_with_wrong_extension(self, tmp_dir):
+        xls_path = os.path.join(tmp_dir, 'test.xlsx')
+        with open(xls_path, 'wb') as f:
+            f.write(XLS_MAGIC_BYTES)
+            f.write(b'\x00' * 100)
+        assert detect_excel_format(xls_path) == 'xls'
+
+
+class TestOpenWorkbookCompatMagicBytes:
+    def _mock_xlrd_workbook(self, sheet_data=None):
+        if sheet_data is None:
+            sheet_data = {
+                'Sheet1': [
+                    ['Name', 'Value'],
+                    ['test', 123],
+                ]
+            }
+        mock_book = MagicMock()
+        mock_book.sheet_names.return_value = list(sheet_data.keys())
+        mock_book.datemode = 0
+        mock_book.release_resources = MagicMock()
+        mock_sheets = {}
+        for sheet_name, rows in sheet_data.items():
+            mock_sheet = MagicMock()
+            mock_sheet.nrows = len(rows)
+            mock_sheet.ncols = len(rows[0]) if rows else 0
+            def make_cell_value(rows):
+                def cell_value(row_idx, col_idx):
+                    return rows[row_idx][col_idx]
+                return cell_value
+            def make_cell_type(rows):
+                def cell_type(row_idx, col_idx):
+                    return 0
+                return cell_type
+            mock_sheet.cell_value = make_cell_value(rows)
+            mock_sheet.cell_type = make_cell_type(rows)
+            mock_sheets[sheet_name] = mock_sheet
+        def sheet_by_name(name):
+            return mock_sheets[name]
+        mock_book.sheet_by_name = sheet_by_name
+        return mock_book
+
+    def test_xlsx_file_with_xls_extension_uses_openpyxl_directly(self, tmp_dir):
+        fake_xls_path = os.path.join(tmp_dir, 'fake.xls')
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws['A1'] = 'Hello'
+        wb.save(fake_xls_path)
+        wb.close()
+
+        wb_result, tmp_path = open_workbook_compat(fake_xls_path)
+        assert tmp_path is None
+        assert wb_result.active['A1'].value == 'Hello'
+        wb_result.close()
+
+    def test_xls_file_with_xlsx_extension_uses_xlrd_conversion(self, tmp_dir):
+        fake_xlsx_path = os.path.join(tmp_dir, 'fake.xlsx')
+        with open(fake_xlsx_path, 'wb') as f:
+            f.write(XLS_MAGIC_BYTES)
+            f.write(b'\x00' * 100)
+
+        mock_book = self._mock_xlrd_workbook()
+        with patch('xlrd.open_workbook', return_value=mock_book):
+            wb_result, tmp_path = open_workbook_compat(fake_xlsx_path)
+
+        assert tmp_path is not None
+        assert os.path.exists(tmp_path)
+        wb_result.close()
+        cleanup_temp_file(tmp_path)
+
+    def test_normal_xlsx_still_works(self, tmp_dir):
+        xlsx_path = os.path.join(tmp_dir, 'normal.xlsx')
+        wb = openpyxl.Workbook()
+        wb.active['A1'] = 'test'
+        wb.save(xlsx_path)
+        wb.close()
+
+        wb_result, tmp_path = open_workbook_compat(xlsx_path)
+        assert tmp_path is None
+        wb_result.close()
+
+    def test_normal_xls_still_works(self, tmp_dir):
+        xls_path = os.path.join(tmp_dir, 'normal.xls')
+        with open(xls_path, 'wb') as f:
+            f.write(XLS_MAGIC_BYTES)
+            f.write(b'\x00' * 100)
+
+        mock_book = self._mock_xlrd_workbook()
+        with patch('xlrd.open_workbook', return_value=mock_book):
+            wb_result, tmp_path = open_workbook_compat(xls_path)
+
+        assert tmp_path is not None
+        wb_result.close()
+        cleanup_temp_file(tmp_path)
+
+    def test_unknown_format_falls_back_to_extension_xlsx(self, tmp_dir):
+        unknown_path = os.path.join(tmp_dir, 'unknown.xlsx')
+        with open(unknown_path, 'wb') as f:
+            f.write(b'\x00\x01\x02\x03\x04\x05\x06\x07')
+
+        wb = openpyxl.Workbook()
+        wb.active['A1'] = 'fallback_test'
+        wb.save(unknown_path)
+        wb.close()
+
+        wb_result, tmp_path = open_workbook_compat(unknown_path)
+        assert tmp_path is None
+        wb_result.close()
+
+    def test_unknown_format_falls_back_to_extension_xls(self, tmp_dir):
+        unknown_path = os.path.join(tmp_dir, 'unknown.xls')
+        with open(unknown_path, 'wb') as f:
+            f.write(b'\x00\x01\x02\x03\x04\x05\x06\x07')
+
+        mock_book = self._mock_xlrd_workbook()
+        with patch('xlrd.open_workbook', return_value=mock_book):
+            wb_result, tmp_path = open_workbook_compat(unknown_path)
+
+        assert tmp_path is not None
+        wb_result.close()
+        cleanup_temp_file(tmp_path)

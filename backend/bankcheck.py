@@ -405,6 +405,66 @@ def get_logger():
 
 
 # ──────────────────────────────────────────────
+# 文件格式检测：基于 Magic Bytes
+# ──────────────────────────────────────────────
+
+XLSX_MAGIC_BYTES = b'PK\x03\x04'
+XLS_MAGIC_BYTES = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
+
+
+def detect_excel_format(filepath):
+    """
+    通过文件头 Magic Bytes 检测 Excel 文件的真实格式。
+
+    Args:
+        filepath: Excel 文件路径
+
+    Returns:
+        str: 'xlsx' 或 'xls' 或 'unknown'
+    """
+    logger = get_logger()
+    try:
+        with open(filepath, 'rb') as f:
+            header = f.read(8)
+
+        if len(header) < 4:
+            logger.debug('文件 %s 头部数据不足，无法检测格式', filepath)
+            return 'unknown'
+
+        if header.startswith(XLSX_MAGIC_BYTES):
+            logger.debug('文件 %s Magic Bytes 检测为 xlsx 格式 (ZIP/OOXML)', filepath)
+            return 'xlsx'
+
+        if header.startswith(XLS_MAGIC_BYTES):
+            logger.debug('文件 %s Magic Bytes 检测为 xls 格式 (OLE/BIFF)', filepath)
+            return 'xls'
+
+        logger.debug('文件 %s 未识别的 Magic Bytes: %s', filepath, header[:4].hex())
+        return 'unknown'
+    except Exception as e:
+        logger.warning('检测文件格式失败 %s: %s', filepath, e)
+        return 'unknown'
+
+
+def get_extension_format(filepath):
+    """
+    根据文件扩展名判断 Excel 格式。
+
+    Args:
+        filepath: Excel 文件路径
+
+    Returns:
+        str: 'xlsx' 或 'xls' 或 'unknown'
+    """
+    lower_path = filepath.lower()
+    if lower_path.endswith('.xlsx') or lower_path.endswith('.xlsm'):
+        return 'xlsx'
+    if lower_path.endswith('.xls') and not lower_path.endswith('.xlsx'):
+        return 'xls'
+    return 'unknown'
+
+
+# ──────────────────────────────────────────────
 # .xls 兼容：将 .xls 转换为 .xlsx
 # ──────────────────────────────────────────────
 
@@ -443,10 +503,9 @@ def convert_xls_to_xlsx(xls_path):
                         pass
                 ws.cell(row=row_idx + 1, column=col_idx + 1, value=cell_value)
 
-    # 保存为临时 .xlsx 文件
-    tmp_dir = tempfile.gettempdir()
-    base_name = os.path.splitext(os.path.basename(xls_path))[0]
-    tmp_path = os.path.join(tmp_dir, f'{base_name}_converted.xlsx')
+    # 保存为临时 .xlsx 文件（使用安全的随机文件名）
+    fd, tmp_path = tempfile.mkstemp(prefix='bankcheck_', suffix='.xlsx')
+    os.close(fd)
     wb.save(tmp_path)
     wb.close()
     xls_book.release_resources()
@@ -459,14 +518,32 @@ def open_workbook_compat(filepath):
     """
     兼容打开 .xlsx 和 .xls 文件，统一返回 (openpyxl.Workbook, 临时文件路径或None)。
     如果是 .xls 文件，先转换为 .xlsx 再打开。
+    支持基于 Magic Bytes 的自动格式检测，当扩展名与实际格式不一致时按真实格式处理。
     调用方负责在使用完毕后清理临时文件。
     """
+    logger = get_logger()
     tmp_path = None
-    if filepath.lower().endswith('.xls') and not filepath.lower().endswith('.xlsx'):
+
+    ext_format = get_extension_format(filepath)
+    magic_format = detect_excel_format(filepath)
+
+    actual_format = magic_format if magic_format != 'unknown' else ext_format
+
+    if magic_format != 'unknown' and ext_format != 'unknown' and magic_format != ext_format:
+        logger.warning(
+            '文件「%s」扩展名与实际格式不一致：扩展名为 %s，实际为 %s，将按 %s 格式解析',
+            filepath, ext_format, magic_format, actual_format,
+        )
+
+    if actual_format == 'xls':
         tmp_path = convert_xls_to_xlsx(filepath)
         wb = openpyxl.load_workbook(tmp_path, data_only=True)
     else:
-        wb = openpyxl.load_workbook(filepath, data_only=True)
+        if ext_format == 'xlsx' or ext_format == 'unknown':
+            wb = openpyxl.load_workbook(filepath, data_only=True)
+        else:
+            with open(filepath, 'rb') as f:
+                wb = openpyxl.load_workbook(f, data_only=True)
     return wb, tmp_path
 
 
