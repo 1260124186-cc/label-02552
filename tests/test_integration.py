@@ -289,58 +289,397 @@ class TestFormatResultMessage:
 
 
 class TestDeleteProcessedFiles:
-    def test_deletes_non_kept_files(self, tmp_dir):
-        f1 = os.path.join(tmp_dir, 'a.xlsx')
-        f2 = os.path.join(tmp_dir, 'b.xlsx')
-        open(f1, 'w').close()
-        open(f2, 'w').close()
 
-        bankcheck.delete_processed_files([f1, f2], {f2})
+    def _create_files(self, tmp_dir):
+        f_success = os.path.join(tmp_dir, '北京银行_正常.xlsx')
+        f_error = os.path.join(tmp_dir, '北京银行_坏.xlsx')
+        f_unprocessed = os.path.join(tmp_dir, '未知.xlsx')
+        for f in [f_success, f_error, f_unprocessed]:
+            with open(f, 'w') as fp:
+                fp.write('test')
+        return f_success, f_error, f_unprocessed
 
-        assert not os.path.exists(f1)
-        assert os.path.exists(f2)
+    def test_strategy_keep_unprocessed_deletes_only_success_files(self, tmp_dir):
+        f_success, f_error, f_unprocessed = self._create_files(tmp_dir)
+        excel_files = [f_success, f_error, f_unprocessed]
+        processed_files = [f_success]
+        error_files = [(f_error, 'parse error')]
+        unprocessed_files = [f_unprocessed]
 
-    def test_keeps_all_when_all_in_keep_set(self, tmp_dir):
-        f1 = os.path.join(tmp_dir, 'a.xlsx')
-        f2 = os.path.join(tmp_dir, 'b.xlsx')
-        open(f1, 'w').close()
-        open(f2, 'w').close()
+        bankcheck.delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files,
+            strategy='keep_unprocessed'
+        )
 
-        bankcheck.delete_processed_files([f1, f2], {f1, f2})
+        assert not os.path.exists(f_success)
+        assert os.path.exists(f_error)
+        assert os.path.exists(f_unprocessed)
 
-        assert os.path.exists(f1)
-        assert os.path.exists(f2)
+    def test_strategy_keep_unprocessed_is_default(self, tmp_dir):
+        f_success, f_error, f_unprocessed = self._create_files(tmp_dir)
+        excel_files = [f_success, f_error, f_unprocessed]
+        processed_files = [f_success]
+        error_files = [(f_error, 'parse error')]
+        unprocessed_files = [f_unprocessed]
 
-    def test_deletes_all_when_keep_set_empty(self, tmp_dir):
-        f1 = os.path.join(tmp_dir, 'a.xlsx')
-        f2 = os.path.join(tmp_dir, 'b.xlsx')
-        open(f1, 'w').close()
-        open(f2, 'w').close()
+        bankcheck.delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files
+        )
 
-        bankcheck.delete_processed_files([f1, f2], set())
+        assert not os.path.exists(f_success)
+        assert os.path.exists(f_error)
+        assert os.path.exists(f_unprocessed)
 
-        assert not os.path.exists(f1)
-        assert not os.path.exists(f2)
+    def test_strategy_keep_all_preserves_all_files(self, tmp_dir):
+        f_success, f_error, f_unprocessed = self._create_files(tmp_dir)
+        excel_files = [f_success, f_error, f_unprocessed]
+        processed_files = [f_success]
+        error_files = [(f_error, 'parse error')]
+        unprocessed_files = [f_unprocessed]
 
-    def test_empty_file_list(self, tmp_dir):
-        bankcheck.delete_processed_files([], set())
+        bankcheck.delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files,
+            strategy='keep_all'
+        )
+
+        assert os.path.exists(f_success)
+        assert os.path.exists(f_error)
+        assert os.path.exists(f_unprocessed)
+
+    def test_strategy_delete_all_removes_everything(self, tmp_dir):
+        f_success, f_error, f_unprocessed = self._create_files(tmp_dir)
+        excel_files = [f_success, f_error, f_unprocessed]
+        processed_files = [f_success]
+        error_files = [(f_error, 'parse error')]
+        unprocessed_files = [f_unprocessed]
+
+        bankcheck.delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files,
+            strategy='delete_all'
+        )
+
+        assert not os.path.exists(f_success)
+        assert not os.path.exists(f_error)
+        assert not os.path.exists(f_unprocessed)
+
+    def test_strategy_move_to_archive_moves_success_files(self, tmp_dir):
+        f_success, f_error, f_unprocessed = self._create_files(tmp_dir)
+        excel_files = [f_success, f_error, f_unprocessed]
+        processed_files = [f_success]
+        error_files = [(f_error, 'parse error')]
+        unprocessed_files = [f_unprocessed]
+
+        bankcheck.delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files,
+            strategy='move_to_archive'
+        )
+
+        assert not os.path.exists(f_success)
+        assert os.path.exists(f_error)
+        assert os.path.exists(f_unprocessed)
+
+        archive_dir = os.path.join(tmp_dir, '已处理归档')
+        assert os.path.isdir(archive_dir)
+        archived_files = os.listdir(archive_dir)
+        assert len(archived_files) == 1
+        assert '北京银行_正常.xlsx' in archived_files
+        assert os.path.exists(os.path.join(archive_dir, '北京银行_正常.xlsx'))
+
+    def test_strategy_move_to_archive_custom_dir_name(self, tmp_dir):
+        f_success, f_error, f_unprocessed = self._create_files(tmp_dir)
+        excel_files = [f_success, f_error, f_unprocessed]
+        processed_files = [f_success]
+        error_files = [(f_error, 'parse error')]
+        unprocessed_files = [f_unprocessed]
+
+        bankcheck.delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files,
+            strategy='move_to_archive',
+            archive_dir_name='processed_backup'
+        )
+
+        archive_dir = os.path.join(tmp_dir, 'processed_backup')
+        assert os.path.isdir(archive_dir)
+        assert len(os.listdir(archive_dir)) == 1
+
+    def test_strategy_move_to_archive_handles_name_conflicts(self, tmp_dir):
+        f_success1 = os.path.join(tmp_dir, '北京银行_正常.xlsx')
+        f_success2 = os.path.join(tmp_dir, '北京银行_正常_dup.xlsx')
+        for f in [f_success1, f_success2]:
+            with open(f, 'w') as fp:
+                fp.write('test')
+
+        archive_dir = os.path.join(tmp_dir, '已处理归档')
+        os.makedirs(archive_dir, exist_ok=True)
+        with open(os.path.join(archive_dir, '北京银行_正常.xlsx'), 'w') as fp:
+            fp.write('existing')
+
+        excel_files = [f_success1, f_success2]
+        processed_files = [f_success1, f_success2]
+        error_files = []
+        unprocessed_files = []
+
+        bankcheck.delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files,
+            strategy='move_to_archive'
+        )
+
+        archived = sorted(os.listdir(archive_dir))
+        assert len(archived) >= 3
+        assert '北京银行_正常.xlsx' in archived
+        assert '北京银行_正常_1.xlsx' in archived
+
+    def test_strategy_move_to_archive_no_processed_files(self, tmp_dir):
+        f_error = os.path.join(tmp_dir, '北京银行_坏.xlsx')
+        f_unprocessed = os.path.join(tmp_dir, '未知.xlsx')
+        for f in [f_error, f_unprocessed]:
+            with open(f, 'w') as fp:
+                fp.write('test')
+
+        excel_files = [f_error, f_unprocessed]
+        processed_files = []
+        error_files = [(f_error, 'parse error')]
+        unprocessed_files = [f_unprocessed]
+
+        bankcheck.delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files,
+            strategy='move_to_archive'
+        )
+
+        assert os.path.exists(f_error)
+        assert os.path.exists(f_unprocessed)
+
+    def test_unknown_strategy_falls_back_to_keep_unprocessed(self, tmp_dir):
+        f_success, f_error, f_unprocessed = self._create_files(tmp_dir)
+        excel_files = [f_success, f_error, f_unprocessed]
+        processed_files = [f_success]
+        error_files = [(f_error, 'parse error')]
+        unprocessed_files = [f_unprocessed]
+
+        bankcheck.delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files,
+            strategy='invalid_strategy_xyz'
+        )
+
+        assert not os.path.exists(f_success)
+        assert os.path.exists(f_error)
+        assert os.path.exists(f_unprocessed)
+
+    def test_empty_file_list_all_strategies(self, tmp_dir):
+        for strategy in ['keep_all', 'keep_unprocessed', 'delete_all', 'move_to_archive']:
+            bankcheck.delete_processed_files(
+                [], [], [], [], strategy=strategy
+            )
 
     def test_nonexistent_file_handled_gracefully(self, tmp_dir):
         nonexistent = os.path.join(tmp_dir, 'missing.xlsx')
-        bankcheck.delete_processed_files([nonexistent], set())
+        for strategy in ['keep_unprocessed', 'delete_all']:
+            bankcheck.delete_processed_files(
+                [nonexistent], [nonexistent], [], [], strategy=strategy
+            )
 
-    def test_keeps_error_files_in_keep_set(self, tmp_dir):
-        f1 = os.path.join(tmp_dir, '北京银行_正常.xlsx')
-        f2 = os.path.join(tmp_dir, '北京银行_坏.xlsx')
-        f3 = os.path.join(tmp_dir, '未知.xlsx')
-        open(f1, 'w').close()
-        open(f2, 'w').close()
-        open(f3, 'w').close()
+    def test_strategy_keep_all_with_empty_processed(self, tmp_dir):
+        f_error, f_unprocessed = (
+            os.path.join(tmp_dir, '坏.xlsx'),
+            os.path.join(tmp_dir, '未知.xlsx'),
+        )
+        for f in [f_error, f_unprocessed]:
+            with open(f, 'w') as fp:
+                fp.write('test')
 
-        error_file_paths = {f2}
-        unprocessed = {f3}
-        bankcheck.delete_processed_files([f1, f2, f3], unprocessed | error_file_paths)
+        bankcheck.delete_processed_files(
+            [f_error, f_unprocessed], [], [(f_error, 'err')], [f_unprocessed],
+            strategy='keep_all'
+        )
 
-        assert not os.path.exists(f1)
-        assert os.path.exists(f2)
-        assert os.path.exists(f3)
+        assert os.path.exists(f_error)
+        assert os.path.exists(f_unprocessed)
+
+    def test_strategy_move_to_archive_preserves_error_and_unprocessed(self, tmp_dir):
+        f_success, f_error, f_unprocessed = self._create_files(tmp_dir)
+        excel_files = [f_success, f_error, f_unprocessed]
+        processed_files = [f_success]
+        error_files = [(f_error, 'parse error')]
+        unprocessed_files = [f_unprocessed]
+
+        bankcheck.delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files,
+            strategy='move_to_archive'
+        )
+
+        assert os.path.exists(f_error), 'error file should remain in original location'
+        assert os.path.exists(f_unprocessed), 'unprocessed file should remain in original location'
+        archive_dir = os.path.join(tmp_dir, '已处理归档')
+        archived = os.listdir(archive_dir)
+        assert os.path.basename(f_error) not in archived
+        assert os.path.basename(f_unprocessed) not in archived
+
+    def test_multiple_success_files_all_moved_to_archive(self, tmp_dir):
+        files = []
+        for i in range(3):
+            f = os.path.join(tmp_dir, f'银行{i}_流水.xlsx')
+            with open(f, 'w') as fp:
+                fp.write(f'data{i}')
+            files.append(f)
+
+        bankcheck.delete_processed_files(
+            files, files, [], [], strategy='move_to_archive'
+        )
+
+        archive_dir = os.path.join(tmp_dir, '已处理归档')
+        archived = os.listdir(archive_dir)
+        assert len(archived) == 3
+        for f in files:
+            assert not os.path.exists(f)
+            assert os.path.basename(f) in archived
+
+
+class TestKeepStrategiesConfig:
+
+    def test_keep_strategies_dict_has_expected_keys(self):
+        expected_keys = {'keep_unprocessed', 'keep_all', 'delete_all', 'move_to_archive'}
+        assert set(bankcheck.KEEP_STRATEGIES.keys()) == expected_keys
+
+    def test_keep_strategies_descriptions_are_non_empty(self):
+        for key, desc in bankcheck.KEEP_STRATEGIES.items():
+            assert isinstance(desc, str)
+            assert len(desc.strip()) > 0, f'Description for {key} should not be empty'
+
+    def test_default_keep_strategy_is_keep_unprocessed(self):
+        import inspect
+        sig = inspect.signature(bankcheck.run_pipeline)
+        assert sig.parameters['keep_strategy'].default == 'keep_unprocessed'
+
+        sig2 = inspect.signature(bankcheck.delete_processed_files)
+        assert sig2.parameters['strategy'].default == 'keep_unprocessed'
+
+        sig3 = inspect.signature(bankcheck.run_pipeline_with_options)
+        assert sig3.parameters['keep_strategy'].default == 'keep_unprocessed'
+
+
+class TestCliAskKeepStrategy:
+
+    def test_default_choice_is_keep_unprocessed(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: '')
+        result = bankcheck.cli_ask_keep_strategy()
+        assert result == 'keep_unprocessed'
+
+    def test_choice_1_keep_unprocessed(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: '1')
+        result = bankcheck.cli_ask_keep_strategy()
+        assert result == 'keep_unprocessed'
+
+    def test_choice_2_keep_all(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: '2')
+        result = bankcheck.cli_ask_keep_strategy()
+        assert result == 'keep_all'
+
+    def test_choice_3_delete_all(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: '3')
+        result = bankcheck.cli_ask_keep_strategy()
+        assert result == 'delete_all'
+
+    def test_choice_4_move_to_archive(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: '4')
+        result = bankcheck.cli_ask_keep_strategy()
+        assert result == 'move_to_archive'
+
+    def test_invalid_choice_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: '999')
+        result = bankcheck.cli_ask_keep_strategy()
+        assert result == 'keep_unprocessed'
+
+    def test_non_numeric_choice_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: 'abc')
+        result = bankcheck.cli_ask_keep_strategy()
+        assert result == 'keep_unprocessed'
+
+
+class TestRunPipelineKeepStrategyIntegration:
+
+    def _setup_folder(self, tmp_dir, script_dir):
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+
+        _create_beijing_bank_excel = bankcheck.__dict__.get('_create_beijing_bank_excel')
+        if _create_beijing_bank_excel is None:
+            from conftest import _create_beijing_bank_excel
+
+        _create_beijing_bank_excel(os.path.join(source_folder, '北京银行_流水.xlsx'))
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws['A1'] = '未知银行数据'
+        wb.save(os.path.join(source_folder, '未知银行_流水.xlsx'))
+        wb.close()
+
+        from conftest import _create_lookup_table
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+        return source_folder
+
+    def test_pipeline_keep_all_strategy_preserves_all_files(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline(source, script_dir, keep_strategy='keep_all')
+
+        assert len(result.processed_files) == 1
+        assert len(result.unprocessed_files) == 1
+
+        new_folder = source + '＋检验版'
+        remaining = bankcheck.scan_excel_files(new_folder)
+        assert len(remaining) == 2
+        names = [os.path.basename(f) for f in remaining]
+        assert '北京银行_流水.xlsx' in names
+        assert '未知银行_流水.xlsx' in names
+
+    def test_pipeline_move_to_archive_strategy_moves_success_files(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline(source, script_dir, keep_strategy='move_to_archive')
+
+        assert len(result.processed_files) == 1
+        assert len(result.unprocessed_files) == 1
+
+        new_folder = source + '＋检验版'
+        success_path = os.path.join(new_folder, '北京银行_流水.xlsx')
+        unprocessed_path = os.path.join(new_folder, '未知银行_流水.xlsx')
+        assert not os.path.exists(success_path), '成功文件应从原位置移除'
+        assert os.path.exists(unprocessed_path), '未处理文件应保留在原位置'
+
+        archive_dir = os.path.join(new_folder, '已处理归档')
+        assert os.path.isdir(archive_dir)
+        archived = os.listdir(archive_dir)
+        assert '北京银行_流水.xlsx' in archived
+        assert os.path.exists(os.path.join(archive_dir, '北京银行_流水.xlsx'))
+
+    def test_pipeline_delete_all_strategy_removes_everything(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline(source, script_dir, keep_strategy='delete_all')
+
+        assert len(result.processed_files) == 1
+        assert len(result.unprocessed_files) == 1
+
+        new_folder = source + '＋检验版'
+        remaining = bankcheck.scan_excel_files(new_folder)
+        assert len(remaining) == 0
+
+    def test_pipeline_default_keep_unprocessed_deletes_only_success(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline(source, script_dir)
+
+        new_folder = source + '＋检验版'
+        remaining = bankcheck.scan_excel_files(new_folder)
+        remaining_names = [os.path.basename(f) for f in remaining]
+        assert len(remaining) == 1
+        assert '未知银行_流水.xlsx' in remaining_names
+        assert '北京银行_流水.xlsx' not in remaining_names

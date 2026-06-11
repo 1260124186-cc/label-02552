@@ -1372,7 +1372,7 @@ else:
     ask_incremental_mode = cli_ask_incremental_mode
 
 
-def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None):
+def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_strategy='keep_unprocessed'):
     logger = get_logger()
 
     lookup_file = find_lookup_file(script_dir)
@@ -1452,8 +1452,7 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None):
                 error_message='无法识别银行类型' if not bank else f'银行「{bank}」无可用解析规则',
             ))
 
-    error_file_paths = {f for f, _ in error_files}
-    delete_processed_files(excel_files, set(unprocessed_files) | error_file_paths)
+    delete_processed_files(excel_files, processed_files, error_files, unprocessed_files, strategy=keep_strategy)
 
     output_path = None
     final_rows = []
@@ -1704,15 +1703,65 @@ def format_result_message(result):
     return msg
 
 
-def delete_processed_files(excel_files, keep_set):
+def delete_processed_files(excel_files, processed_files, error_files, unprocessed_files,
+                           strategy='keep_unprocessed', archive_dir_name='已处理归档'):
     logger = get_logger()
-    for filepath in excel_files:
-        if filepath not in keep_set:
+
+    if strategy == 'keep_all':
+        logger.info('保留策略：保留所有文件')
+        return
+
+    error_file_paths = {f for f, _ in error_files}
+    processed_set = set(processed_files)
+
+    if strategy == 'keep_unprocessed':
+        logger.info('保留策略：仅保留未处理文件')
+        for filepath in excel_files:
+            if filepath in processed_set:
+                try:
+                    os.remove(filepath)
+                    logger.debug('已删除文件: %s', filepath)
+                except OSError as e:
+                    logger.error('删除文件「%s」失败: %s', filepath, e)
+
+    elif strategy == 'delete_all':
+        logger.info('保留策略：删除所有已处理文件')
+        for filepath in excel_files:
             try:
                 os.remove(filepath)
                 logger.debug('已删除文件: %s', filepath)
             except OSError as e:
                 logger.error('删除文件「%s」失败: %s', filepath, e)
+
+    elif strategy == 'move_to_archive':
+        logger.info('保留策略：移动到已处理归档子目录')
+        if not excel_files:
+            return
+        parent_dir = os.path.dirname(excel_files[0])
+        archive_dir = os.path.join(parent_dir, archive_dir_name)
+        os.makedirs(archive_dir, exist_ok=True)
+        for filepath in processed_files:
+            try:
+                dest = os.path.join(archive_dir, os.path.basename(filepath))
+                counter = 1
+                base, ext = os.path.splitext(dest)
+                while os.path.exists(dest):
+                    dest = f"{base}_{counter}{ext}"
+                    counter += 1
+                shutil.move(filepath, dest)
+                logger.debug('已移动文件到归档: %s -> %s', filepath, dest)
+            except (OSError, shutil.Error) as e:
+                logger.error('移动文件「%s」到归档失败: %s', filepath, e)
+
+    else:
+        logger.warning('未知保留策略「%s」，回退为仅保留未处理文件', strategy)
+        for filepath in excel_files:
+            if filepath in processed_set:
+                try:
+                    os.remove(filepath)
+                    logger.debug('已删除文件: %s', filepath)
+                except OSError as e:
+                    logger.error('删除文件「%s」失败: %s', filepath, e)
 
 
 # ──────────────────────────────────────────────
@@ -2007,7 +2056,13 @@ def run_pipeline_flow(script_dir):
         return
     logger.info('用户选择运行模式: %s', '增量合并' if incremental else '全量覆盖')
 
-    result = run_pipeline(folder, script_dir, incremental=incremental)
+    keep_strategy = ask_keep_strategy()
+    if keep_strategy is None:
+        logger.info('用户取消保留策略选择，返回主菜单')
+        return
+    logger.info('用户选择保留策略: %s', KEEP_STRATEGIES.get(keep_strategy, keep_strategy))
+
+    result = run_pipeline(folder, script_dir, incremental=incremental, keep_strategy=keep_strategy)
 
     if result.lookup_missing:
         show_warning(
@@ -5151,6 +5206,12 @@ def run_pipeline_flow(script_dir):
         return
     logger.info('用户选择运行模式: %s', '增量合并' if incremental else '全量覆盖')
 
+    keep_strategy = ask_keep_strategy()
+    if keep_strategy is None:
+        logger.info('用户取消保留策略选择，返回主菜单')
+        return
+    logger.info('用户选择保留策略: %s', KEEP_STRATEGIES.get(keep_strategy, keep_strategy))
+
     batch_id = None
     batch_manager = None
     if HAS_BATCH_MANAGER:
@@ -5167,7 +5228,7 @@ def run_pipeline_flow(script_dir):
     with AuditLogger('pipeline', script_dir) as audit:
         audit.record_input(folder)
 
-        result = run_pipeline(folder, script_dir, incremental=incremental, batch_id=batch_id)
+        result = run_pipeline(folder, script_dir, incremental=incremental, batch_id=batch_id, keep_strategy=keep_strategy)
         audit.record_result(result)
 
         if result.lookup_missing:
@@ -5575,10 +5636,12 @@ def run_scheduled_pipeline(job_config, script_dir=None):
     job_name = job_config.get('name', job_id)
     watch_directory = job_config['watch_directory']
     incremental = job_config.get('incremental', True)
+    keep_strategy = job_config.get('keep_strategy', 'keep_unprocessed')
 
     logger.info('========== 定时任务启动 [%s] %s ==========', job_id, job_name)
     logger.info('监控目录: %s', watch_directory)
     logger.info('运行模式: %s', '增量合并' if incremental else '全量覆盖')
+    logger.info('保留策略: %s', KEEP_STRATEGIES.get(keep_strategy, keep_strategy))
 
     run_id = f"SCH{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
     start_time = datetime.now()
@@ -5613,7 +5676,7 @@ def run_scheduled_pipeline(job_config, script_dir=None):
         with AuditLogger('scheduled_pipeline', script_dir, username='scheduler') as audit:
             audit.record_input(watch_directory)
 
-            result = run_pipeline(watch_directory, script_dir, incremental=incremental)
+            result = run_pipeline(watch_directory, script_dir, incremental=incremental, keep_strategy=keep_strategy)
             audit.record_result(result)
 
             db_path = get_processed_files_db_path(script_dir)
@@ -6116,6 +6179,16 @@ def _add_job_interactive(script_dir=None):
     inc_choice = input('启用增量合并? (Y/n): ').strip().lower()
     job_config['incremental'] = inc_choice != 'n'
 
+    print('\n文件保留策略:')
+    for i, (key, desc) in enumerate(KEEP_STRATEGIES.items(), 1):
+        print(f'  {i}) {desc}')
+    keep_choice = input('请选择 (默认1-仅保留未处理文件): ').strip()
+    keep_keys = list(KEEP_STRATEGIES.keys())
+    if keep_choice.isdigit() and 1 <= int(keep_choice) <= len(keep_keys):
+        job_config['keep_strategy'] = keep_keys[int(keep_choice) - 1]
+    else:
+        job_config['keep_strategy'] = 'keep_unprocessed'
+
     job_config['description'] = input('任务描述 (可选): ').strip()
 
     job_id = add_schedule_job(job_config, script_dir)
@@ -6137,6 +6210,7 @@ def _edit_job_interactive(script_dir=None):
         input('按回车继续...')
         return
 
+    current_keep = job.get('keep_strategy', 'keep_unprocessed')
     print(f'\n当前配置:')
     print(f'  名称: {job.get("name", "")}')
     print(f'  目录: {job.get("watch_directory", "")}')
@@ -6146,6 +6220,7 @@ def _edit_job_interactive(script_dir=None):
     else:
         print(f'  cron: {job.get("cron_expression", "")}')
     print(f'  增量: {"启用" if job.get("incremental", True) else "禁用"}')
+    print(f'  保留策略: {KEEP_STRATEGIES.get(current_keep, current_keep)}')
     print(f'  状态: {"启用" if job.get("enabled", True) else "禁用"}')
 
     print(f'\n编辑 (留空保持当前值):')
@@ -6169,6 +6244,15 @@ def _edit_job_interactive(script_dir=None):
     new_inc = input(f'增量合并? (y/n) [{job.get("incremental", True)}]: ').strip().lower()
     if new_inc in ['y', 'n']:
         updates['incremental'] = new_inc == 'y'
+
+    print('\n文件保留策略:')
+    for i, (key, desc) in enumerate(KEEP_STRATEGIES.items(), 1):
+        marker = ' *' if key == current_keep else ''
+        print(f'  {i}) {desc}{marker}')
+    keep_choice = input('请选择新策略编号 (留空保持当前): ').strip()
+    keep_keys = list(KEEP_STRATEGIES.keys())
+    if keep_choice.isdigit() and 1 <= int(keep_choice) <= len(keep_keys):
+        updates['keep_strategy'] = keep_keys[int(keep_choice) - 1]
 
     if updates:
         update_schedule_job(job_id, updates, script_dir)
@@ -6366,6 +6450,8 @@ def parse_args_and_run():
     parser.add_argument('--once', action='store_true', help='单次运行后退出(配合--watch-dir使用)')
     parser.add_argument('--interval', type=int, metavar='MINUTES', help='单次运行模式下的间隔分钟数')
     parser.add_argument('--no-incremental', action='store_true', help='禁用增量合并，使用全量覆盖')
+    parser.add_argument('--keep-strategy', type=str, metavar='STRATEGY',
+                       help='文件保留策略: keep_all(保留所有文件), keep_unprocessed(仅保留未处理/失败文件), delete_all(删除所有文件), move_to_archive(移动到已处理归档子目录)')
     parser.add_argument('--export', action='store_true', help='进入财务软件对接导出功能')
     parser.add_argument('--export-template', type=str, metavar='TEMPLATE',
                        help='指定导出模板类型: yonyou_voucher(用友), kingdee_voucher(金蝶), bank_journal(日记账)')
@@ -6422,6 +6508,8 @@ def parse_args_and_run():
                 print(f'    调度: 每 {job.get("interval_minutes", 60)} 分钟')
             else:
                 print(f'    调度: {job.get("cron_expression", "")}')
+            keep = KEEP_STRATEGIES.get(job.get('keep_strategy', 'keep_unprocessed'), '未知')
+            print(f'    保留策略: {keep}')
         return True
 
     if args.list_presets:
@@ -6507,6 +6595,7 @@ def parse_args_and_run():
             'name': '单次运行任务',
             'watch_directory': watch_dir,
             'incremental': not args.no_incremental,
+            'keep_strategy': args.keep_strategy or 'keep_unprocessed',
             'schedule_type': 'interval',
             'interval_minutes': args.interval or 60,
         }
@@ -7489,7 +7578,94 @@ KEEP_STRATEGIES = {
     'keep_unprocessed': '仅保留未处理文件',
     'keep_all': '保留所有文件',
     'delete_all': '删除所有已处理文件',
+    'move_to_archive': '移动到已处理归档子目录',
 }
+
+
+def cli_ask_keep_strategy():
+    """命令行模式下询问用户文件保留策略"""
+    print('\n请选择文件保留策略：')
+    for i, (key, desc) in enumerate(KEEP_STRATEGIES.items(), 1):
+        marker = '（推荐）' if key == 'keep_unprocessed' else ''
+        print(f'  {i}) {desc}{marker}')
+    choice = input('请输入选项（直接回车默认为 1 仅保留未处理文件）: ').strip()
+    keep_keys = list(KEEP_STRATEGIES.keys())
+    if choice.isdigit() and 1 <= int(choice) <= len(keep_keys):
+        return keep_keys[int(choice) - 1]
+    return 'keep_unprocessed'
+
+
+def gui_ask_keep_strategy():
+    """GUI 模式下询问用户文件保留策略"""
+    if tk is None:
+        return cli_ask_keep_strategy()
+
+    try:
+        root = tk.Tk()
+        root.title('选择文件保留策略')
+        root.geometry('460x400')
+        root.resizable(False, False)
+
+        result = {'strategy': None}
+
+        def select_strategy(strategy):
+            result['strategy'] = strategy
+            root.destroy()
+
+        tk.Label(root, text='请选择文件保留策略', font=('Arial', 14, 'bold')).pack(pady=15)
+
+        strategies = [
+            ('keep_unprocessed', '仅保留未处理文件（推荐）',
+             '删除处理成功的文件，保留出错和无法识别的文件',
+             '#4CAF50'),
+            ('keep_all', '保留所有文件',
+             '不删除任何原始文件',
+             '#2196F3'),
+            ('move_to_archive', '移动到已处理归档子目录',
+             '将处理成功的文件移动到「已处理归档」子目录',
+             '#FF9800'),
+            ('delete_all', '删除所有已处理文件',
+             '删除所有 Excel 文件（包括成功、失败和未识别的）',
+             '#f44336'),
+        ]
+
+        for key, name, desc, color in strategies:
+            frame = tk.Frame(root)
+            frame.pack(fill='x', padx=20, pady=4)
+            btn = tk.Button(
+                frame,
+                text=name,
+                bg=color,
+                fg='white',
+                font=('Arial', 10, 'bold'),
+                width=30,
+                command=lambda k=key: select_strategy(k),
+            )
+            btn.pack(side='left')
+            tk.Label(frame, text=desc, font=('Arial', 8), fg='#666').pack(
+                side='left', padx=10
+            )
+
+        tk.Button(
+            root,
+            text='取消',
+            width=12,
+            command=lambda: select_strategy(None),
+            bg='#9E9E9E',
+            fg='white',
+            font=('Arial', 10),
+        ).pack(pady=15)
+
+        root.mainloop()
+        return result['strategy']
+    except Exception:
+        return cli_ask_keep_strategy()
+
+
+if HAS_TKINTER:
+    ask_keep_strategy = gui_ask_keep_strategy
+else:
+    ask_keep_strategy = cli_ask_keep_strategy
 
 
 def get_preset_config_path(script_dir=None):
@@ -7796,19 +7972,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     if filtered_out_count > 0:
         logger.info('日期过滤共排除 %d 条记录', filtered_out_count)
 
-    error_file_paths = {f for f, _ in error_files}
-    keep_set = set(unprocessed_files) | error_file_paths
-
-    if keep_strategy == 'keep_all':
-        keep_set = set(excel_files)
-        logger.info('保留策略：保留所有文件')
-    elif keep_strategy == 'delete_all':
-        keep_set = set()
-        logger.info('保留策略：删除所有已处理文件')
-    else:
-        logger.info('保留策略：仅保留未处理文件')
-
-    delete_processed_files(excel_files, keep_set)
+    delete_processed_files(excel_files, processed_files, error_files, unprocessed_files, strategy=keep_strategy)
 
     output_path = None
     final_rows = []
