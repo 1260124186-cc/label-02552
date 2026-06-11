@@ -14,6 +14,7 @@
 """
 
 import os
+import re
 import sys
 import shutil
 import uuid
@@ -23,6 +24,7 @@ import sqlite3
 import json
 import getpass
 import hashlib
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional, Tuple, Dict, Any
@@ -905,14 +907,147 @@ def _get_bank_prefixes():
 BANK_PREFIXES = _get_bank_prefixes()
 
 
+_SEP_PATTERN = r'[\s\-_·.．（）()\[\]【】]'
+
+
+def _normalize_width(s: str) -> str:
+    """将字符串中的全角字符转换为半角字符，统一符号宽度"""
+    if not s:
+        return s
+    result = []
+    for ch in s:
+        code = ord(ch)
+        if code == 0x3000:
+            result.append(' ')
+        elif 0xFF01 <= code <= 0xFF5E:
+            result.append(chr(code - 0xFEE0))
+        else:
+            result.append(unicodedata.normalize('NFKC', ch))
+    return ''.join(result)
+
+
+def _strip_separators(s: str) -> str:
+    """移除字符串中的分隔符（空格、横线、下划线、括号等）"""
+    return re.sub(_SEP_PATTERN, '', s)
+
+
+def _build_bank_regex(bank_name: str) -> re.Pattern:
+    """
+    为银行名构建正则模式，支持：
+    - 字符间存在任意数量的分隔符（空格、横线、下划线、点、括号等）
+    - 全角/半角符号差异
+    """
+    normalized = _normalize_width(bank_name)
+    stripped = _strip_separators(normalized)
+    chars = list(stripped)
+    if not chars:
+        return re.compile(r'(?!x)x')
+    sep = _SEP_PATTERN + '*'
+    pattern = sep.join(re.escape(c) for c in chars)
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _match_bank_in_filename(basename: str, bank_name: str) -> bool:
+    """在文件名中任意位置匹配银行名，忽略全角/半角差异和分隔符"""
+    normalized_name = _normalize_width(basename)
+    pattern = _build_bank_regex(bank_name)
+    return pattern.search(normalized_name) is not None
+
+
+def _safe_get_cell_value(ws, cell_ref: str):
+    """安全获取单元格值，不存在则返回 None"""
+    try:
+        cell = ws[cell_ref]
+        return cell.value
+    except (KeyError, IndexError):
+        return None
+
+
+def _identify_bank_by_content(filepath: str) -> Optional[str]:
+    """
+    根据 Excel 内容辅助识别银行：
+    - 检查 B1 单元格是否有账号（东亚银行特征）
+    - 检查 B2 单元格是否有账号（北京银行特征）
+    """
+    logger = get_logger()
+    if not os.path.isfile(filepath):
+        return None
+    if not filepath.lower().endswith(('.xlsx', '.xls')):
+        return None
+
+    try:
+        wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+        try:
+            ws = wb.active
+            if ws is None:
+                return None
+
+            b1_val = _safe_get_cell_value(ws, 'B1')
+            b2_val = _safe_get_cell_value(ws, 'B2')
+
+            def _cell_to_str(val):
+                if val is None:
+                    return ''
+                return _normalize_width(str(val).strip())
+
+            b1_str = _cell_to_str(b1_val)
+            b2_str = _cell_to_str(b2_val)
+
+            looks_like_account = lambda s: bool(s) and bool(re.match(r'^\d{6,}$', s))
+
+            config = get_bank_config()
+            bank_names = config.get_all_bank_names()
+
+            matched = []
+            for bank_name in bank_names:
+                rule = config.get_rule(bank_name)
+                if not rule:
+                    continue
+                cell = rule.account_cell.upper()
+                if cell == 'B1' and looks_like_account(b1_str):
+                    matched.append(bank_name)
+                elif cell == 'B2' and looks_like_account(b2_str):
+                    matched.append(bank_name)
+
+            if len(matched) == 1:
+                logger.info('文件「%s」通过内容特征识别为: %s', os.path.basename(filepath), matched[0])
+                return matched[0]
+            elif len(matched) > 1:
+                logger.warning('文件「%s」内容匹配多个银行: %s，无法确定', os.path.basename(filepath), matched)
+        finally:
+            wb.close()
+    except Exception as e:
+        logger.debug('内容辅助识别失败「%s」: %s', os.path.basename(filepath), e)
+
+    return None
+
+
 def identify_bank(filepath):
-    """根据文件名开头判断银行，返回银行名称或 None"""
+    """
+    识别银行类型，返回银行名称或 None。
+
+    识别策略（按优先级）：
+    1. 文件名前缀精确匹配（兼容性保留）
+    2. 文件名任意位置包含银行名的正则匹配（忽略全角/半角差异）
+    3. 基于 Excel 内容的 B1/B2 账号单元格特征辅助识别
+    """
     logger = get_logger()
     basename = os.path.basename(filepath)
+
     for prefix in BANK_PREFIXES:
         if basename.startswith(prefix):
-            logger.info('文件「%s」识别为: %s', basename, prefix)
+            logger.info('文件「%s」通过前缀匹配识别为: %s', basename, prefix)
             return prefix
+
+    for bank_name in BANK_PREFIXES:
+        if _match_bank_in_filename(basename, bank_name):
+            logger.info('文件「%s」通过正则匹配识别为: %s', basename, bank_name)
+            return bank_name
+
+    content_match = _identify_bank_by_content(filepath)
+    if content_match:
+        return content_match
+
     logger.warning('文件「%s」无法识别银行类型', basename)
     return None
 
