@@ -730,6 +730,207 @@ class ProgressWindow:
             pass
 
 
+class ResultDetailWindow:
+    """
+    GUI 结果详情窗口，展示处理完成后以结构化方式展示统计摘要和文件清单。
+    包含按银行、按主体统计摘要，以及成功/未处理/失败三类文件清单。
+    """
+
+    def __init__(self, result: ProcessingResult, title='处理结果详情', parent=None):
+        if not HAS_TKINTER or tk is None:
+            self.root = None
+            return
+
+        try:
+            if parent:
+                self.root = tk.Toplevel(parent)
+            else:
+                self.root = tk.Tk()
+                self.root.title(title)
+        except Exception:
+            self.root = None
+            return
+
+        self.root.title(title)
+        self.root.geometry('780x620')
+        self.root.minsize(640, 480)
+        self.root.attributes('-topmost', True)
+
+        try:
+            self.root.option_add('*Font', 'Arial 10')
+        except Exception:
+            pass
+
+        self.result = result
+        self.summary = build_processing_summary(result.file_process_details)
+        self._closed = False
+
+        self._build_ui()
+
+    def _build_ui(self):
+        """构建 UI 组件"""
+        from tkinter import ttk
+
+        main_frame = tk.Frame(self.root, padx=15, pady=12)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        title_label = tk.Label(
+            main_frame,
+            text='处理结果详情',
+            font=('Arial', 16, 'bold'),
+            fg='#2c3e50',
+        )
+        title_label.pack(pady=(0, 8))
+
+        self._build_summary_section(main_frame)
+        self._build_tabs(main_frame)
+
+        btn_frame = tk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        close_btn = tk.Button(
+            btn_frame,
+            text='关闭',
+            width=12,
+            command=self._on_close,
+            bg='#3498db',
+            fg='white',
+            font=('Arial', 10, 'bold'),
+        )
+        close_btn.pack(side=tk.RIGHT)
+
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+
+    def _build_summary_section(self, parent):
+        """构建统计摘要区域"""
+        total = self.summary['total']
+        by_bank = self.summary['by_bank']
+        by_subject = self.summary['by_subject']
+
+        summary_frame = tk.LabelFrame(parent, text='总体统计摘要', padx=12, pady=8)
+        summary_frame.pack(fill=tk.X, pady=(0, 8))
+
+        stats = [
+            ('总文件数', total['files'], '#2c3e50'),
+            ('银行数', total['banks'], '#3498db'),
+            ('主体数', total['subjects'], '#9b59b6'),
+            ('成功文件', total['success'], '#27ae60'),
+            ('未处理文件', total['unprocessed'], '#f39c12'),
+            ('失败文件', total['error'], '#e74c3c'),
+            ('提取记录', f"{total['records']:,}", '#2c3e50'),
+            ('跳过行', f"{total['skipped_rows']:,}", '#7f8c8d'),
+        ]
+        for i, (name, value, color) in enumerate(stats):
+            col = i % 4
+            row = i // 4
+            frm = tk.Frame(summary_frame)
+            frm.grid(row=row, column=col, sticky='w', padx=15, pady=3)
+            tk.Label(
+                frm,
+                text=f'{name}:',
+                font=('Arial', 9, 'bold'),
+                fg='#555',
+                width=10,
+                anchor='w',
+            ).pack(side=tk.LEFT)
+            tk.Label(
+                frm,
+                text=str(value),
+                font=('Arial', 10, 'bold'),
+                fg=color,
+                anchor='w',
+            ).pack(side=tk.LEFT)
+
+    def _build_tabs(self, parent):
+        """构建文件清单标签页"""
+        from tkinter import ttk
+
+        tab_frame = tk.LabelFrame(parent, text='文件清单', padx=8, pady=6)
+        tab_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+
+        notebook = ttk.Notebook(tab_frame)
+        notebook.pack(fill=tk.BOTH, expand=True)
+
+        success_files = self.summary['by_status']['success']
+        unprocessed_files = self.summary['by_status']['unprocessed']
+        error_files = self.summary['by_status']['error']
+
+        self._build_file_tab(notebook, f'成功文件 ({len(success_files)})', success_files, 'success')
+        self._build_file_tab(notebook, f'未处理文件 ({len(unprocessed_files)})', unprocessed_files, 'unprocessed')
+        self._build_file_tab(notebook, f'失败文件 ({len(error_files)})', error_files, 'error')
+
+    def _build_file_tab(self, notebook, tab_title, files, status_type):
+        """构建单个文件清单标签页"""
+        from tkinter import ttk
+
+        frame = tk.Frame(notebook, padx=5, pady=5)
+        notebook.add(frame, text=tab_title)
+
+        columns = ('file_name', 'bank_name', 'subject', 'records', 'skipped_rows')
+        tree = ttk.Treeview(frame, columns=columns, show='headings', height=12)
+
+        tree.heading('file_name', text='文件名')
+        tree.heading('bank_name', text='银行')
+        tree.heading('subject', text='主体')
+        tree.heading('records', text='提取记录')
+        tree.heading('skipped_rows', text='跳过行')
+
+        tree.column('file_name', width=280, anchor='w')
+        tree.column('bank_name', width=120, anchor='center')
+        tree.column('subject', width=140, anchor='center')
+        tree.column('records', width=90, anchor='e')
+        tree.column('skipped_rows', width=80, anchor='e')
+
+        scrollbar = ttk.Scrollbar(frame, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        tag_colors = {
+            'success': '#e8f5e9',
+            'unprocessed': '#fff8e1',
+            'error': '#ffebee',
+        }
+        tree.tag_configure(status_type, background=tag_colors.get(status_type, 'white'))
+
+        for d in files:
+            values = (
+                d.file_name or os.path.basename(d.file_path),
+                d.bank_name or '-',
+                d.subject or '-',
+                f"{d.extracted_records:,}" if d.extracted_records else '-',
+                f"{d.skipped_rows:,}" if d.skipped_rows else '-',
+            )
+            tree.insert('', 'end', values=values, tags=(status_type,))
+
+        if not files:
+            tree.insert('', 'end', values=('（无）', '', '', '', ''), tags=('empty',))
+            tree.tag_configure('empty', foreground='#999')
+
+    def _on_close(self):
+        """关闭窗口"""
+        self._closed = True
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def show(self):
+        """显示窗口并进入事件循环"""
+        if self.root is None:
+            return
+        try:
+            self.root.update()
+            self.root.deiconify()
+            self.root.lift()
+            self.root.mainloop()
+        except Exception:
+            pass
+
+    def is_closed(self) -> bool:
+        return self._closed
+
+
 def create_progress_callback(progress_window: Optional[ProgressWindow]):
     """
     创建进度回调函数。
@@ -746,6 +947,31 @@ def create_progress_callback(progress_window: Optional[ProgressWindow]):
             raise RuntimeError('用户取消了操作')
 
     return _callback
+
+
+def show_result_detail_dialog(result: ProcessingResult, parent=None) -> bool:
+    """
+    显示结果详情对话框。GUI 模式下显示结构化窗口，CLI 模式下打印文本消息。
+
+    Returns:
+        True 表示成功显示了详情窗口，False 表示退化为文本消息
+    """
+    if not HAS_TKINTER or tk is None:
+        return False
+
+    if not result.file_process_details:
+        return False
+
+    try:
+        win = ResultDetailWindow(result, title='处理结果详情', parent=parent)
+        if win.root is not None:
+            win.show()
+            return True
+    except Exception as e:
+        logger = get_logger()
+        logger.warning('结果详情窗口显示失败: %s', e)
+
+    return False
 
 
 def _ask_monitor_or_scheduler():
@@ -1588,6 +1814,7 @@ class ProcessingResult:
     processed_files: List[str] = field(default_factory=list)
     unprocessed_files: List[str] = field(default_factory=list)
     error_files: List[Tuple[str, str]] = field(default_factory=list)
+    file_process_details: List[FileProcessDetail] = field(default_factory=list)
     output_path: Optional[str] = None
     output_paths: Dict[str, Any] = field(default_factory=dict)
     subject_summary_path: Optional[str] = None
@@ -2413,11 +2640,14 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
     _report(8, 98, message=f'报告生成完成：共生成 {report_count}/{total_reports} 份报告')
     _report(9, 100, message='全部处理完成！')
 
+    log_processing_summary(file_process_details)
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
+        file_process_details=file_process_details,
         output_path=output_path,
         output_paths=output_paths,
         subject_summary_path=subject_summary_path,
@@ -2433,6 +2663,170 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
         db_inserted_count=db_inserted,
         db_duplicate_count=db_duplicates,
     )
+
+
+def build_processing_summary(file_details: List[FileProcessDetail]) -> Dict[str, Any]:
+    """
+    构建处理统计摘要，按银行、按主体、按文件状态三个维度统计。
+
+    返回结构：
+    {
+        'by_bank': [{'银行': str, '文件数': int, '成功文件': int, '失败文件': int, '未处理文件': int, '提取记录数': int, '跳过行数': int}, ...],
+        'by_subject': [{'主体': str, '文件数': int, '银行数': int, '提取记录数': int, '跳过行数': int}, ...],
+        'by_status': {
+            'success': [FileProcessDetail, ...],
+            'unprocessed': [FileProcessDetail, ...],
+            'error': [FileProcessDetail, ...],
+        },
+        'total': {
+            'files': int,
+            'success': int,
+            'unprocessed': int,
+            'error': int,
+            'records': int,
+            'skipped_rows': int,
+            'banks': int,
+            'subjects': int,
+        }
+    }
+    """
+    if not file_details:
+        return {
+            'by_bank': [],
+            'by_subject': [],
+            'by_status': {'success': [], 'unprocessed': [], 'error': []},
+            'total': {'files': 0, 'success': 0, 'unprocessed': 0, 'error': 0,
+                      'records': 0, 'skipped_rows': 0, 'banks': 0, 'subjects': 0},
+        }
+
+    by_bank_map: Dict[str, Dict[str, Any]] = {}
+    by_subject_map: Dict[str, Dict[str, Any]] = {}
+    success_files: List[FileProcessDetail] = []
+    unprocessed_files: List[FileProcessDetail] = []
+    error_files: List[FileProcessDetail] = []
+
+    for d in file_details:
+        bank = d.bank_name or '未知银行'
+        subject = d.subject or '未指定主体'
+        status = d.process_status
+
+        if bank not in by_bank_map:
+            by_bank_map[bank] = {
+                '银行': bank,
+                '文件数': 0,
+                '成功文件': 0,
+                '失败文件': 0,
+                '未处理文件': 0,
+                '提取记录数': 0,
+                '跳过行数': 0,
+            }
+        by_bank_map[bank]['文件数'] += 1
+        if status == '成功':
+            by_bank_map[bank]['成功文件'] += 1
+            by_bank_map[bank]['提取记录数'] += d.extracted_records
+            by_bank_map[bank]['跳过行数'] += d.skipped_rows
+        elif status == '失败':
+            by_bank_map[bank]['失败文件'] += 1
+        elif status == '未处理':
+            by_bank_map[bank]['未处理文件'] += 1
+
+        if subject not in by_subject_map:
+            by_subject_map[subject] = {
+                '主体': subject,
+                '文件数': 0,
+                '银行数': 0,
+                '银行集合': set(),
+                '提取记录数': 0,
+                '跳过行数': 0,
+            }
+        by_subject_map[subject]['文件数'] += 1
+        by_subject_map[subject]['银行集合'].add(bank)
+        if status == '成功':
+            by_subject_map[subject]['提取记录数'] += d.extracted_records
+            by_subject_map[subject]['跳过行数'] += d.skipped_rows
+
+        if status == '成功':
+            success_files.append(d)
+        elif status == '未处理':
+            unprocessed_files.append(d)
+        elif status == '失败':
+            error_files.append(d)
+
+    for s in by_subject_map.values():
+        s['银行数'] = len(s['银行集合'])
+        del s['银行集合']
+
+    by_bank_list = sorted(by_bank_map.values(), key=lambda x: x['提取记录数'], reverse=True)
+    by_subject_list = sorted(by_subject_map.values(), key=lambda x: x['提取记录数'], reverse=True)
+
+    total_files = len(file_details)
+    total_success = len(success_files)
+    total_unprocessed = len(unprocessed_files)
+    total_error = len(error_files)
+    total_records = sum(d.extracted_records for d in success_files)
+    total_skipped = sum(d.skipped_rows for d in success_files)
+    total_banks = len(by_bank_map)
+    total_subjects = len(by_subject_map)
+
+    return {
+        'by_bank': by_bank_list,
+        'by_subject': by_subject_list,
+        'by_status': {
+            'success': success_files,
+            'unprocessed': unprocessed_files,
+            'error': error_files,
+        },
+        'total': {
+            'files': total_files,
+            'success': total_success,
+            'unprocessed': total_unprocessed,
+            'error': total_error,
+            'records': total_records,
+            'skipped_rows': total_skipped,
+            'banks': total_banks,
+            'subjects': total_subjects,
+        },
+    }
+
+
+def log_processing_summary(file_details: List[FileProcessDetail]):
+    """将处理统计摘要输出到日志"""
+    logger = get_logger()
+    if not file_details:
+        logger.info('处理统计：无文件处理详情')
+        return
+
+    summary = build_processing_summary(file_details)
+    total = summary['total']
+    by_bank = summary['by_bank']
+    by_subject = summary['by_subject']
+
+    logger.info('=' * 60)
+    logger.info('处理统计摘要')
+    logger.info('=' * 60)
+    logger.info('文件总数: %d  银行数: %d  主体数: %d',
+                total['files'], total['banks'], total['subjects'])
+    logger.info('成功: %d  未处理: %d  失败: %d',
+                total['success'], total['unprocessed'], total['error'])
+    logger.info('提取记录: %d  跳过行: %d',
+                total['records'], total['skipped_rows'])
+
+    if by_bank:
+        logger.info('─' * 40)
+        logger.info('按银行统计：')
+        for item in by_bank:
+            logger.info('  %-15s 文件:%-3d 成功:%-3d 失败:%-3d 未处理:%-3d 记录:%d',
+                        item['银行'], item['文件数'], item['成功文件'],
+                        item['失败文件'], item['未处理文件'], item['提取记录数'])
+
+    if by_subject:
+        logger.info('─' * 40)
+        logger.info('按主体统计：')
+        for item in by_subject:
+            logger.info('  %-20s 文件:%-3d 银行数:%-3d 记录:%d',
+                        item['主体'], item['文件数'], item['银行数'], item['提取记录数'])
+
+    logger.info('=' * 60)
 
 
 def format_result_message(result):
@@ -2526,6 +2920,46 @@ def format_result_message(result):
     if result.error_files:
         err_info = '\n  '.join(f'{os.path.basename(f)}: {e}' for f, e in result.error_files)
         msg += f'\n\n处理出错的文件（{len(result.error_files)} 个，已保留）：\n  {err_info}'
+
+    if result.file_process_details:
+        summary = build_processing_summary(result.file_process_details)
+        total = summary['total']
+        by_bank = summary['by_bank']
+        by_subject = summary['by_subject']
+
+        if by_bank:
+            msg += '\n\n━━━ 按银行统计 ━━━'
+            for item in by_bank:
+                msg += (
+                    f'\n  ● {item["银行"]}'
+                    f'  文件:{item["文件数"]}'
+                    f'  成功:{item["成功文件"]}'
+                    f'  失败:{item["失败文件"]}'
+                    f'  未处理:{item["未处理文件"]}'
+                    f'  记录:{item["提取记录数"]:,}'
+                )
+
+        if by_subject:
+            msg += '\n\n━━━ 按主体统计 ━━━'
+            for item in by_subject:
+                msg += (
+                    f'\n  ● {item["主体"]}'
+                    f'  文件:{item["文件数"]}'
+                    f'  银行数:{item["银行数"]}'
+                    f'  记录:{item["提取记录数"]:,}'
+                )
+
+        msg += (
+            f'\n\n━━━ 文件维度汇总 ━━━'
+            f'\n  总文件数: {total["files"]}'
+            f'  银行数: {total["banks"]}'
+            f'  主体数: {total["subjects"]}'
+            f'\n  成功: {total["success"]}'
+            f'  未处理: {total["unprocessed"]}'
+            f'  失败: {total["error"]}'
+            f'  提取记录: {total["records"]:,}'
+            f'  跳过行: {total["skipped_rows"]:,}'
+        )
 
     return msg
 
@@ -2935,8 +3369,10 @@ def run_pipeline_flow(script_dir):
                         break
             except Exception:
                 pass
+            show_result_detail_dialog(result, progress_win.root)
         else:
-            show_info('完成' if result.all_rows else '提示', msg)
+            if not show_result_detail_dialog(result):
+                show_info('完成' if result.all_rows else '提示', msg)
 
     except RuntimeError as e:
         if '用户取消了操作' in str(e):
@@ -6209,8 +6645,10 @@ def run_pipeline_flow(script_dir):
                             break
                 except Exception:
                     pass
+                show_result_detail_dialog(result, progress_win.root)
             else:
-                show_info('完成' if result.all_rows else '提示', msg)
+                if not show_result_detail_dialog(result):
+                    show_info('完成' if result.all_rows else '提示', msg)
 
     except RuntimeError as e:
         if '用户取消了操作' in str(e):
@@ -9240,11 +9678,14 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         verification_report_path = None
         verification_report_md_path = None
 
+    log_processing_summary(file_process_details)
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
+        file_process_details=file_process_details,
         output_path=output_path,
         output_paths=output_paths,
         subject_summary_path=subject_summary_path,
@@ -9446,7 +9887,8 @@ def gui_preset_manager(script_dir):
             msg = format_result_message(result)
             msg += f'\n\n审计编号: {audit.audit_id}'
             msg += f'\n预设: {preset.get("name", "")} ({pid})'
-            show_info('完成' if result.all_rows else '提示', msg)
+            if not show_result_detail_dialog(result):
+                show_info('完成' if result.all_rows else '提示', msg)
 
     main_frame = tk.Frame(root)
     main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
