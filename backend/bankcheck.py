@@ -410,6 +410,344 @@ def _gui_askmode_full():
     return result['mode']
 
 
+# ──────────────────────────────────────────────
+# 进度条窗口与进度回调机制
+# ──────────────────────────────────────────────
+
+@dataclass
+class ProgressInfo:
+    """进度信息数据类"""
+    stage: str = ''
+    stage_index: int = 0
+    total_stages: int = 0
+    percent: int = 0
+    message: str = ''
+    current_file: str = ''
+    processed_files: int = 0
+    total_files: int = 0
+    processed_records: int = 0
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+class ProgressWindow:
+    """
+    GUI 进度条窗口，在批量处理时显示当前进度和阶段状态。
+    使用 after() 方法确保 UI 更新在主线程中执行，避免线程安全问题。
+    """
+
+    STAGES = [
+        ('初始化', '正在初始化处理环境...'),
+        ('扫描文件', '正在扫描文件夹中的 Excel 文件...'),
+        ('识别银行', '正在识别各文件的银行类型...'),
+        ('解析文件', '正在解析银行流水文件...'),
+        ('合并数据', '正在合并并去重数据...'),
+        ('导出总表', '正在导出总表文件...'),
+        ('黑白名单', '正在应用对方户名黑白名单...'),
+        ('数据库', '正在写入数据库...'),
+        ('生成报告', '正在生成汇总与检验报告...'),
+        ('完成', '处理完成！'),
+    ]
+
+    def __init__(self, title='处理进度', parent=None):
+        if not HAS_TKINTER or tk is None:
+            self.root = None
+            return
+
+        try:
+            if parent:
+                self.root = tk.Toplevel(parent)
+            else:
+                self.root = tk.Tk()
+                self.root.title(title)
+        except Exception:
+            self.root = None
+            return
+
+        self.root.title(title)
+        self.root.geometry('560x420')
+        self.root.resizable(False, False)
+        self.root.attributes('-topmost', True)
+
+        try:
+            self.root.option_add('*Font', 'Arial 10')
+        except Exception:
+            pass
+
+        self._build_ui()
+        self._cancelled = False
+        self._closed = False
+
+    def _build_ui(self):
+        """构建 UI 组件"""
+        main_frame = tk.Frame(self.root, padx=20, pady=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        title_label = tk.Label(
+            main_frame,
+            text='银行流水批量处理',
+            font=('Arial', 16, 'bold'),
+            fg='#2c3e50',
+        )
+        title_label.pack(pady=(0, 5))
+
+        self.stage_label = tk.Label(
+            main_frame,
+            text='准备中...',
+            font=('Arial', 12, 'bold'),
+            fg='#3498db',
+            anchor='w',
+        )
+        self.stage_label.pack(fill=tk.X, pady=(10, 3))
+
+        from tkinter import ttk
+        self.progress_bar = ttk.Progressbar(
+            main_frame,
+            orient='horizontal',
+            length=520,
+            mode='determinate',
+            maximum=100,
+        )
+        self.progress_bar.pack(fill=tk.X, pady=5)
+
+        self.percent_label = tk.Label(
+            main_frame,
+            text='0%',
+            font=('Arial', 11),
+            fg='#7f8c8d',
+            anchor='e',
+        )
+        self.percent_label.pack(fill=tk.X, pady=(0, 10))
+
+        self.message_label = tk.Label(
+            main_frame,
+            text='正在准备处理任务...',
+            font=('Arial', 10),
+            fg='#555',
+            anchor='w',
+            wraplength=520,
+            justify='left',
+        )
+        self.message_label.pack(fill=tk.X, pady=(5, 5))
+
+        file_frame = tk.Frame(main_frame)
+        file_frame.pack(fill=tk.X, pady=(5, 5))
+        tk.Label(
+            file_frame,
+            text='当前文件:',
+            font=('Arial', 9, 'bold'),
+            fg='#666',
+        ).pack(side=tk.LEFT, anchor='w')
+        self.current_file_label = tk.Label(
+            file_frame,
+            text='-',
+            font=('Arial', 9),
+            fg='#888',
+            anchor='w',
+        )
+        self.current_file_label.pack(side=tk.LEFT, padx=(5, 0), anchor='w')
+
+        stats_frame = tk.LabelFrame(main_frame, text='处理统计', padx=10, pady=8)
+        stats_frame.pack(fill=tk.X, pady=(10, 5))
+
+        self.stats_labels = {}
+        stats = [
+            ('files', '文件进度', '0 / 0'),
+            ('records', '记录数', '0'),
+            ('success', '成功文件', '0'),
+            ('errors', '出错文件', '0'),
+        ]
+        for i, (key, name, default) in enumerate(stats):
+            col = i % 2
+            row = i // 2
+            frm = tk.Frame(stats_frame)
+            frm.grid(row=row, column=col, sticky='w', padx=10, pady=3)
+            tk.Label(
+                frm,
+                text=f'{name}:',
+                font=('Arial', 9, 'bold'),
+                fg='#555',
+                width=10,
+                anchor='w',
+            ).pack(side=tk.LEFT)
+            lbl = tk.Label(
+                frm,
+                text=default,
+                font=('Arial', 9),
+                fg='#333',
+                anchor='w',
+            )
+            lbl.pack(side=tk.LEFT)
+            self.stats_labels[key] = lbl
+
+        btn_frame = tk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(15, 0))
+        self.cancel_btn = tk.Button(
+            btn_frame,
+            text='取消处理',
+            width=12,
+            command=self._on_cancel,
+            bg='#e74c3c',
+            fg='white',
+            font=('Arial', 10, 'bold'),
+        )
+        self.cancel_btn.pack(side=tk.RIGHT)
+
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+
+    def _on_cancel(self):
+        """点击取消按钮"""
+        self._cancelled = True
+        self.cancel_btn.config(state=tk.DISABLED, text='取消中...')
+        self.message_label.config(text='正在取消，请稍候...', fg='#e74c3c')
+
+    def _on_close(self):
+        """关闭窗口"""
+        self._cancelled = True
+        self._closed = True
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+    def update_progress(self, info: ProgressInfo):
+        """
+        线程安全地更新进度。通过 after() 将 UI 更新投递到主线程。
+        """
+        if self.root is None or self._closed:
+            return
+        try:
+            self.root.after(0, self._do_update, info)
+        except Exception:
+            pass
+
+    def _do_update(self, info: ProgressInfo):
+        """实际执行 UI 更新（在主线程中）"""
+        if self._closed:
+            return
+
+        try:
+            if info.stage:
+                self.stage_label.config(text=f'【{info.stage_index + 1}/{info.total_stages}】{info.stage}')
+
+            self.progress_bar['value'] = info.percent
+            self.percent_label.config(text=f'{info.percent}%')
+
+            if info.message:
+                self.message_label.config(text=info.message, fg='#555')
+
+            if info.current_file:
+                display_name = os.path.basename(info.current_file)
+                if len(display_name) > 45:
+                    display_name = display_name[:42] + '...'
+                self.current_file_label.config(text=display_name, fg='#2980b9')
+
+            if info.total_files > 0:
+                self.stats_labels['files'].config(text=f'{info.processed_files} / {info.total_files}')
+
+            if info.processed_records > 0:
+                self.stats_labels['records'].config(text=f'{info.processed_records:,}')
+
+            if 'success_count' in info.extra:
+                self.stats_labels['success'].config(text=str(info.extra['success_count']))
+
+            if 'error_count' in info.extra:
+                self.stats_labels['errors'].config(text=str(info.extra['error_count']),
+                                                    fg='#e74c3c' if info.extra['error_count'] > 0 else '#333')
+
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+    def set_completed(self, final_message: str = '处理完成！'):
+        """标记为完成状态"""
+        if self.root is None or self._closed:
+            return
+        try:
+            self.root.after(0, self._do_completed, final_message)
+        except Exception:
+            pass
+
+    def _do_completed(self, final_message: str):
+        self.progress_bar['value'] = 100
+        self.percent_label.config(text='100%')
+        self.stage_label.config(text=f'【{len(self.STAGES)}/{len(self.STAGES)}】完成', fg='#27ae60')
+        self.message_label.config(text=final_message, fg='#27ae60')
+        self.cancel_btn.config(text='关闭', command=self._on_close, bg='#27ae60')
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+    def set_error(self, error_message: str):
+        """标记为错误状态"""
+        if self.root is None or self._closed:
+            return
+        try:
+            self.root.after(0, self._do_error, error_message)
+        except Exception:
+            pass
+
+    def _do_error(self, error_message: str):
+        self.stage_label.config(text='处理出错', fg='#e74c3c')
+        self.message_label.config(text=error_message, fg='#e74c3c')
+        self.cancel_btn.config(text='关闭', command=self._on_close, bg='#e74c3c')
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+    def show(self):
+        """显示窗口"""
+        if self.root is None:
+            return
+        try:
+            self.root.update()
+            self.root.deiconify()
+            self.root.lift()
+        except Exception:
+            pass
+
+    def close(self):
+        """关闭窗口"""
+        self._closed = True
+        if self.root is not None:
+            try:
+                self.root.after(0, self.root.destroy)
+            except Exception:
+                pass
+
+    def wait(self, timeout_ms: int = 100):
+        """等待指定时间，同时处理 UI 事件"""
+        if self.root is None or self._closed:
+            return
+        try:
+            self.root.update()
+            self.root.after(timeout_ms)
+        except Exception:
+            pass
+
+
+def create_progress_callback(progress_window: Optional[ProgressWindow]):
+    """
+    创建进度回调函数。
+    返回一个可调用对象，接收 ProgressInfo 并更新窗口。
+    """
+    if progress_window is None:
+        def _noop_callback(*args, **kwargs):
+            pass
+        return _noop_callback
+
+    def _callback(info: ProgressInfo):
+        progress_window.update_progress(info)
+        if progress_window.is_cancelled():
+            raise RuntimeError('用户取消了操作')
+
+    return _callback
+
+
 def _ask_monitor_or_scheduler():
     """二级菜单：选择监控或调度"""
     if tk is not None:
@@ -1699,8 +2037,35 @@ else:
     ask_output_format = cli_ask_output_format
 
 
-def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_strategy='keep_unprocessed', output_formats=None):
+def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
+                 keep_strategy='keep_unprocessed', output_formats=None,
+                 progress_callback=None):
     logger = get_logger()
+
+    total_stages = 10
+
+    def _report(stage_idx, percent, message='', current_file='',
+                processed_files=0, total_files=0, processed_records=0, extra=None):
+        if progress_callback is None:
+            return
+        try:
+            info = ProgressInfo(
+                stage=ProgressWindow.STAGES[stage_idx][0] if stage_idx < len(ProgressWindow.STAGES) else '',
+                stage_index=stage_idx,
+                total_stages=total_stages,
+                percent=percent,
+                message=message or (ProgressWindow.STAGES[stage_idx][1] if stage_idx < len(ProgressWindow.STAGES) else ''),
+                current_file=current_file,
+                processed_files=processed_files,
+                total_files=total_files,
+                processed_records=processed_records,
+                extra=extra or {},
+            )
+            progress_callback(info)
+        except Exception:
+            pass
+
+    _report(0, 3, message='正在查找主体查找表并初始化...')
 
     lookup_file = find_lookup_file(script_dir)
     lookup_missing = lookup_file is None
@@ -1716,6 +2081,7 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
     if output_formats is None:
         output_formats = DEFAULT_OUTPUT_FORMATS
 
+    _report(0, 7, message='正在检查增量合并模式...')
     if incremental:
         summary_path = get_summary_table_path(script_dir)
         existing_keys, existing_records = load_existing_keys(summary_path)
@@ -1725,19 +2091,24 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
         else:
             logger.info('无历史数据，将以全量模式运行')
 
+    _report(0, 10, message='初始化完成，准备复制文件夹...')
+
     folder_name = os.path.basename(folder.rstrip('/\\'))
     parent_dir = os.path.dirname(folder.rstrip('/\\'))
     new_folder = os.path.join(parent_dir, f"{folder_name}＋检验版")
 
+    _report(1, 12, message=f'正在复制文件夹为「{folder_name}＋检验版」...')
     if os.path.exists(new_folder):
         logger.info('＋检验版文件夹已存在，先删除: %s', new_folder)
         shutil.rmtree(new_folder)
     shutil.copytree(folder, new_folder)
     logger.info('已复制文件夹为＋检验版: %s', new_folder)
 
+    _report(1, 18, message='正在扫描文件夹中的 Excel 文件...')
     excel_files = scan_excel_files(new_folder)
     if not excel_files:
         logger.warning('检验版文件夹中未发现任何 Excel 文件')
+        _report(9, 100, message='文件夹中未发现任何 Excel 文件')
         return ProcessingResult(
             lookup_missing=lookup_missing,
             folder_empty=True,
@@ -1745,13 +2116,30 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
             existing_record_count=len(existing_records),
         )
 
+    _report(1, 20, message=f'扫描完成，共发现 {len(excel_files)} 个 Excel 文件',
+            total_files=len(excel_files))
+
     all_rows = []
     processed_files = []
     unprocessed_files = []
     error_files = []
     file_process_details: List[FileProcessDetail] = []
+    success_count = 0
+    error_count = 0
 
-    for filepath in excel_files:
+    _report(3, 20, message='开始解析银行流水文件...',
+            total_files=len(excel_files),
+            extra={'success_count': 0, 'error_count': 0})
+
+    for idx, filepath in enumerate(excel_files):
+        _report(3, 20 + int((idx / len(excel_files)) * 40),
+                message=f'正在解析文件 {idx + 1}/{len(excel_files)}: {os.path.basename(filepath)}',
+                current_file=filepath,
+                processed_files=idx,
+                total_files=len(excel_files),
+                processed_records=len(all_rows),
+                extra={'success_count': success_count, 'error_count': error_count})
+
         bank = identify_bank(filepath)
         if bank and bank in BANK_PROCESSORS:
             try:
@@ -1760,10 +2148,12 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
                 all_rows.extend(rows)
                 processed_files.append(filepath)
                 file_process_details.append(detail)
+                success_count += 1
                 logger.info('成功处理文件: %s（%d 条记录，跳过 %d 行）',
                             filepath, len(rows), detail.skipped_rows)
             except Exception as e:
                 error_files.append((filepath, str(e)))
+                error_count += 1
                 file_process_details.append(FileProcessDetail(
                     file_path=filepath,
                     file_name=os.path.basename(filepath),
@@ -1782,16 +2172,25 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
                 error_message='无法识别银行类型' if not bank else f'银行「{bank}」无可用解析规则',
             ))
 
+    _report(3, 60, message=f'文件解析完成：成功 {success_count} 个，失败 {error_count} 个，未处理 {len(unprocessed_files)} 个',
+            processed_files=len(excel_files),
+            total_files=len(excel_files),
+            processed_records=len(all_rows),
+            extra={'success_count': success_count, 'error_count': error_count})
+
+    _report(4, 63, message='正在清理已处理文件...')
     delete_processed_files(excel_files, processed_files, error_files, unprocessed_files, strategy=keep_strategy)
 
     output_path = None
     output_paths: Dict[str, Any] = {}
     final_rows = []
 
+    _report(4, 66, message='正在合并数据并去重...')
     if all_rows:
         if actual_incremental:
             incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
             new_record_count = len(incremental_rows)
+            _report(5, 68, message='正在增量合并并导出总表...')
             output_paths = merge_and_export_summary(
                 existing_records, incremental_rows, script_dir, output_formats=output_formats
             )
@@ -1806,16 +2205,19 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
             base_dir = script_dir or get_output_dir()
             os.makedirs(base_dir, exist_ok=True)
 
+            _report(5, 68, message='正在导出 Excel 总表...')
             if OUTPUT_FORMAT_XLSX in output_formats:
                 xlsx_path = get_summary_table_path(script_dir)
                 df.to_excel(xlsx_path, index=False, engine='openpyxl')
                 output_paths[OUTPUT_FORMAT_XLSX] = xlsx_path
                 logger.info('Excel 总表输出完成: %s', xlsx_path)
 
+            _report(5, 73, message='正在导出 CSV 总表...')
             if OUTPUT_FORMAT_CSV in output_formats:
                 csv_path = export_summary_to_csv(merged_records, base_dir, columns)
                 output_paths[OUTPUT_FORMAT_CSV] = csv_path
 
+            _report(5, 76, message='正在按银行拆分子表...')
             if OUTPUT_FORMAT_SPLIT_BY_BANK in output_formats:
                 split_paths = export_summary_by_bank(merged_records, base_dir, columns)
                 output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK] = split_paths
@@ -1827,16 +2229,20 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
     else:
         logger.warning('未提取到任何银行流水记录')
         if existing_records:
+            _report(5, 70, message='无新数据，仅导出历史总表...')
             output_paths = merge_and_export_summary(
                 existing_records, [], script_dir, output_formats=output_formats
             )
             final_rows = existing_records
+
+    _report(5, 78, message='总表导出完成', processed_records=len(final_rows))
 
     if output_paths.get(OUTPUT_FORMAT_XLSX):
         output_path = output_paths[OUTPUT_FORMAT_XLSX]
     elif output_paths.get(OUTPUT_FORMAT_CSV):
         output_path = output_paths[OUTPUT_FORMAT_CSV]
 
+    _report(6, 80, message='正在应用对方户名黑白名单...')
     if final_rows:
         final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
         if _cp_tag_summary.get('tagged_count', 0) > 0:
@@ -1873,8 +2279,13 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
                             logger.info('已将黑白名单打标结果回写到银行子表: %s', sp)
                             break
 
+    _report(6, 82,
+            message=f'黑白名单处理完成：命中 {_cp_tag_summary.get("tagged_count", 0) if final_rows else 0} 条记录',
+            processed_records=len(final_rows))
+
     db_inserted = 0
     db_duplicates = 0
+    _report(7, 84, message='正在写入数据库...')
     if HAS_DATABASE and final_rows:
         try:
             if batch_id is None:
@@ -1892,8 +2303,19 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
         except Exception as e:
             logger.error('数据库持久化失败: %s', e, exc_info=True)
 
+    _report(7, 87,
+            message=f'数据库写入完成：新增 {db_inserted} 条，跳过重复 {db_duplicates} 条')
+
     subject_summary_path = None
     balance_check_path = None
+    duplicate_check_path = None
+    verification_report_path = None
+    verification_report_md_path = None
+
+    _report(8, 88, message='正在生成各类汇总与检验报告...')
+    report_count = 0
+    total_reports = 4
+
     if final_rows:
         try:
             output_dir = script_dir
@@ -1906,10 +2328,12 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
                 '运行模式': '增量合并' if actual_incremental else '全量覆盖',
                 '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
+            _report(8, 89, message='[1/4] 正在生成主体维度汇总分析...')
             subject_summary_path = generate_subject_summary_from_records(
                 final_rows, output_dir, source_info
             )
             if subject_summary_path:
+                report_count += 1
                 logger.info('主体维度汇总分析已自动生成: %s', subject_summary_path)
         except Exception as e:
             logger.error('自动生成主体汇总分析失败: %s', e, exc_info=True)
@@ -1926,16 +2350,17 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
                 '运行模式': '增量合并' if actual_incremental else '全量覆盖',
                 '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
+            _report(8, 91, message='[2/4] 正在生成余额连续性校验报告...')
             balance_check_path = generate_balance_check_from_records(
                 final_rows, output_dir, source_info
             )
             if balance_check_path:
+                report_count += 1
                 logger.info('余额连续性校验报告已自动生成: %s', balance_check_path)
         except Exception as e:
             logger.error('自动生成余额连续性校验报告失败: %s', e, exc_info=True)
             balance_check_path = None
 
-    duplicate_check_path = None
     if final_rows:
         try:
             output_dir = script_dir
@@ -1948,17 +2373,17 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
                 '运行模式': '增量合并' if actual_incremental else '全量覆盖',
                 '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
+            _report(8, 93, message='[3/4] 正在生成重复交易检测报告...')
             duplicate_check_path = generate_duplicate_check_from_records(
                 final_rows, output_dir, source_info
             )
             if duplicate_check_path:
+                report_count += 1
                 logger.info('重复交易检测报告已自动生成: %s', duplicate_check_path)
         except Exception as e:
             logger.error('自动生成重复交易检测报告失败: %s', e, exc_info=True)
             duplicate_check_path = None
 
-    verification_report_path = None
-    verification_report_md_path = None
     try:
         output_dir = script_dir
         if output_path:
@@ -1971,10 +2396,12 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
             '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             '操作人': get_current_user(),
         }
+        _report(8, 96, message='[4/4] 正在生成流水检验报告...')
         verification_report_path, verification_report_md_path = generate_verification_report_from_records(
             final_rows, file_process_details, output_dir, source_info
         )
         if verification_report_path:
+            report_count += 1
             logger.info('流水检验报告(Excel)已自动生成: %s', verification_report_path)
         if verification_report_md_path:
             logger.info('流水检验报告(Markdown)已自动生成: %s', verification_report_md_path)
@@ -1982,6 +2409,9 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
         logger.error('自动生成流水检验报告失败: %s', e, exc_info=True)
         verification_report_path = None
         verification_report_md_path = None
+
+    _report(8, 98, message=f'报告生成完成：共生成 {report_count}/{total_reports} 份报告')
+    _report(9, 100, message='全部处理完成！')
 
     return ProcessingResult(
         all_rows=final_rows,
@@ -2436,7 +2866,7 @@ def format_diff_message(diff_result):
 
 
 def run_pipeline_flow(script_dir):
-    """主流程：处理银行流水文件夹，输出总表"""
+    """主流程：处理银行流水文件夹，输出总表（带进度条，简化版本）"""
     logger = get_logger()
 
     folder = ask_directory('请选择银行流水文件夹')
@@ -2462,17 +2892,88 @@ def run_pipeline_flow(script_dir):
     output_formats = ask_output_format()
     logger.info('用户选择输出格式: %s', ', '.join(output_formats))
 
-    result = run_pipeline(folder, script_dir, incremental=incremental, keep_strategy=keep_strategy, output_formats=output_formats)
+    progress_win = None
+    pipeline_error = None
+    try:
+        if HAS_TKINTER and tk is not None:
+            try:
+                progress_win = ProgressWindow(title='银行流水处理进度')
+                progress_win.show()
+                logger.info('进度条窗口已创建')
+            except Exception as e:
+                logger.warning('进度条窗口创建失败: %s', e)
+                progress_win = None
+    except Exception:
+        progress_win = None
 
-    if result.lookup_missing:
-        show_warning(
-            '警告',
-            '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
-            '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
+    progress_cb = create_progress_callback(progress_win)
+
+    try:
+        result = run_pipeline(
+            folder, script_dir,
+            incremental=incremental,
+            keep_strategy=keep_strategy,
+            output_formats=output_formats,
+            progress_callback=progress_cb,
         )
 
-    msg = format_result_message(result)
-    show_info('完成' if result.all_rows else '提示', msg)
+        if result.lookup_missing and progress_win is None:
+            show_warning(
+                '警告',
+                '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
+                '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
+            )
+
+        msg = format_result_message(result)
+        if progress_win:
+            progress_win.set_completed(f'处理完成！共 {len(result.all_rows):,} 条记录'
+                                       if result.all_rows else '处理完成')
+            try:
+                for _ in range(30):
+                    progress_win.wait(50)
+                    if progress_win.is_cancelled() or progress_win._closed:
+                        break
+            except Exception:
+                pass
+        else:
+            show_info('完成' if result.all_rows else '提示', msg)
+
+    except RuntimeError as e:
+        if '用户取消了操作' in str(e):
+            pipeline_error = '用户已取消处理'
+            logger.info('用户取消了处理操作')
+            if progress_win:
+                progress_win.set_error('处理已取消')
+            else:
+                show_warning('已取消', '用户已取消处理操作')
+        else:
+            pipeline_error = str(e)
+            logger.error('处理失败: %s', e, exc_info=True)
+            if progress_win:
+                progress_win.set_error(f'处理出错: {str(e)[:80]}')
+            else:
+                show_warning('错误', f'处理出错：\n{e}')
+    except Exception as e:
+        pipeline_error = str(e)
+        logger.error('处理失败: %s', e, exc_info=True)
+        if progress_win:
+            progress_win.set_error(f'处理出错: {str(e)[:80]}')
+        else:
+            show_warning('错误', f'处理出错：\n{e}')
+    finally:
+        if progress_win:
+            try:
+                if pipeline_error:
+                    try:
+                        for _ in range(60):
+                            progress_win.wait(50)
+                            if progress_win._closed:
+                                break
+                    except Exception:
+                        pass
+                progress_win.close()
+            except Exception:
+                pass
 
 
 def run_diff_flow(script_dir):
@@ -5574,7 +6075,7 @@ def run_monitor_flow(script_dir):
 
 
 def run_pipeline_flow(script_dir):
-    """主流程：处理银行流水文件夹，输出总表"""
+    """主流程：处理银行流水文件夹，输出总表（带进度条）"""
     logger = get_logger()
 
     folder = ask_directory('请选择银行流水文件夹')
@@ -5612,68 +6113,176 @@ def run_pipeline_flow(script_dir):
         return
     logger.info('用户选择保留策略: %s', KEEP_STRATEGIES.get(keep_strategy, keep_strategy))
 
+    progress_win = None
+    try:
+        if HAS_TKINTER and tk is not None:
+            try:
+                progress_win = ProgressWindow(title='银行流水处理进度')
+                progress_win.show()
+                logger.info('进度条窗口已创建')
+            except Exception as e:
+                logger.warning('进度条窗口创建失败，将继续后台处理: %s', e)
+                progress_win = None
+    except Exception:
+        progress_win = None
+
+    progress_cb = create_progress_callback(progress_win)
+
     batch_id = None
     batch_manager = None
-    if HAS_BATCH_MANAGER:
-        try:
-            batch_manager = batch_module.get_batch_manager(script_dir)
-            operator = get_current_user()
-            batch_info = batch_manager.start_batch(input_folder=folder, operator=operator)
-            batch_id = batch_info.batch_id
-            logger.info('批次管理已启用，批次号: %s', batch_id)
-        except Exception as e:
-            logger.error('批次创建失败: %s', e, exc_info=True)
-            batch_manager = None
+    result = None
+    pipeline_error = None
 
-    with AuditLogger('pipeline', script_dir) as audit:
-        audit.record_input(folder)
-
-        result = run_pipeline(folder, script_dir, incremental=incremental, batch_id=batch_id, keep_strategy=keep_strategy)
-        audit.record_result(result)
-
-        if result.lookup_missing:
-            show_warning(
-                '警告',
-                '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
-                '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
-            )
-
-        msg = format_result_message(result)
-        msg += f'\n\n审计编号: {audit.audit_id}'
-        if change_result.change_id:
-            msg += f'\n配置变更编号: {change_result.change_id}'
-
-        if batch_manager and batch_id:
+    try:
+        if HAS_BATCH_MANAGER:
             try:
-                log_file = os.path.join(script_dir, 'bankcheck.log')
-                result_data = {
-                    'total_records': len(result.all_rows),
-                    'new_records': result.new_record_count,
-                    'duplicate_records': result.duplicate_record_count,
-                    'processed_files': result.processed_files,
-                    'unprocessed_files': result.unprocessed_files,
-                    'error_files': result.error_files,
-                    'incremental_mode': result.incremental_mode,
-                    'output_folder': folder,
-                    'summary_table_path': result.output_path,
-                    'log_file_path': log_file,
-                    'audit_id': audit.audit_id,
-                }
-                status = 'success' if result.all_rows or result.existing_record_count > 0 else 'warning'
-                if result.error_files:
-                    status = 'warning'
-                batch_manager.finish_batch(batch_id, result_data, status=status)
-                msg += f'\n批次号: {batch_id}'
-                msg += f'\n归档目录: {batch_info.batch_dir}'
+                batch_manager = batch_module.get_batch_manager(script_dir)
+                operator = get_current_user()
+                batch_info = batch_manager.start_batch(input_folder=folder, operator=operator)
+                batch_id = batch_info.batch_id
+                logger.info('批次管理已启用，批次号: %s', batch_id)
             except Exception as e:
-                logger.error('批次归档失败: %s', e, exc_info=True)
-                if batch_manager:
+                logger.error('批次创建失败: %s', e, exc_info=True)
+                batch_manager = None
+
+        with AuditLogger('pipeline', script_dir) as audit:
+            audit.record_input(folder)
+
+            result = run_pipeline(
+                folder, script_dir,
+                incremental=incremental,
+                batch_id=batch_id,
+                keep_strategy=keep_strategy,
+                progress_callback=progress_cb,
+            )
+            audit.record_result(result)
+
+            if result.lookup_missing and progress_win is None:
+                show_warning(
+                    '警告',
+                    '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
+                    '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
+                )
+
+            msg = format_result_message(result)
+            msg += f'\n\n审计编号: {audit.audit_id}'
+            if change_result.change_id:
+                msg += f'\n配置变更编号: {change_result.change_id}'
+
+            if batch_manager and batch_id:
+                try:
+                    log_file = os.path.join(script_dir, 'bankcheck.log')
+                    result_data = {
+                        'total_records': len(result.all_rows),
+                        'new_records': result.new_record_count,
+                        'duplicate_records': result.duplicate_record_count,
+                        'processed_files': result.processed_files,
+                        'unprocessed_files': result.unprocessed_files,
+                        'error_files': result.error_files,
+                        'incremental_mode': result.incremental_mode,
+                        'output_folder': folder,
+                        'summary_table_path': result.output_path,
+                        'log_file_path': log_file,
+                        'audit_id': audit.audit_id,
+                    }
+                    status = 'success' if result.all_rows or result.existing_record_count > 0 else 'warning'
+                    if result.error_files:
+                        status = 'warning'
+                    batch_manager.finish_batch(batch_id, result_data, status=status)
+                    msg += f'\n批次号: {batch_id}'
+                    msg += f'\n归档目录: {batch_info.batch_dir}'
+                except Exception as e:
+                    logger.error('批次归档失败: %s', e, exc_info=True)
+                    if batch_manager:
+                        try:
+                            batch_manager.finish_batch(batch_id, {}, status='failed', error_message=str(e))
+                        except Exception:
+                            pass
+
+            if progress_win:
+                progress_win.set_completed(f'处理完成！共 {len(result.all_rows):,} 条记录'
+                                           if result.all_rows else '处理完成')
+                try:
+                    for _ in range(30):
+                        progress_win.wait(50)
+                        if progress_win.is_cancelled() or progress_win._closed:
+                            break
+                except Exception:
+                    pass
+            else:
+                show_info('完成' if result.all_rows else '提示', msg)
+
+    except RuntimeError as e:
+        if '用户取消了操作' in str(e):
+            pipeline_error = '用户已取消处理'
+            logger.info('用户取消了处理操作')
+            if progress_win:
+                progress_win.set_error('处理已取消')
+                try:
+                    for _ in range(20):
+                        progress_win.wait(50)
+                        if progress_win._closed:
+                            break
+                except Exception:
+                    pass
+            else:
+                show_warning('已取消', '用户已取消处理操作')
+        else:
+            pipeline_error = str(e)
+            logger.error('主流程执行失败: %s', e, exc_info=True)
+            if progress_win:
+                progress_win.set_error(f'处理出错: {str(e)[:80]}')
+                try:
+                    for _ in range(30):
+                        progress_win.wait(50)
+                        if progress_win._closed:
+                            break
+                except Exception:
+                    pass
+            else:
+                show_warning('错误', f'处理出错：\n{e}')
+
+    except Exception as e:
+        pipeline_error = str(e)
+        logger.error('主流程执行失败: %s', e, exc_info=True)
+        if progress_win:
+            progress_win.set_error(f'处理出错: {str(e)[:80]}')
+            try:
+                for _ in range(30):
+                    progress_win.wait(50)
+                    if progress_win._closed:
+                        break
+            except Exception:
+                pass
+        else:
+            show_warning('错误', f'处理出错：\n{e}')
+
+    finally:
+        if progress_win:
+            try:
+                close_timer = None
+
+                def _schedule_close():
+                    nonlocal close_timer
                     try:
-                        batch_manager.finish_batch(batch_id, {}, status='failed', error_message=str(e))
+                        if progress_win and not progress_win._closed:
+                            progress_win.close()
                     except Exception:
                         pass
 
-        show_info('完成' if result.all_rows else '提示', msg)
+                if pipeline_error:
+                    try:
+                        close_timer = progress_win.root.after(3000, _schedule_close)
+                        for _ in range(60):
+                            progress_win.wait(50)
+                            if progress_win._closed:
+                                break
+                    except Exception:
+                        pass
+                progress_win.close()
+            except Exception:
+                pass
+        logger.info('主流程结束')
 
 
 def run_diff_flow(script_dir):
