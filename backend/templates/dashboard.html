@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>流水可视化看板 - 银行流水检验工具</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <div>
+                    <h1>📊 流水可视化看板</h1>
+                    <p class="subtitle">交互式数据分析与可视化展示</p>
+                </div>
+                <div class="header-actions">
+                    <button type="button" class="btn btn-secondary btn-refresh" onclick="loadAllData()">
+                        🔄 刷新数据
+                    </button>
+                    <a href="/upload" class="btn btn-link">返回上传</a>
+                </div>
+            </div>
+        </header>
+
+        <div class="loading-overlay" id="loadingOverlay">
+            <div class="loading-spinner"></div>
+            <p>正在加载数据...</p>
+        </div>
+
+        <div class="stats-bar" id="statsBar">
+            <div class="stat-card stat-primary">
+                <div class="stat-icon">📋</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statRecords">-</span>
+                    <span class="stat-label">总交易笔数</span>
+                </div>
+            </div>
+            <div class="stat-card stat-danger">
+                <div class="stat-icon">💸</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statPayment">-</span>
+                    <span class="stat-label">总支出金额</span>
+                </div>
+            </div>
+            <div class="stat-card stat-success">
+                <div class="stat-icon">💰</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statReceipt">-</span>
+                    <span class="stat-label">总收入金额</span>
+                </div>
+            </div>
+            <div class="stat-card stat-info">
+                <div class="stat-icon">📈</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statNet">-</span>
+                    <span class="stat-label">收支净额</span>
+                </div>
+            </div>
+            <div class="stat-card stat-warning">
+                <div class="stat-icon">🏢</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statSubjects">-</span>
+                    <span class="stat-label">主体数量</span>
+                </div>
+            </div>
+            <div class="stat-card stat-purple">
+                <div class="stat-icon">👥</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statCounterparties">-</span>
+                    <span class="stat-label">对方户名数量</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="date-range-info" id="dateRangeInfo" style="display: none;">
+            <span class="date-label">数据时间范围：</span>
+            <span class="date-value" id="dateRangeText"></span>
+        </div>
+
+        <div class="empty-state" id="emptyState" style="display: none;">
+            <div class="empty-icon">📭</div>
+            <h2>暂无数据</h2>
+            <p>请先上传银行流水文件并完成处理，然后刷新页面查看可视化分析</p>
+            <a href="/upload" class="btn btn-primary btn-lg">前往上传</a>
+        </div>
+
+        <div class="charts-container" id="chartsContainer">
+            <section class="chart-section">
+                <div class="section-header">
+                    <h2>📅 按月经费趋势</h2>
+                    <div class="section-actions">
+                        <select id="trendChartType" class="chart-type-select" onchange="renderMonthlyTrend()">
+                            <option value="line">折线图</option>
+                            <option value="bar">柱状图</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="chart-wrapper">
+                    <div id="monthlyTrendChart" class="chart"></div>
+                </div>
+            </section>
+
+            <section class="chart-section">
+                <div class="section-header">
+                    <h2>🏆 Top 对方户名</h2>
+                    <div class="section-actions">
+                        <select id="topCounterpartyLimit" class="chart-type-select" onchange="loadTopCounterparties()">
+                            <option value="5">Top 5</option>
+                            <option value="10" selected>Top 10</option>
+                            <option value="15">Top 15</option>
+                            <option value="20">Top 20</option>
+                        </select>
+                        <select id="topCounterpartySort" class="chart-type-select" onchange="renderTopCounterparties()">
+                            <option value="total">按交易总额</option>
+                            <option value="payment">按支出</option>
+                            <option value="receipt">按收入</option>
+                            <option value="count">按交易笔数</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="chart-wrapper">
+                    <div id="topCounterpartyChart" class="chart"></div>
+                </div>
+            </section>
+
+            <section class="chart-section">
+                <div class="section-header">
+                    <h2>🏢 各主体收支占比</h2>
+                    <div class="section-actions">
+                        <select id="subjectChartType" class="chart-type-select" onchange="renderSubjectBreakdown()">
+                            <option value="pie">饼图</option>
+                            <option value="donut" selected>环形图</option>
+                        </select>
+                        <select id="subjectDisplayMode" class="chart-type-select" onchange="renderSubjectBreakdown()">
+                            <option value="total">按交易总额</option>
+                            <option value="payment">按支出</option>
+                            <option value="receipt">按收入</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="chart-wrapper">
+                    <div id="subjectBreakdownChart" class="chart"></div>
+                </div>
+            </section>
+
+            <section class="chart-section">
+                <div class="section-header">
+                    <h2>📊 主体收支明细</h2>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table" id="subjectDetailTable">
+                        <thead>
+                            <tr>
+                                <th style="width: 60px;">序号</th>
+                                <th>主体名称</th>
+                                <th style="text-align: right;">交易笔数</th>
+                                <th style="text-align: right;">支出金额</th>
+                                <th style="text-align: right;">收入金额</th>
+                                <th style="text-align: right;">收支净额</th>
+                                <th style="text-align: right;">交易总额</th>
+                                <th style="text-align: right;">占比</th>
+                            </tr>
+                        </thead>
+                        <tbody id="subjectDetailBody">
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+        <footer class="footer">
+            <p>数据来源：银行流水总表 | 看板支持数据库和 Excel 双数据源 | 图表支持缩放、平移、导出等交互操作</p>
+        </footer>
+    </div>
+
+    <div id="toast" class="toast" style="display: none;"></div>
+
+    <script>
+    var monthlyTrendData = [];
+    var topCounterpartyData = [];
+    var subjectBreakdownData = [];
+    var summaryData = null;
+
+    var monthlyTrendChart = null;
+    var topCounterpartyChart = null;
+    var subjectBreakdownChart = null;
+
+    var chartColors = [
+        '#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de',
+        '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#48b4bd',
+        '#6e7074', '#516b91', '#59c4e6', '#edafda', '#93b7e3'
+    ];
+
+    function formatAmount(amount) {
+        if (amount === null || amount === undefined || isNaN(amount)) {
+            return '-';
+        }
+        var absAmount = Math.abs(amount);
+        if (absAmount >= 100000000) {
+            return (amount / 100000000).toFixed(2) + '亿';
+        } else if (absAmount >= 10000) {
+            return (amount / 10000).toFixed(2) + '万';
+        }
+        return amount.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function showToast(message, type) {
+        var toast = document.getElementById('toast');
+        toast.textContent = message;
+        toast.className = 'toast toast-' + (type || 'info');
+        toast.style.display = 'block';
+        setTimeout(function() {
+            toast.style.display = 'none';
+        }, 3000);
+    }
+
+    function showLoading() {
+        document.getElementById('loadingOverlay').style.display = 'flex';
+    }
+
+    function hideLoading() {
+        document.getElementById('loadingOverlay').style.display = 'none';
+    }
+
+    function initCharts() {
+        monthlyTrendChart = echarts.init(document.getElementById('monthlyTrendChart'));
+        topCounterpartyChart = echarts.init(document.getElementById('topCounterpartyChart'));
+        subjectBreakdownChart = echarts.init(document.getElementById('subjectBreakdownChart'));
+
+        window.addEventListener('resize', function() {
+            monthlyTrendChart && monthlyTrendChart.resize();
+            topCounterpartyChart && topCounterpartyChart.resize();
+            subjectBreakdownChart && subjectBreakdownChart.resize();
+        });
+    }
+
+    function loadAllData() {
+        showLoading();
+        Promise.all([
+            loadSummary(),
+            loadMonthlyTrend(),
+            loadTopCounterparties(),
+            loadSubjectBreakdown()
+        ]).then(function() {
+            hideLoading();
+        }).catch(function() {
+            hideLoading();
+            showToast('数据加载失败，请刷新重试', 'error');
+        });
+    }
+
+    function loadSummary() {
+        return fetch('/api/dashboard/summary')
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    summaryData = data.data;
+                    renderSummary(data.data);
+                    checkEmptyState(data.data);
+                }
+            });
+    }
+
+    function renderSummary(data) {
+        document.getElementById('statRecords').textContent = data.total_records.toLocaleString();
+        document.getElementById('statPayment').textContent = formatAmount(data.total_payment);
+        document.getElementById('statReceipt').textContent = formatAmount(data.total_receipt);
+        document.getElementById('statNet').textContent = formatAmount(data.net_amount);
+        document.getElementById('statSubjects').textContent = data.subject_count;
+        document.getElementById('statCounterparties').textContent = data.counterparty_count;
+
+        if (data.date_range.start && data.date_range.end) {
+            document.getElementById('dateRangeText').textContent =
+                data.date_range.start + ' 至 ' + data.date_range.end;
+            document.getElementById('dateRangeInfo').style.display = 'block';
+        }
+    }
+
+    function checkEmptyState(data) {
+        if (data.total_records === 0) {
+            document.getElementById('emptyState').style.display = 'block';
+            document.getElementById('chartsContainer').style.display = 'none';
+            document.getElementById('dateRangeInfo').style.display = 'none';
+        } else {
+            document.getElementById('emptyState').style.display = 'none';
+            document.getElementById('chartsContainer').style.display = 'block';
+        }
+    }
+
+    function loadMonthlyTrend() {
+        return fetch('/api/dashboard/monthly-trend')
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    monthlyTrendData = data.data;
+                    renderMonthlyTrend();
+                }
+            });
+    }
+
+    function renderMonthlyTrend() {
+        if (!monthlyTrendChart || monthlyTrendData.length === 0) return;
+
+        var chartType = document.getElementById('trendChartType').value;
+        var months = monthlyTrendData.map(function(item) { return item.month; });
+        var payments = monthlyTrendData.map(function(item) { return Math.abs(item.payment); });
+        var receipts = monthlyTrendData.map(function(item) { return item.receipt; });
+        var nets = monthlyTrendData.map(function(item) { return item.net; });
+
+        var option = {
+            tooltip: {
+                trigger: 'axis',
+                axisPointer: { type: 'cross' },
+                formatter: function(params) {
+                    var result = params[0].axisValue + '<br/>';
+                    params.forEach(function(p) {
+                        var value = p.seriesName === '支出' ? -p.value : p.value;
+                        result += p.marker + p.seriesName + ': ' + formatAmount(value) + '<br/>';
+                    });
+                    return result;
+                }
+            },
+            legend: {
+                data: ['支出', '收入', '净额'],
+                top: 0
+            },
+            grid: {
+                left: '3%',
+                right: '4%',
+                bottom: '3%',
+                top: 10,
+                containLabel: true
+            },
+            xAxis: {
+                type: 'category',
+                boundaryGap: chartType === 'bar',
+                data: months,
+                axisLabel: { rotate: 45 }
+            },
+            yAxis: {
+                type: 'value',
+                axisLabel: {
+                    formatter: function(value) {
+                        if (Math.abs(value) >= 100000000) {
+                            return (value / 100000000).toFixed(1) + '亿';
+                        } else if (Math.abs(value) >= 10000) {
+                            return (value / 10000).toFixed(1) + '万';
+                        }
+                        return value;
+                    }
+                }
+            },
+            dataZoom: [
+                { type: 'inside', start: 0, end: 100 },
+                { type: 'slider', start: 0, end: 100, height: 20, bottom: 10 }
+            ],
+            series: [
+                {
+                    name: '支出',
+                    type: chartType,
+                    data: payments,
+                    itemStyle: { color: '#ee6666' },
+                    areaStyle: chartType === 'line' ? { color: 'rgba(238, 102, 102, 0.1)' } : undefined,
+                    smooth: chartType === 'line',
+                    barMaxWidth: 30
+                },
+                {
+                    name: '收入',
+                    type: chartType,
+                    data: receipts,
+                    itemStyle: { color: '#91cc75' },
+                    areaStyle: chartType === 'line' ? { color: 'rgba(145, 204, 117, 0.1)' } : undefined,
+                    smooth: chartType === 'line',
+                    barMaxWidth: 30
+                },
+                {
+                    name: '净额',
+                    type: 'line',
+                    data: nets,
+                    itemStyle: { color: '#5470c6' },
+                    lineStyle: { type: 'dashed', width: 2 },
+                    smooth: true
+                }
+            ]
+        };
+
+        monthlyTrendChart.setOption(option, true);
+    }
+
+    function loadTopCounterparties() {
+        var limit = document.getElementById('topCounterpartyLimit').value;
+        return fetch('/api/dashboard/top-counterparties?limit=' + limit)
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    topCounterpartyData = data.data;
+                    renderTopCounterparties();
+                }
+            });
+    }
+
+    function renderTopCounterparties() {
+        if (!topCounterpartyChart || topCounterpartyData.length === 0) return;
+
+        var sortBy = document.getElementById('topCounterpartySort').value;
+        var sortedData = [...topCounterpartyData].sort(function(a, b) {
+            if (sortBy === 'payment') return a.payment - b.payment;
+            if (sortBy === 'receipt') return b.receipt - a.receipt;
+            if (sortBy === 'count') return b.count - a.count;
+            return b.total - a.total;
+        });
+
+        var names = sortedData.map(function(item) { return item.name; }).reverse();
+        var payments = sortedData.map(function(item) { return Math.abs(item.payment); }).reverse();
+        var receipts = sortedData.map(function(item) { return item.receipt; }).reverse();
+
+        var option = {
+            tooltip: {
+                trigger: 'axis',
+                axisPointer: { type: 'shadow' },
+                formatter: function(params) {
+                    var result = params[0].axisValue + '<br/>';
+                    var total = 0;
+                    params.forEach(function(p) {
+                        var value = p.seriesName === '支出' ? -p.value : p.value;
+                        result += p.marker + p.seriesName + ': ' + formatAmount(value) + '<br/>';
+                        total += p.value;
+                    });
+                    result += '<strong>合计: ' + formatAmount(total) + '</strong>';
+                    return result;
+                }
+            },
+            legend: {
+                data: ['支出', '收入'],
+                top: 0
+            },
+            grid: {
+                left: '3%',
+                right: '4%',
+                bottom: '3%',
+                top: 30,
+                containLabel: true
+            },
+            xAxis: {
+                type: 'value',
+                axisLabel: {
+                    formatter: function(value) {
+                        if (value >= 100000000) {
+                            return (value / 100000000).toFixed(1) + '亿';
+                        } else if (value >= 10000) {
+                            return (value / 10000).toFixed(1) + '万';
+                        }
+                        return value;
+                    }
+                }
+            },
+            yAxis: {
+                type: 'category',
+                data: names,
+                axisLabel: {
+                    formatter: function(value) {
+                        return value.length > 15 ? value.substr(0, 15) + '...' : value;
+                    }
+                }
+            },
+            dataZoom: [
+                { type: 'inside', orient: 'vertical', start: 0, end: 100 }
+            ],
+            series: [
+                {
+                    name: '支出',
+                    type: 'bar',
+                    stack: 'total',
+                    data: payments,
+                    itemStyle: { color: '#ee6666' },
+                    barMaxWidth: 20,
+                    label: {
+                        show: true,
+                        position: 'insideLeft',
+                        formatter: function(params) {
+                            return params.value > 0 ? formatAmount(-params.value) : '';
+                        },
+                        fontSize: 10,
+                        color: '#fff'
+                    }
+                },
+                {
+                    name: '收入',
+                    type: 'bar',
+                    stack: 'total',
+                    data: receipts,
+                    itemStyle: { color: '#91cc75' },
+                    barMaxWidth: 20,
+                    label: {
+                        show: true,
+                        position: 'insideRight',
+                        formatter: function(params) {
+                            return params.value > 0 ? formatAmount(params.value) : '';
+                        },
+                        fontSize: 10,
+                        color: '#fff'
+                    }
+                }
+            ]
+        };
+
+        topCounterpartyChart.setOption(option, true);
+    }
+
+    function loadSubjectBreakdown() {
+        return fetch('/api/dashboard/subject-breakdown')
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    subjectBreakdownData = data.data;
+                    renderSubjectBreakdown();
+                    renderSubjectDetailTable(data.data);
+                }
+            });
+    }
+
+    function renderSubjectBreakdown() {
+        if (!subjectBreakdownChart || subjectBreakdownData.length === 0) return;
+
+        var chartType = document.getElementById('subjectChartType').value;
+        var displayMode = document.getElementById('subjectDisplayMode').value;
+
+        var pieData = subjectBreakdownData.map(function(item, index) {
+            var value = displayMode === 'payment' ? Math.abs(item.payment) :
+                       displayMode === 'receipt' ? item.receipt :
+                       item.total;
+            return {
+                name: item.name,
+                value: value,
+                itemStyle: { color: chartColors[index % chartColors.length] }
+            };
+        }).filter(function(item) { return item.value > 0; });
+
+        var total = pieData.reduce(function(sum, item) { return sum + item.value; }, 0);
+
+        var option = {
+            tooltip: {
+                trigger: 'item',
+                formatter: function(params) {
+                    var percent = ((params.value / total) * 100).toFixed(2);
+                    return params.marker + params.name + '<br/>' +
+                           '金额: ' + formatAmount(params.value) + '<br/>' +
+                           '占比: ' + percent + '%';
+                }
+            },
+            legend: {
+                type: 'scroll',
+                orient: 'vertical',
+                right: 10,
+                top: 20,
+                bottom: 20,
+                data: pieData.map(function(item) { return item.name; }),
+                textStyle: { fontSize: 11 }
+            },
+            grid: {
+                left: '3%',
+                right: '15%',
+                bottom: '3%',
+                containLabel: true
+            },
+            series: [
+                {
+                    name: displayMode === 'payment' ? '支出' : displayMode === 'receipt' ? '收入' : '总额',
+                    type: 'pie',
+                    radius: chartType === 'donut' ? ['35%', '65%'] : '65%',
+                    center: ['40%', '50%'],
+                    data: pieData,
+                    avoidLabelOverlap: true,
+                    itemStyle: {
+                        borderRadius: 6,
+                        borderColor: '#fff',
+                        borderWidth: 2
+                    },
+                    label: {
+                        show: true,
+                        formatter: function(params) {
+                            var percent = ((params.value / total) * 100).toFixed(1);
+                            return params.name.length > 8 ? params.name.substr(0, 8) + '...\n' + percent + '%' :
+                                   params.name + '\n' + percent + '%';
+                        },
+                        fontSize: 11
+                    },
+                    emphasis: {
+                        itemStyle: {
+                            shadowBlur: 10,
+                            shadowOffsetX: 0,
+                            shadowColor: 'rgba(0, 0, 0, 0.5)'
+                        },
+                        scale: true,
+                        scaleSize: 8
+                    },
+                    labelLine: {
+                        show: true,
+                        length: 15,
+                        length2: 10
+                    }
+                }
+            ]
+        };
+
+        subjectBreakdownChart.setOption(option, true);
+    }
+
+    function renderSubjectDetailTable(data) {
+        var tbody = document.getElementById('subjectDetailBody');
+        if (!data || data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无数据</td></tr>';
+            return;
+        }
+
+        var grandTotal = data.reduce(function(sum, item) { return sum + item.total; }, 0);
+
+        var html = '';
+        data.forEach(function(item, index) {
+            var percent = grandTotal > 0 ? ((item.total / grandTotal) * 100).toFixed(2) : '0.00';
+            var netClass = item.net > 0 ? 'amount-positive' : item.net < 0 ? 'amount-negative' : '';
+
+            html += '<tr>' +
+                '<td>' + (index + 1) + '</td>' +
+                '<td><strong>' + item.name + '</strong></td>' +
+                '<td style="text-align: right;">' + item.count.toLocaleString() + '</td>' +
+                '<td style="text-align: right;" class="amount-negative">' + formatAmount(item.payment) + '</td>' +
+                '<td style="text-align: right;" class="amount-positive">' + formatAmount(item.receipt) + '</td>' +
+                '<td style="text-align: right;" class="' + netClass + '">' + formatAmount(item.net) + '</td>' +
+                '<td style="text-align: right;">' + formatAmount(item.total) + '</td>' +
+                '<td style="text-align: right;">' +
+                    '<div class="progress-bar-cell">' +
+                        '<div class="progress-bar-track">' +
+                            '<div class="progress-bar-fill" style="width: ' + Math.min(parseFloat(percent), 100) + '%;"></div>' +
+                        '</div>' +
+                        '<span class="progress-bar-text">' + percent + '%</span>' +
+                    '</div>' +
+                '</td>' +
+                '</tr>';
+        });
+
+        tbody.innerHTML = html;
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        initCharts();
+        loadAllData();
+    });
+    </script>
+</body>
+</html>

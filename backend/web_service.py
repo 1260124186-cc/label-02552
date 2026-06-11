@@ -377,6 +377,11 @@ def voucher_attachments_page():
     return render_template('voucher_attachments.html')
 
 
+@app.route('/dashboard')
+def dashboard_page():
+    return render_template('dashboard.html')
+
+
 def _safe_filename(filename):
     safe = filename.replace('\\', '/').replace('../', '').replace('..\\', '')
     safe = os.path.basename(safe)
@@ -951,6 +956,297 @@ def not_found(error):
 def internal_error(error):
     logger.error('服务器内部错误: %s', error, exc_info=True)
     return jsonify({'success': False, 'message': '服务器内部错误'}), 500
+
+
+# ──────────────────────────────────────────────
+# 流水可视化看板 API
+# ──────────────────────────────────────────────
+
+def _get_dashboard_data_source():
+    """获取看板数据源，优先从数据库读取，其次从总表文件读取"""
+    summary_path = os.path.join(BACKEND_DIR, '银行流水总表.xlsx')
+
+    try:
+        db = db_module.SQLiteBackend()
+        db.connect()
+        stats = db.get_statistics()
+        if stats.get('总记录数', 0) > 0:
+            return {'type': 'database', 'db': db, 'summary_path': summary_path}
+    except Exception as e:
+        logger.warning('数据库连接失败: %s', e)
+
+    if os.path.exists(summary_path):
+        return {'type': 'excel', 'db': None, 'summary_path': summary_path}
+
+    return {'type': 'none', 'db': None, 'summary_path': summary_path}
+
+
+def _load_transaction_data():
+    """加载交易数据，优先从数据库，其次从 Excel"""
+    source = _get_dashboard_data_source()
+
+    if source['type'] == 'database':
+        result = source['db'].query_records(limit=100000)
+        records = [r.to_dict() for r in result.records]
+        return records
+
+    if source['type'] == 'excel':
+        try:
+            import pandas as pd
+            df = pd.read_excel(source['summary_path'], engine='openpyxl')
+            df = df.where(pd.notnull(df), None)
+            return df.to_dict(orient='records')
+        except Exception as e:
+            logger.error('读取总表 Excel 失败: %s', e, exc_info=True)
+            return []
+
+    return []
+
+
+def _parse_date(date_val):
+    """解析日期，返回 YYYY-MM 格式字符串"""
+    if date_val is None:
+        return None
+    try:
+        date_str = str(date_val).strip()
+        if not date_str:
+            return None
+
+        match = re.search(r'(\d{4})[-/](\d{2})', date_str)
+        if match:
+            year = int(match.group(1))
+            month = int(match.group(2))
+            if 2000 <= year <= 2100 and 1 <= month <= 12:
+                return f"{year}-{month:02d}"
+
+        if len(date_str) == 8 and date_str.isdigit():
+            year = int(date_str[:4])
+            month = int(date_str[4:6])
+            if 2000 <= year <= 2100 and 1 <= month <= 12:
+                return f"{year}-{month:02d}"
+
+        if hasattr(date_val, 'strftime'):
+            return date_val.strftime('%Y-%m')
+    except Exception:
+        pass
+    return None
+
+
+def _to_float(val):
+    """安全转换为浮点数"""
+    if val is None:
+        return 0.0
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+@app.route('/api/dashboard/summary', methods=['GET'])
+def api_dashboard_summary():
+    """获取看板总体统计数据"""
+    try:
+        records = _load_transaction_data()
+
+        if not records:
+            return jsonify({
+                'success': True,
+                'data': {
+                    'total_records': 0,
+                    'total_payment': 0,
+                    'total_receipt': 0,
+                    'net_amount': 0,
+                    'subject_count': 0,
+                    'counterparty_count': 0,
+                    'date_range': {'start': None, 'end': None}
+                }
+            })
+
+        total_payment = 0.0
+        total_receipt = 0.0
+        subjects = set()
+        counterparties = set()
+        dates = []
+
+        for r in records:
+            payment = _to_float(r.get('付款'))
+            receipt = _to_float(r.get('收款'))
+
+            if payment < 0:
+                total_payment += payment
+            if receipt > 0:
+                total_receipt += receipt
+
+            if r.get('主体'):
+                subjects.add(r.get('主体'))
+            if r.get('对方户名'):
+                counterparties.add(r.get('对方户名'))
+
+            month = _parse_date(r.get('交易日期'))
+            if month:
+                dates.append(month)
+
+        dates_sorted = sorted(dates) if dates else []
+
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_records': len(records),
+                'total_payment': round(total_payment, 2),
+                'total_receipt': round(total_receipt, 2),
+                'net_amount': round(total_payment + total_receipt, 2),
+                'subject_count': len(subjects),
+                'counterparty_count': len(counterparties),
+                'date_range': {
+                    'start': dates_sorted[0] if dates_sorted else None,
+                    'end': dates_sorted[-1] if dates_sorted else None
+                }
+            }
+        })
+
+    except Exception as e:
+        logger.error('获取看板统计数据失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/dashboard/monthly-trend', methods=['GET'])
+def api_dashboard_monthly_trend():
+    """获取按月经费趋势数据"""
+    try:
+        records = _load_transaction_data()
+
+        if not records:
+            return jsonify({'success': True, 'data': []})
+
+        monthly_data = {}
+
+        for r in records:
+            month = _parse_date(r.get('交易日期'))
+            if not month:
+                continue
+
+            if month not in monthly_data:
+                monthly_data[month] = {'month': month, 'payment': 0.0, 'receipt': 0.0, 'count': 0}
+
+            payment = _to_float(r.get('付款'))
+            receipt = _to_float(r.get('收款'))
+
+            if payment < 0:
+                monthly_data[month]['payment'] += payment
+            if receipt > 0:
+                monthly_data[month]['receipt'] += receipt
+            monthly_data[month]['count'] += 1
+
+        result = sorted(monthly_data.values(), key=lambda x: x['month'])
+        for item in result:
+            item['payment'] = round(item['payment'], 2)
+            item['receipt'] = round(item['receipt'], 2)
+            item['net'] = round(item['payment'] + item['receipt'], 2)
+
+        return jsonify({'success': True, 'data': result})
+
+    except Exception as e:
+        logger.error('获取月度趋势数据失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/dashboard/top-counterparties', methods=['GET'])
+def api_dashboard_top_counterparties():
+    """获取 Top 对方户名数据"""
+    try:
+        top_n = int(request.args.get('limit', 10))
+        records = _load_transaction_data()
+
+        if not records:
+            return jsonify({'success': True, 'data': []})
+
+        counterparty_data = {}
+
+        for r in records:
+            cp = r.get('对方户名')
+            if not cp or str(cp).strip() == '':
+                continue
+
+            cp = str(cp).strip()
+            if cp not in counterparty_data:
+                counterparty_data[cp] = {
+                    'name': cp,
+                    'payment': 0.0,
+                    'receipt': 0.0,
+                    'count': 0
+                }
+
+            payment = _to_float(r.get('付款'))
+            receipt = _to_float(r.get('收款'))
+
+            if payment < 0:
+                counterparty_data[cp]['payment'] += payment
+            if receipt > 0:
+                counterparty_data[cp]['receipt'] += receipt
+            counterparty_data[cp]['count'] += 1
+
+        result = list(counterparty_data.values())
+        for item in result:
+            item['total'] = round(abs(item['payment']) + item['receipt'], 2)
+            item['payment'] = round(item['payment'], 2)
+            item['receipt'] = round(item['receipt'], 2)
+
+        result.sort(key=lambda x: x['total'], reverse=True)
+        result = result[:top_n]
+
+        return jsonify({'success': True, 'data': result})
+
+    except Exception as e:
+        logger.error('获取 Top 对方户名数据失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/dashboard/subject-breakdown', methods=['GET'])
+def api_dashboard_subject_breakdown():
+    """获取各主体收支占比数据"""
+    try:
+        records = _load_transaction_data()
+
+        if not records:
+            return jsonify({'success': True, 'data': []})
+
+        subject_data = {}
+
+        for r in records:
+            subject = r.get('主体') or '未知主体'
+            subject = str(subject).strip() or '未知主体'
+
+            if subject not in subject_data:
+                subject_data[subject] = {
+                    'name': subject,
+                    'payment': 0.0,
+                    'receipt': 0.0,
+                    'count': 0
+                }
+
+            payment = _to_float(r.get('付款'))
+            receipt = _to_float(r.get('收款'))
+
+            if payment < 0:
+                subject_data[subject]['payment'] += payment
+            if receipt > 0:
+                subject_data[subject]['receipt'] += receipt
+            subject_data[subject]['count'] += 1
+
+        result = list(subject_data.values())
+        for item in result:
+            item['payment'] = round(item['payment'], 2)
+            item['receipt'] = round(item['receipt'], 2)
+            item['net'] = round(item['payment'] + item['receipt'], 2)
+            item['total'] = round(abs(item['payment']) + item['receipt'], 2)
+
+        result.sort(key=lambda x: x['total'], reverse=True)
+
+        return jsonify({'success': True, 'data': result})
+
+    except Exception as e:
+        logger.error('获取主体收支占比数据失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 
 def main():
