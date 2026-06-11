@@ -966,8 +966,8 @@ def _safe_get_cell_value(ws, cell_ref: str):
 def _identify_bank_by_content(filepath: str) -> Optional[str]:
     """
     根据 Excel 内容辅助识别银行：
-    - 检查 B1 单元格是否有账号（东亚银行特征）
-    - 检查 B2 单元格是否有账号（北京银行特征）
+    从各银行配置读取 account_cell，逐一检查对应单元格是否包含账号格式内容。
+    当且仅当唯一匹配一个银行时返回结果，否则返回 None。
     """
     logger = get_logger()
     if not os.path.isfile(filepath):
@@ -982,31 +982,27 @@ def _identify_bank_by_content(filepath: str) -> Optional[str]:
             if ws is None:
                 return None
 
-            b1_val = _safe_get_cell_value(ws, 'B1')
-            b2_val = _safe_get_cell_value(ws, 'B2')
-
             def _cell_to_str(val):
                 if val is None:
                     return ''
                 return _normalize_width(str(val).strip())
-
-            b1_str = _cell_to_str(b1_val)
-            b2_str = _cell_to_str(b2_val)
 
             looks_like_account = lambda s: bool(s) and bool(re.match(r'^\d{6,}$', s))
 
             config = get_bank_config()
             bank_names = config.get_all_bank_names()
 
+            cell_values = {}
             matched = []
             for bank_name in bank_names:
                 rule = config.get_rule(bank_name)
                 if not rule:
                     continue
                 cell = rule.account_cell.upper()
-                if cell == 'B1' and looks_like_account(b1_str):
-                    matched.append(bank_name)
-                elif cell == 'B2' and looks_like_account(b2_str):
+                if cell not in cell_values:
+                    raw = _safe_get_cell_value(ws, cell)
+                    cell_values[cell] = _cell_to_str(raw)
+                if looks_like_account(cell_values[cell]):
                     matched.append(bank_name)
 
             if len(matched) == 1:
@@ -1508,6 +1504,12 @@ def reload_bank_processors():
 # 直接从 BANK_PROCESSORS 中获取，确保是同一个函数实例
 process_beijing_bank = BANK_PROCESSORS.get('北京银行', _create_bank_processor('北京银行'))
 process_east_asia_bank = BANK_PROCESSORS.get('东亚银行', _create_bank_processor('东亚银行'))
+process_icbc_bank = BANK_PROCESSORS.get('工商银行', _create_bank_processor('工商银行'))
+process_ccb_bank = BANK_PROCESSORS.get('建设银行', _create_bank_processor('建设银行'))
+process_cmb_bank = BANK_PROCESSORS.get('招商银行', _create_bank_processor('招商银行'))
+process_industrial_commercial_bank = process_icbc_bank
+process_construction_bank = process_ccb_bank
+process_merchants_bank = process_cmb_bank
 
 
 # ──────────────────────────────────────────────

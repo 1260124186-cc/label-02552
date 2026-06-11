@@ -91,6 +91,123 @@ BANK_TEST_CONFIGS = {
             'expected_keys': {'唯一id', '银行', '银行账号', '主体', '交易日期', '付款', '收款', '摘要', '对方户名', '余额', '交易流水号'},
         },
     },
+    '工商银行': {
+        'bank_name': '工商银行',
+        'account': '6222021234567890123',
+        'header_row': 5,
+        'start_row': 6,
+        'sheet_title': '交易明细',
+        'headers': [
+            '交易日期', '交易时间', '币种', '收入金额', '支出金额',
+            '余额', '对方户名', '摘要', '备注', '交易流水号',
+        ],
+        'cells': {'A1': '中国工商银行账户明细', 'B4': '{account}', 'A3': '查询期间：2024-01-01 至 2024-01-31'},
+        'default_rows': [
+            ['2024-01-02', '10:00:00', 'CNY', None, 45000, 1200000, '供应商甲公司', '材料采购付款', None, 'ICBC20240102001'],
+            ['2024-01-09', '11:30:00', 'CNY', 75000, None, 1275000, '客户乙公司', '销售款入账', None, 'ICBC20240109002'],
+        ],
+        'skip_empty_date_rows': [
+            ['2024-01-02', '10:00:00', 'CNY', None, 45000, 1200000, '供应商甲', '付款', None, 'ICBC001'],
+            [None, None, None, None, None, None, None, None, None, None],
+            ['2024-01-09', '11:30:00', 'CNY', 75000, None, 1275000, '客户乙', '收款', None, 'ICBC002'],
+        ],
+        'expected': {
+            'row_count': 2,
+            'bank_name': '工商银行',
+            'account': '6222021234567890123',
+            'subject': '深圳ZZ科技有限公司',
+            'first_payment': -45000.0,
+            'second_receipt': 75000.0,
+            'first_receipt': None,
+            'second_payment': None,
+            'trade_dates': ['2024-01-02', '2024-01-09'],
+            'first_summary': '材料采购付款',
+            'first_counterpart': '供应商甲公司',
+            'second_counterpart': '客户乙公司',
+            'first_balance': 1200000,
+            'second_balance': 1275000,
+            'transaction_ids': ['ICBC20240102001', 'ICBC20240109002'],
+            'expected_keys': {'唯一id', '银行', '银行账号', '主体', '交易日期', '付款', '收款', '摘要', '对方户名', '余额', '交易流水号'},
+        },
+    },
+    '建设银行': {
+        'bank_name': '建设银行',
+        'account': '6227001234567890123',
+        'header_row': 3,
+        'start_row': 4,
+        'sheet_title': '交易明细',
+        'headers': [
+            '序号', '交易日期', '交易时间', '收入金额', '支出金额',
+            '余额', '对方户名', '对方账号', '摘要', '备注', '交易流水号',
+        ],
+        'cells': {'A1': '账户信息', 'A2': '{account}', 'A3': '中国建设银行个人活期账户交易明细'},
+        'default_rows': [
+            [1, '2024-01-04', '08:45:00', None, 32000, 968000, '供应商丙公司', '62170000001', '项目工程款', None, 'CCB20240104001'],
+            [2, '2024-01-11', '16:20:00', 58000, None, 1026000, '客户丁公司', '62170000002', '合同回款', None, 'CCB20240111002'],
+        ],
+        'skip_empty_date_rows': [
+            [1, '2024-01-04', '08:45:00', None, 32000, 968000, '供应商丙', '6217001', '工程款', None, 'CCB001'],
+            [None, None, None, None, None, None, None, None, None, None, None],
+            [2, '2024-01-11', '16:20:00', 58000, None, 1026000, '客户丁', '6217002', '回款', None, 'CCB002'],
+        ],
+        'expected': {
+            'row_count': 2,
+            'bank_name': '建设银行',
+            'account': '6227001234567890123',
+            'subject': '广州WW建设集团有限公司',
+            'first_payment': -32000.0,
+            'second_receipt': 58000.0,
+            'first_receipt': None,
+            'second_payment': None,
+            'trade_dates': ['2024-01-04', '2024-01-11'],
+            'first_summary': '项目工程款',
+            'first_counterpart': '供应商丙公司',
+            'second_counterpart': '客户丁公司',
+            'first_balance': 968000,
+            'second_balance': 1026000,
+            'transaction_ids': ['CCB20240104001', 'CCB20240111002'],
+            'expected_keys': {'唯一id', '银行', '银行账号', '主体', '交易日期', '付款', '收款', '摘要', '对方户名', '余额', '交易流水号'},
+        },
+    },
+    '招商银行': {
+        'bank_name': '招商银行',
+        'account': '6225881234567890',
+        'header_row': 5,
+        'start_row': 6,
+        'sheet_title': '活期交易明细',
+        'headers': [
+            '交易日期', '交易时间', '收入金额', '支出金额', '余额',
+            '币种', '对方账号', '对方行名', '对方户名', '摘要', '备注', '交易流水号',
+        ],
+        'cells': {'A1': '招商银行', 'A2': '账户活期交易明细查询', 'B3': '{account}', 'A4': '查询周期：2024-01-01 至 2024-01-31'},
+        'default_rows': [
+            ['2024-01-06', '09:15:00', None, 28000, 750000, 'CNY', '622600000001', '民生银行', '供应商戊公司', '采购设备款', None, 'CMB20240106001'],
+            ['2024-01-13', '15:40:00', 92000, None, 842000, 'CNY', '622600000002', '浦发银行', '客户己公司', '服务收入', None, 'CMB20240113002'],
+        ],
+        'skip_empty_date_rows': [
+            ['2024-01-06', '09:15:00', None, 28000, 750000, 'CNY', '6226001', '民生银行', '供应商戊', '采购款', None, 'CMB001'],
+            [None, None, None, None, None, None, None, None, None, None, None, None],
+            ['2024-01-13', '15:40:00', 92000, None, 842000, 'CNY', '6226002', '浦发银行', '客户己', '收入款', None, 'CMB002'],
+        ],
+        'expected': {
+            'row_count': 2,
+            'bank_name': '招商银行',
+            'account': '6225881234567890',
+            'subject': '杭州VV网络技术有限公司',
+            'first_payment': -28000.0,
+            'second_receipt': 92000.0,
+            'first_receipt': None,
+            'second_payment': None,
+            'trade_dates': ['2024-01-06', '2024-01-13'],
+            'first_summary': '采购设备款',
+            'first_counterpart': '供应商戊公司',
+            'second_counterpart': '客户己公司',
+            'first_balance': 750000,
+            'second_balance': 842000,
+            'transaction_ids': ['CMB20240106001', 'CMB20240113002'],
+            'expected_keys': {'唯一id', '银行', '银行账号', '主体', '交易日期', '付款', '收款', '摘要', '对方户名', '余额', '交易流水号'},
+        },
+    },
 }
 
 
@@ -225,3 +342,15 @@ def _create_lookup_table(path, mappings=None):
     wb.save(path)
     wb.close()
     return path
+
+
+def _create_lookup_table_all_banks(path):
+    """创建包含全部5个银行映射的查找表"""
+    mappings = [
+        ('北京XX科技有限公司', '01090312345678901'),
+        ('上海YY贸易有限公司', '38812345678'),
+        ('深圳ZZ科技有限公司', '6222021234567890123'),
+        ('广州WW建设集团有限公司', '6227001234567890123'),
+        ('杭州VV网络技术有限公司', '6225881234567890'),
+    ]
+    return _create_lookup_table(path, mappings)

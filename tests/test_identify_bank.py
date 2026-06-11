@@ -22,7 +22,7 @@ class TestIdentifyBank:
         assert identify_bank('/some/path/东亚银行流水.xlsx') == '东亚银行'
 
     def test_unknown_bank(self):
-        assert identify_bank('/some/path/招商银行_流水.xlsx') is None
+        assert identify_bank('/some/path/某某未知银行_流水.xlsx') is None
 
     def test_no_bank_name(self):
         assert identify_bank('/some/path/流水文件.xlsx') is None
