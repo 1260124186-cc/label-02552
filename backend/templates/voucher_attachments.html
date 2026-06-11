@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>凭证附件关联管理</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+        .tag-invoice { background: #e3f2fd; color: #1565c0; }
+        .tag-receipt { background: #e8f5e9; color: #2e7d32; }
+        .tag-other { background: #fff3e0; color: #e65100; }
+        .stats-bar { grid-template-columns: repeat(4, 1fr); }
+        .filter-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .filter-bar select, .filter-bar input { padding: 8px 12px; border: 2px solid #e9ecef; border-radius: 8px; font-size: 14px; }
+        .filter-bar select:focus, .filter-bar input:focus { outline: none; border-color: #4facfe; }
+        .btn-open { background: linear-gradient(135deg, #43cea2 0%, #185a9d 100%); color: white; }
+        .btn-open:hover { opacity: 0.9; }
+        .btn-open-all { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .btn-open-all:hover { opacity: 0.9; }
+        .path-cell { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 12px; color: #555; }
+        .tid-cell { font-family: monospace; font-size: 13px; font-weight: 500; color: #333; }
+        .form-group textarea { width: 100%; padding: 10px 14px; border: 2px solid #e9ecef; border-radius: 8px; font-size: 14px; resize: vertical; min-height: 60px; }
+        .form-group textarea:focus { outline: none; border-color: #4facfe; }
+        .form-group select { width: 100%; padding: 10px 14px; border: 2px solid #e9ecef; border-radius: 8px; font-size: 14px; background: white; }
+        .form-group select:focus { outline: none; border-color: #4facfe; }
+        .action-cell { white-space: nowrap; }
+        .action-cell button { margin-right: 4px; }
+        .search-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+        .search-row input { flex: 1; min-width: 200px; }
+        @media (max-width: 768px) {
+            .stats-bar { grid-template-columns: repeat(2, 1fr); }
+            .filter-bar { flex-direction: column; align-items: stretch; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>凭证附件关联管理</h1>
+            <p class="subtitle">维护交易流水号 → 发票/回单图片路径映射表，一键打开原始凭证附件</p>
+        </header>
+
+        <div id="flashArea"></div>
+
+        <div class="stats-bar" id="statsBar">
+            <div class="stat-card">
+                <span class="stat-value" id="statTotal">0</span>
+                <span class="stat-label">附件总数</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statInvoice">0</span>
+                <span class="stat-label">发票</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statReceipt">0</span>
+                <span class="stat-label">回单</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statOther">0</span>
+                <span class="stat-label">其他</span>
+            </div>
+        </div>
+
+        <div class="toolbar">
+            <div class="search-row">
+                <input type="text" id="transactionIdSearch" placeholder="按交易流水号搜索..." style="padding:8px 12px; border:2px solid #e9ecef; border-radius:8px; font-size:14px;">
+                <select id="typeFilter" style="padding:8px 12px; border:2px solid #e9ecef; border-radius:8px; font-size:14px;">
+                    <option value="">全部类型</option>
+                    <option value="发票">发票</option>
+                    <option value="回单">回单</option>
+                    <option value="其他">其他</option>
+                </select>
+                <input type="text" id="keywordSearch" placeholder="按备注/路径关键词搜索..." style="padding:8px 12px; border:2px solid #e9ecef; border-radius:8px; font-size:14px;">
+                <button class="btn btn-primary" onclick="loadAttachments()">搜索</button>
+                <button class="btn" onclick="resetFilters()">重置</button>
+            </div>
+            <button class="btn btn-primary" onclick="showCreateModal()">+ 新增附件关联</button>
+        </div>
+
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>交易流水号</th>
+                        <th>附件类型</th>
+                        <th>附件路径</th>
+                        <th>备注</th>
+                        <th>更新时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="attachmentTableBody">
+                    <tr><td colspan="7" class="empty-row">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="modal" id="attachmentModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">新增凭证附件</h3>
+                <button class="btn-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>交易流水号 *</label>
+                    <input type="text" id="inputTransactionId" placeholder="例如：BJ20240105001">
+                </div>
+                <div class="form-group">
+                    <label>附件路径 *</label>
+                    <input type="text" id="inputAttachmentPath" placeholder="/path/to/invoice.pdf 或 D:\scan\receipt.jpg">
+                </div>
+                <div class="form-group">
+                    <label>附件类型</label>
+                    <select id="inputAttachmentType">
+                        <option value="发票">发票</option>
+                        <option value="回单">回单</option>
+                        <option value="其他">其他</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>备注</label>
+                    <textarea id="inputRemark" placeholder="可选备注信息..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeModal()">取消</button>
+                <button class="btn btn-primary" onclick="saveAttachment()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let editingId = null;
+        let currentData = [];
+
+        function typeTag(type) {
+            const cls = type === '发票' ? 'tag-invoice' : (type === '回单' ? 'tag-receipt' : 'tag-other');
+            return `<span class="tag ${cls}">${type || '其他'}</span>`;
+        }
+
+        function showFlash(message, isError) {
+            const area = document.getElementById('flashArea');
+            const el = document.createElement('div');
+            el.className = 'flash ' + (isError ? 'flash-error' : 'flash-success');
+            el.textContent = message;
+            area.appendChild(el);
+            setTimeout(() => el.remove(), 3500);
+        }
+
+        function updateStats() {
+            const total = currentData.length;
+            const invoice = currentData.filter(r => r['附件类型'] === '发票').length;
+            const receipt = currentData.filter(r => r['附件类型'] === '回单').length;
+            const other = total - invoice - receipt;
+            document.getElementById('statTotal').textContent = total;
+            document.getElementById('statInvoice').textContent = invoice;
+            document.getElementById('statReceipt').textContent = receipt;
+            document.getElementById('statOther').textContent = other;
+        }
+
+        function renderTable(data) {
+            const tbody = document.getElementById('attachmentTableBody');
+            if (!data.length) {
+                tbody.innerHTML = '<tr><td colspan="7" class="empty-row">暂无数据</td></tr>';
+                return;
+            }
+            tbody.innerHTML = data.map(r => `
+                <tr>
+                    <td>${r.id}</td>
+                    <td class="tid-cell">${escapeHtml(r['交易流水号'])}</td>
+                    <td>${typeTag(r['附件类型'])}</td>
+                    <td class="path-cell" title="${escapeHtml(r['附件路径'])}">${escapeHtml(r['附件路径'])}</td>
+                    <td>${escapeHtml(r['备注'] || '')}</td>
+                    <td style="font-size:12px;color:#888;">${(r['更新时间'] || '').split('.')[0]}</td>
+                    <td class="action-cell">
+                        <button class="btn btn-open" onclick="openAttachment(${r.id})">打开</button>
+                        <button class="btn" onclick="showEditModal(${r.id})">编辑</button>
+                        <button class="btn btn-danger" onclick="deleteAttachment(${r.id})">删除</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function escapeHtml(s) {
+            return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
+        async function loadAttachments() {
+            const tid = document.getElementById('transactionIdSearch').value.trim();
+            const type = document.getElementById('typeFilter').value;
+            const kw = document.getElementById('keywordSearch').value.trim();
+            const params = new URLSearchParams();
+            if (tid) params.set('transaction_id', tid);
+            if (type) params.set('attachment_type', type);
+            if (kw) params.set('keyword', kw);
+            try {
+                const resp = await fetch('/api/voucher-attachments?' + params.toString());
+                const json = await resp.json();
+                if (json.success) {
+                    currentData = json.data;
+                    renderTable(currentData);
+                    updateStats();
+                } else {
+                    showFlash('加载失败: ' + json.message, true);
+                }
+            } catch (e) {
+                showFlash('网络错误: ' + e.message, true);
+            }
+        }
+
+        function resetFilters() {
+            document.getElementById('transactionIdSearch').value = '';
+            document.getElementById('typeFilter').value = '';
+            document.getElementById('keywordSearch').value = '';
+            loadAttachments();
+        }
+
+        function showCreateModal() {
+            editingId = null;
+            document.getElementById('modalTitle').textContent = '新增凭证附件';
+            document.getElementById('inputTransactionId').value = '';
+            document.getElementById('inputAttachmentPath').value = '';
+            document.getElementById('inputAttachmentType').value = '发票';
+            document.getElementById('inputRemark').value = '';
+            document.getElementById('attachmentModal').style.display = 'flex';
+        }
+
+        async function showEditModal(id) {
+            try {
+                const resp = await fetch(`/api/voucher-attachments/${id}`);
+                const json = await resp.json();
+                if (!json.success) {
+                    showFlash('获取失败: ' + json.message, true);
+                    return;
+                }
+                editingId = id;
+                const r = json.data;
+                document.getElementById('modalTitle').textContent = '编辑凭证附件';
+                document.getElementById('inputTransactionId').value = r['交易流水号'];
+                document.getElementById('inputAttachmentPath').value = r['附件路径'];
+                document.getElementById('inputAttachmentType').value = r['附件类型'] || '其他';
+                document.getElementById('inputRemark').value = r['备注'] || '';
+                document.getElementById('attachmentModal').style.display = 'flex';
+            } catch (e) {
+                showFlash('网络错误: ' + e.message, true);
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('attachmentModal').style.display = 'none';
+            editingId = null;
+        }
+
+        async function saveAttachment() {
+            const transaction_id = document.getElementById('inputTransactionId').value.trim();
+            const attachment_path = document.getElementById('inputAttachmentPath').value.trim();
+            const attachment_type = document.getElementById('inputAttachmentType').value;
+            const remark = document.getElementById('inputRemark').value.trim() || null;
+
+            if (!transaction_id) {
+                showFlash('请填写交易流水号', true);
+                return;
+            }
+            if (!attachment_path) {
+                showFlash('请填写附件路径', true);
+                return;
+            }
+
+            try {
+                let resp;
+                if (editingId) {
+                    resp = await fetch(`/api/voucher-attachments/${editingId}`, {
+                        method: 'PUT',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({attachment_path, attachment_type, remark})
+                    });
+                } else {
+                    resp = await fetch('/api/voucher-attachments', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({transaction_id, attachment_path, attachment_type, remark})
+                    });
+                }
+                const json = await resp.json();
+                if (json.success) {
+                    showFlash(editingId ? '更新成功' : '创建成功', false);
+                    closeModal();
+                    loadAttachments();
+                } else {
+                    showFlash('操作失败: ' + json.message, true);
+                }
+            } catch (e) {
+                showFlash('网络错误: ' + e.message, true);
+            }
+        }
+
+        async function deleteAttachment(id) {
+            if (!confirm(`确定删除附件 #${id}？`)) return;
+            try {
+                const resp = await fetch(`/api/voucher-attachments/${id}`, {method: 'DELETE'});
+                const json = await resp.json();
+                if (json.success) {
+                    showFlash('删除成功', false);
+                    loadAttachments();
+                } else {
+                    showFlash('删除失败: ' + json.message, true);
+                }
+            } catch (e) {
+                showFlash('网络错误: ' + e.message, true);
+            }
+        }
+
+        async function openAttachment(id) {
+            try {
+                const resp = await fetch(`/api/voucher-attachments/${id}/open`, {method: 'POST'});
+                const json = await resp.json();
+                if (json.success) {
+                    showFlash(json.message, false);
+                } else {
+                    showFlash('打开失败: ' + json.message, true);
+                }
+            } catch (e) {
+                showFlash('网络错误: ' + e.message, true);
+            }
+        }
+
+        document.getElementById('attachmentModal').addEventListener('click', (e) => {
+            if (e.target.id === 'attachmentModal') closeModal();
+        });
+
+        loadAttachments();
+    </script>
+</body>
+</html>

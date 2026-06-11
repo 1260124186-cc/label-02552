@@ -372,6 +372,11 @@ def counterparty_rules_page():
     return render_template('counterparty_rules.html')
 
 
+@app.route('/voucher-attachments')
+def voucher_attachments_page():
+    return render_template('voucher_attachments.html')
+
+
 def _safe_filename(filename):
     safe = filename.replace('\\', '/').replace('../', '').replace('..\\', '')
     safe = os.path.basename(safe)
@@ -753,6 +758,182 @@ def api_export_counterparty_tags():
                          mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:
         logger.error('导出对方户名标签失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# ──────────────────────────────────────────────
+# 凭证附件关联 API
+# ──────────────────────────────────────────────
+
+@app.route('/api/voucher-attachments', methods=['GET'])
+def api_list_voucher_attachments():
+    """查询凭证附件列表"""
+    try:
+        transaction_id = request.args.get('transaction_id', '').strip() or None
+        attachment_type = request.args.get('attachment_type', '').strip() or None
+        keyword = request.args.get('keyword', '').strip() or None
+        limit = request.args.get('limit', type=int)
+        offset = request.args.get('offset', type=int, default=0)
+
+        result = bankcheck.list_voucher_attachments(
+            transaction_id=transaction_id,
+            attachment_type=attachment_type,
+            keyword=keyword,
+            limit=limit,
+            offset=offset,
+            script_dir=BACKEND_DIR,
+        )
+        data = [r.to_dict() for r in result.records]
+        return jsonify({
+            'success': True,
+            'data': data,
+            'total': result.total_count,
+        })
+    except Exception as e:
+        logger.error('查询凭证附件失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/voucher-attachments/<int:attachment_id>', methods=['GET'])
+def api_get_voucher_attachment(attachment_id):
+    """获取单个凭证附件"""
+    try:
+        att = bankcheck.get_voucher_attachment(attachment_id, script_dir=BACKEND_DIR)
+        if att is None:
+            return jsonify({'success': False, 'message': '附件记录不存在'}), 404
+        return jsonify({'success': True, 'data': att.to_dict()})
+    except Exception as e:
+        logger.error('获取凭证附件失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/voucher-attachments', methods=['POST'])
+def api_create_voucher_attachment():
+    """新增凭证附件"""
+    try:
+        body = request.get_json(silent=True) or {}
+        transaction_id = str(body.get('transaction_id', '') or '').strip()
+        attachment_path = str(body.get('attachment_path', '') or '').strip()
+        attachment_type = str(body.get('attachment_type', '其他') or '其他').strip()
+        remark = body.get('remark')
+
+        if not transaction_id:
+            return jsonify({'success': False, 'message': '交易流水号不能为空'}), 400
+        if not attachment_path:
+            return jsonify({'success': False, 'message': '附件路径不能为空'}), 400
+
+        new_id = bankcheck.add_voucher_attachment(
+            transaction_id=transaction_id,
+            attachment_path=attachment_path,
+            attachment_type=attachment_type,
+            remark=remark,
+            script_dir=BACKEND_DIR,
+        )
+        return jsonify({
+            'success': True,
+            'id': new_id,
+            'message': '凭证附件创建成功',
+        }), 201
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        logger.error('创建凭证附件失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/voucher-attachments/<int:attachment_id>', methods=['PUT'])
+def api_update_voucher_attachment(attachment_id):
+    """更新凭证附件"""
+    try:
+        body = request.get_json(silent=True) or {}
+        attachment_path = body.get('attachment_path')
+        attachment_type = body.get('attachment_type')
+        remark = body.get('remark')
+
+        ok = bankcheck.update_voucher_attachment(
+            attachment_id=attachment_id,
+            attachment_path=attachment_path,
+            attachment_type=attachment_type,
+            remark=remark,
+            script_dir=BACKEND_DIR,
+        )
+        if not ok:
+            return jsonify({'success': False, 'message': '附件记录不存在或无更新字段'}), 404
+        return jsonify({'success': True, 'message': '更新成功'})
+    except Exception as e:
+        logger.error('更新凭证附件失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/voucher-attachments/<int:attachment_id>', methods=['DELETE'])
+def api_delete_voucher_attachment(attachment_id):
+    """删除凭证附件"""
+    try:
+        ok = bankcheck.delete_voucher_attachment(attachment_id, script_dir=BACKEND_DIR)
+        if not ok:
+            return jsonify({'success': False, 'message': '附件记录不存在'}), 404
+        return jsonify({'success': True, 'message': '删除成功'})
+    except Exception as e:
+        logger.error('删除凭证附件失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/voucher-attachments/<int:attachment_id>/open', methods=['POST'])
+def api_open_voucher_attachment(attachment_id):
+    """一键打开凭证附件"""
+    try:
+        ok, msg = bankcheck.open_voucher_attachment(
+            attachment_id=attachment_id,
+            script_dir=BACKEND_DIR,
+        )
+        if ok:
+            return jsonify({'success': True, 'message': msg})
+        return jsonify({'success': False, 'message': msg}), 400
+    except Exception as e:
+        logger.error('打开凭证附件失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/voucher-attachments/open-by-transaction', methods=['POST'])
+def api_open_voucher_by_transaction():
+    """按交易流水号一键打开所有关联附件"""
+    try:
+        body = request.get_json(silent=True) or {}
+        transaction_id = str(body.get('transaction_id', '') or '').strip()
+        if not transaction_id:
+            return jsonify({'success': False, 'message': '交易流水号不能为空'}), 400
+
+        success_count, errors = bankcheck.open_voucher_attachments_for_transaction(
+            transaction_id=transaction_id,
+            script_dir=BACKEND_DIR,
+        )
+        return jsonify({
+            'success': True,
+            'success_count': success_count,
+            'errors': errors,
+            'message': f'成功打开 {success_count} 个附件' + (f'，失败 {len(errors)} 个' if errors else ''),
+        })
+    except Exception as e:
+        logger.error('按交易流水号打开附件失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/voucher-attachments/by-transaction/<transaction_id>', methods=['GET'])
+def api_get_voucher_by_transaction(transaction_id):
+    """获取某笔交易流水关联的所有附件"""
+    try:
+        attachments = bankcheck.get_voucher_attachments_for_transaction(
+            transaction_id=transaction_id,
+            script_dir=BACKEND_DIR,
+        )
+        data = [a.to_dict() for a in attachments]
+        return jsonify({
+            'success': True,
+            'data': data,
+            'total': len(data),
+        })
+    except Exception as e:
+        logger.error('获取交易流水附件失败: %s', e, exc_info=True)
         return jsonify({'success': False, 'message': str(e)}), 500
 
 

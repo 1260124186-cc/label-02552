@@ -7275,6 +7275,204 @@ def add_counterparty_keyword_rule(name, rule_type, keywords, match_mode='contain
     return config.add_rule(rule)
 
 
+# ──────────────────────────────────────────────
+# 凭证附件关联模块
+# ──────────────────────────────────────────────
+
+VOUCHER_ATTACHMENT_TYPES = ('发票', '回单', '其他')
+
+
+def _verify_has_database():
+    if not HAS_DATABASE:
+        raise ImportError('database 模块不可用，凭证附件功能需要数据库支持')
+
+
+def add_voucher_attachment(transaction_id: str,
+                           attachment_path: str,
+                           attachment_type: str = '其他',
+                           remark: Optional[str] = None,
+                           script_dir=None) -> int:
+    """
+    新增凭证附件映射
+
+    Args:
+        transaction_id: 交易流水号
+        attachment_path: 附件文件路径（绝对路径）
+        attachment_type: 附件类型（'发票'/'回单'/'其他'）
+        remark: 备注
+        script_dir: 脚本目录
+
+    Returns:
+        新记录 id
+    """
+    _verify_has_database()
+    if not transaction_id or not str(transaction_id).strip():
+        raise ValueError('交易流水号不能为空')
+    if not attachment_path or not str(attachment_path).strip():
+        raise ValueError('附件路径不能为空')
+    if attachment_type and attachment_type not in VOUCHER_ATTACHMENT_TYPES:
+        logger.warning('未知的附件类型 "%s"，建议使用: %s', attachment_type, VOUCHER_ATTACHMENT_TYPES)
+    return db_module.add_voucher_attachment(
+        transaction_id=str(transaction_id).strip(),
+        attachment_path=str(attachment_path).strip(),
+        attachment_type=str(attachment_type or '').strip(),
+        remark=remark,
+        script_dir=script_dir,
+    )
+
+
+def update_voucher_attachment(attachment_id: int,
+                              attachment_path: Optional[str] = None,
+                              attachment_type: Optional[str] = None,
+                              remark: Optional[str] = None,
+                              script_dir=None) -> bool:
+    """更新凭证附件记录"""
+    _verify_has_database()
+    return db_module.update_voucher_attachment(
+        attachment_id=attachment_id,
+        attachment_path=attachment_path,
+        attachment_type=attachment_type,
+        remark=remark,
+        script_dir=script_dir,
+    )
+
+
+def delete_voucher_attachment(attachment_id: int, script_dir=None) -> bool:
+    """删除凭证附件记录"""
+    _verify_has_database()
+    return db_module.remove_voucher_attachment(
+        attachment_id=attachment_id,
+        script_dir=script_dir,
+    )
+
+
+def get_voucher_attachment(attachment_id: int, script_dir=None):
+    """根据 id 获取凭证附件"""
+    _verify_has_database()
+    return db_module.get_voucher_attachment_by_id(
+        attachment_id=attachment_id,
+        script_dir=script_dir,
+    )
+
+
+def list_voucher_attachments(transaction_id: Optional[str] = None,
+                             attachment_type: Optional[str] = None,
+                             keyword: Optional[str] = None,
+                             limit: Optional[int] = None,
+                             offset: int = 0,
+                             script_dir=None):
+    """
+    查询凭证附件列表
+
+    Args:
+        transaction_id: 按交易流水号筛选
+        attachment_type: 按附件类型筛选
+        keyword: 按备注/路径关键词搜索
+        limit: 分页条数
+        offset: 分页偏移
+        script_dir: 脚本目录
+
+    Returns:
+        VoucherAttachmentQueryResult
+    """
+    _verify_has_database()
+    return db_module.query_voucher_attachments(
+        transaction_id=transaction_id,
+        attachment_type=attachment_type,
+        keyword=keyword,
+        limit=limit,
+        offset=offset,
+        script_dir=script_dir,
+    )
+
+
+def open_voucher_attachment(attachment_id: Optional[int] = None,
+                            attachment_path: Optional[str] = None,
+                            script_dir=None) -> Tuple[bool, str]:
+    """
+    一键打开凭证附件（使用系统默认程序）
+
+    Args:
+        attachment_id: 附件记录 id（与 attachment_path 二选一）
+        attachment_path: 直接指定附件路径（与 attachment_id 二选一）
+        script_dir: 脚本目录
+
+    Returns:
+        (是否成功, 消息)
+    """
+    logger = get_logger()
+
+    if attachment_path is None:
+        if attachment_id is None:
+            return False, '必须提供 attachment_id 或 attachment_path'
+        _verify_has_database()
+        att = db_module.get_voucher_attachment_by_id(attachment_id, script_dir=script_dir)
+        if att is None:
+            return False, f'未找到 id={attachment_id} 的凭证附件记录'
+        attachment_path = att.附件路径
+
+    if not attachment_path:
+        return False, '附件路径为空'
+
+    if not os.path.exists(attachment_path):
+        return False, f'附件文件不存在: {attachment_path}'
+
+    try:
+        if sys.platform.startswith('darwin'):
+            import subprocess
+            subprocess.run(['open', attachment_path], check=False)
+        elif os.name == 'nt':
+            os.startfile(attachment_path)  # type: ignore[attr-defined]
+        elif os.name == 'posix':
+            import subprocess
+            subprocess.run(['xdg-open', attachment_path], check=False)
+        else:
+            return False, f'不支持的操作系统: {sys.platform}'
+        logger.info('已打开凭证附件: %s', attachment_path)
+        return True, f'已打开: {attachment_path}'
+    except Exception as e:
+        logger.error('打开凭证附件失败: %s, %s', attachment_path, e)
+        return False, f'打开失败: {str(e)}'
+
+
+def get_voucher_attachments_for_transaction(transaction_id: str, script_dir=None):
+    """
+    获取某笔交易流水关联的所有附件
+
+    Args:
+        transaction_id: 交易流水号
+        script_dir: 脚本目录
+
+    Returns:
+        List[VoucherAttachment]
+    """
+    result = list_voucher_attachments(transaction_id=transaction_id, script_dir=script_dir)
+    return result.records
+
+
+def open_voucher_attachments_for_transaction(transaction_id: str, script_dir=None) -> Tuple[int, List[str]]:
+    """
+    一键打开某笔交易流水关联的所有凭证附件
+
+    Args:
+        transaction_id: 交易流水号
+        script_dir: 脚本目录
+
+    Returns:
+        (成功打开数量, 失败消息列表)
+    """
+    attachments = get_voucher_attachments_for_transaction(transaction_id, script_dir=script_dir)
+    success_count = 0
+    errors = []
+    for att in attachments:
+        ok, msg = open_voucher_attachment(attachment_path=att.附件路径)
+        if ok:
+            success_count += 1
+        else:
+            errors.append(msg)
+    return success_count, errors
+
+
 def main():
     result = parse_args_and_run()
     if result is not None:

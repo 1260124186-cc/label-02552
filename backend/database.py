@@ -143,6 +143,38 @@ TRANSACTION_COLUMNS = [
     '黑白名单标签', '命中规则名称', '命中关键词',
 ]
 
+VOUCHER_ATTACHMENT_COLUMNS = [
+    'id', '交易流水号', '附件路径', '附件类型', '备注',
+    '创建时间', '更新时间',
+]
+
+
+@dataclass
+class VoucherAttachment:
+    """凭证附件数据类 —— 交易流水号到发票/回单的映射"""
+    id: Optional[int] = None
+    交易流水号: str = ''
+    附件路径: str = ''
+    附件类型: str = ''
+    备注: Optional[str] = None
+    创建时间: Optional[str] = None
+    更新时间: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, row_dict: Dict[str, Any]) -> 'VoucherAttachment':
+        return cls(
+            id=row_dict.get('id'),
+            交易流水号=str(row_dict.get('交易流水号', '') or ''),
+            附件路径=str(row_dict.get('附件路径', '') or ''),
+            附件类型=str(row_dict.get('附件类型', '') or ''),
+            备注=row_dict.get('备注'),
+            创建时间=row_dict.get('创建时间'),
+            更新时间=row_dict.get('更新时间'),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class TransactionRecord:
@@ -226,6 +258,23 @@ class QueryResult:
         return output_path
 
 
+@dataclass
+class VoucherAttachmentQueryResult:
+    """凭证附件查询结果封装"""
+    records: List[VoucherAttachment] = field(default_factory=list)
+    total_count: int = 0
+
+    def to_dataframe(self):
+        import pandas as pd
+        data = [r.to_dict() for r in self.records]
+        return pd.DataFrame(data, columns=VOUCHER_ATTACHMENT_COLUMNS)
+
+    def to_excel(self, output_path: str) -> str:
+        df = self.to_dataframe()
+        df.to_excel(output_path, index=False, engine='openpyxl')
+        return output_path
+
+
 # ──────────────────────────────────────────────
 # 抽象数据库接口
 # ──────────────────────────────────────────────
@@ -296,6 +345,39 @@ class DatabaseBackend(ABC):
                        start_date: Optional[str] = None,
                        end_date: Optional[str] = None) -> int:
         """删除指定条件的记录，返回删除数量"""
+        pass
+
+    @abstractmethod
+    def insert_voucher_attachment(self, attachment: VoucherAttachment) -> int:
+        """插入凭证附件记录，返回新记录的 id"""
+        pass
+
+    @abstractmethod
+    def update_voucher_attachment(self, attachment_id: int,
+                                  attachment_path: Optional[str] = None,
+                                  attachment_type: Optional[str] = None,
+                                  remark: Optional[str] = None) -> bool:
+        """更新凭证附件记录"""
+        pass
+
+    @abstractmethod
+    def delete_voucher_attachment(self, attachment_id: int) -> bool:
+        """删除凭证附件记录"""
+        pass
+
+    @abstractmethod
+    def get_voucher_attachment(self, attachment_id: int) -> Optional[VoucherAttachment]:
+        """根据 id 获取凭证附件"""
+        pass
+
+    @abstractmethod
+    def query_voucher_attachments(self,
+                                  transaction_id: Optional[str] = None,
+                                  attachment_type: Optional[str] = None,
+                                  keyword: Optional[str] = None,
+                                  limit: Optional[int] = None,
+                                  offset: int = 0) -> VoucherAttachmentQueryResult:
+        """按条件查询凭证附件"""
         pass
 
     def __enter__(self):
@@ -381,6 +463,18 @@ class SQLiteBackend(DatabaseBackend):
             )
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS voucher_attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                交易流水号 TEXT NOT NULL,
+                附件路径 TEXT NOT NULL,
+                附件类型 TEXT DEFAULT '',
+                备注 TEXT,
+                创建时间 TEXT DEFAULT CURRENT_TIMESTAMP,
+                更新时间 TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_subject ON transactions(主体)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(银行账号)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_bank ON transactions(银行)')
@@ -391,6 +485,9 @@ class SQLiteBackend(DatabaseBackend):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_counterparty_tag ON transactions(黑白名单标签)')
 
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_batches_date ON import_batches(started_at)')
+
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_voucher_transaction_id ON voucher_attachments(交易流水号)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_voucher_type ON voucher_attachments(附件类型)')
 
         self.conn.commit()
         self.logger.debug('数据库表结构初始化完成')
@@ -763,6 +860,131 @@ class SQLiteBackend(DatabaseBackend):
         self.logger.info('已删除 %d 条记录', count)
         return count
 
+    def insert_voucher_attachment(self, attachment: VoucherAttachment) -> int:
+        if self.conn is None:
+            self.connect()
+
+        cursor = self.conn.cursor()
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+        cursor.execute('''
+            INSERT INTO voucher_attachments (
+                交易流水号, 附件路径, 附件类型, 备注, 创建时间, 更新时间
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            attachment.交易流水号,
+            attachment.附件路径,
+            attachment.附件类型 or '',
+            attachment.备注,
+            attachment.创建时间 or now,
+            attachment.更新时间 or now,
+        ))
+        self.conn.commit()
+        new_id = cursor.lastrowid
+        self.logger.info('已插入凭证附件记录 id=%d, 交易流水号=%s', new_id, attachment.交易流水号)
+        return new_id
+
+    def update_voucher_attachment(self, attachment_id: int,
+                                  attachment_path: Optional[str] = None,
+                                  attachment_type: Optional[str] = None,
+                                  remark: Optional[str] = None) -> bool:
+        if self.conn is None:
+            self.connect()
+
+        cursor = self.conn.cursor()
+        updates = []
+        params = []
+
+        if attachment_path is not None:
+            updates.append('附件路径 = ?')
+            params.append(attachment_path)
+        if attachment_type is not None:
+            updates.append('附件类型 = ?')
+            params.append(attachment_type)
+        if remark is not None:
+            updates.append('备注 = ?')
+            params.append(remark)
+
+        if not updates:
+            self.logger.warning('凭证附件更新未提供任何字段')
+            return False
+
+        updates.append('更新时间 = ?')
+        params.append(datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'))
+        params.append(attachment_id)
+
+        cursor.execute(
+            f'UPDATE voucher_attachments SET {", ".join(updates)} WHERE id = ?',
+            params
+        )
+        self.conn.commit()
+        affected = cursor.rowcount
+        if affected > 0:
+            self.logger.info('已更新凭证附件记录 id=%d', attachment_id)
+        return affected > 0
+
+    def delete_voucher_attachment(self, attachment_id: int) -> bool:
+        if self.conn is None:
+            self.connect()
+
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM voucher_attachments WHERE id = ?', (attachment_id,))
+        self.conn.commit()
+        affected = cursor.rowcount
+        if affected > 0:
+            self.logger.info('已删除凭证附件记录 id=%d', attachment_id)
+        return affected > 0
+
+    def get_voucher_attachment(self, attachment_id: int) -> Optional[VoucherAttachment]:
+        if self.conn is None:
+            self.connect()
+
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM voucher_attachments WHERE id = ?', (attachment_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return VoucherAttachment.from_dict(dict(row))
+
+    def query_voucher_attachments(self,
+                                  transaction_id: Optional[str] = None,
+                                  attachment_type: Optional[str] = None,
+                                  keyword: Optional[str] = None,
+                                  limit: Optional[int] = None,
+                                  offset: int = 0) -> VoucherAttachmentQueryResult:
+        if self.conn is None:
+            self.connect()
+
+        cursor = self.conn.cursor()
+        conditions = []
+        params = []
+
+        if transaction_id:
+            conditions.append('交易流水号 = ?')
+            params.append(transaction_id)
+        if attachment_type:
+            conditions.append('附件类型 = ?')
+            params.append(attachment_type)
+        if keyword:
+            conditions.append('(备注 LIKE ? OR 附件路径 LIKE ?)')
+            params.extend([f'%{keyword}%', f'%{keyword}%'])
+
+        where_clause = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+
+        cursor.execute(f'SELECT COUNT(*) as cnt FROM voucher_attachments{where_clause}', params)
+        total_count = cursor.fetchone()['cnt']
+
+        query = f'SELECT * FROM voucher_attachments{where_clause} ORDER BY 更新时间 DESC'
+
+        if limit is not None:
+            query += ' LIMIT ? OFFSET ?'
+            params.extend([limit, offset])
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        records = [VoucherAttachment.from_dict(dict(row)) for row in rows]
+        return VoucherAttachmentQueryResult(records=records, total_count=total_count)
+
 
 # ──────────────────────────────────────────────
 # PostgreSQL 实现（可选）
@@ -854,6 +1076,18 @@ class PostgreSQLBackend(DatabaseBackend):
             )
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS voucher_attachments (
+                id SERIAL PRIMARY KEY,
+                交易流水号 VARCHAR(255) NOT NULL,
+                附件路径 TEXT NOT NULL,
+                附件类型 VARCHAR(50) DEFAULT '',
+                备注 TEXT,
+                创建时间 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                更新时间 TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_subject ON transactions(主体)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(银行账号)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_bank ON transactions(银行)')
@@ -861,6 +1095,9 @@ class PostgreSQLBackend(DatabaseBackend):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_counterpart ON transactions(对方户名)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_batch ON transactions(导入批次号)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_counterparty_tag ON transactions(黑白名单标签)')
+
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_voucher_transaction_id ON voucher_attachments(交易流水号)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_voucher_type ON voucher_attachments(附件类型)')
 
         self.conn.commit()
         self.logger.debug('PostgreSQL 表结构初始化完成')
@@ -1088,6 +1325,138 @@ class PostgreSQLBackend(DatabaseBackend):
 
         return count
 
+    def insert_voucher_attachment(self, attachment: VoucherAttachment) -> int:
+        if self.conn is None:
+            self.connect()
+
+        cursor = self.conn.cursor()
+        now = datetime.now()
+        cursor.execute('''
+            INSERT INTO voucher_attachments (
+                交易流水号, 附件路径, 附件类型, 备注, 创建时间, 更新时间
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        ''', (
+            attachment.交易流水号,
+            attachment.附件路径,
+            attachment.附件类型 or '',
+            attachment.备注,
+            attachment.创建时间 or now,
+            attachment.更新时间 or now,
+        ))
+        new_id = cursor.fetchone()[0]
+        self.conn.commit()
+        self.logger.info('已插入凭证附件记录 id=%d, 交易流水号=%s', new_id, attachment.交易流水号)
+        return new_id
+
+    def update_voucher_attachment(self, attachment_id: int,
+                                  attachment_path: Optional[str] = None,
+                                  attachment_type: Optional[str] = None,
+                                  remark: Optional[str] = None) -> bool:
+        if self.conn is None:
+            self.connect()
+
+        cursor = self.conn.cursor()
+        updates = []
+        params = []
+
+        if attachment_path is not None:
+            updates.append('附件路径 = %s')
+            params.append(attachment_path)
+        if attachment_type is not None:
+            updates.append('附件类型 = %s')
+            params.append(attachment_type)
+        if remark is not None:
+            updates.append('备注 = %s')
+            params.append(remark)
+
+        if not updates:
+            self.logger.warning('凭证附件更新未提供任何字段')
+            return False
+
+        updates.append('更新时间 = %s')
+        params.append(datetime.now())
+        params.append(attachment_id)
+
+        cursor.execute(
+            f'UPDATE voucher_attachments SET {", ".join(updates)} WHERE id = %s',
+            params
+        )
+        self.conn.commit()
+        affected = cursor.rowcount
+        if affected > 0:
+            self.logger.info('已更新凭证附件记录 id=%d', attachment_id)
+        return affected > 0
+
+    def delete_voucher_attachment(self, attachment_id: int) -> bool:
+        if self.conn is None:
+            self.connect()
+
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM voucher_attachments WHERE id = %s', (attachment_id,))
+        self.conn.commit()
+        affected = cursor.rowcount
+        if affected > 0:
+            self.logger.info('已删除凭证附件记录 id=%d', attachment_id)
+        return affected > 0
+
+    def get_voucher_attachment(self, attachment_id: int) -> Optional[VoucherAttachment]:
+        if self.conn is None:
+            self.connect()
+
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM voucher_attachments WHERE id = %s', (attachment_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        colnames = [desc[0] for desc in cursor.description]
+        row_dict = dict(zip(colnames, row))
+        return VoucherAttachment.from_dict(row_dict)
+
+    def query_voucher_attachments(self,
+                                  transaction_id: Optional[str] = None,
+                                  attachment_type: Optional[str] = None,
+                                  keyword: Optional[str] = None,
+                                  limit: Optional[int] = None,
+                                  offset: int = 0) -> VoucherAttachmentQueryResult:
+        if self.conn is None:
+            self.connect()
+
+        cursor = self.conn.cursor()
+        conditions = []
+        params = []
+
+        if transaction_id:
+            conditions.append('交易流水号 = %s')
+            params.append(transaction_id)
+        if attachment_type:
+            conditions.append('附件类型 = %s')
+            params.append(attachment_type)
+        if keyword:
+            conditions.append('(备注 ILIKE %s OR 附件路径 ILIKE %s)')
+            params.extend([f'%{keyword}%', f'%{keyword}%'])
+
+        where_clause = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+
+        cursor.execute(f'SELECT COUNT(*) FROM voucher_attachments{where_clause}', params)
+        total_count = cursor.fetchone()[0]
+
+        query = f'SELECT * FROM voucher_attachments{where_clause} ORDER BY 更新时间 DESC'
+
+        if limit is not None:
+            query += ' LIMIT %s OFFSET %s'
+            params.extend([limit, offset])
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        colnames = [desc[0] for desc in cursor.description]
+
+        records = [
+            VoucherAttachment.from_dict(dict(zip(colnames, row)))
+            for row in rows
+        ]
+        return VoucherAttachmentQueryResult(records=records, total_count=total_count)
+
 
 # ──────────────────────────────────────────────
 # 数据库工厂
@@ -1286,3 +1655,107 @@ def get_db_statistics(script_dir: Optional[str] = None,
 
     with create_database_backend(config, script_dir) as db:
         return db.get_statistics()
+
+
+def add_voucher_attachment(transaction_id: str,
+                           attachment_path: str,
+                           attachment_type: str = '',
+                           remark: Optional[str] = None,
+                           script_dir: Optional[str] = None,
+                           config: Optional[Dict[str, Any]] = None) -> int:
+    """
+    新增凭证附件映射的便捷函数
+
+    Args:
+        transaction_id: 交易流水号
+        attachment_path: 附件文件路径（发票/回单图片）
+        attachment_type: 附件类型（如 '发票'、'回单'、'其他'）
+        remark: 备注信息
+        script_dir: 脚本目录
+        config: 数据库配置
+
+    Returns:
+        新插入记录的 id
+    """
+    if config is None:
+        config = load_database_config(script_dir)
+
+    attachment = VoucherAttachment(
+        交易流水号=transaction_id,
+        附件路径=attachment_path,
+        附件类型=attachment_type,
+        备注=remark,
+    )
+
+    with create_database_backend(config, script_dir) as db:
+        return db.insert_voucher_attachment(attachment)
+
+
+def update_voucher_attachment(attachment_id: int,
+                              attachment_path: Optional[str] = None,
+                              attachment_type: Optional[str] = None,
+                              remark: Optional[str] = None,
+                              script_dir: Optional[str] = None,
+                              config: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    更新凭证附件记录的便捷函数
+    """
+    if config is None:
+        config = load_database_config(script_dir)
+
+    with create_database_backend(config, script_dir) as db:
+        return db.update_voucher_attachment(
+            attachment_id=attachment_id,
+            attachment_path=attachment_path,
+            attachment_type=attachment_type,
+            remark=remark,
+        )
+
+
+def remove_voucher_attachment(attachment_id: int,
+                              script_dir: Optional[str] = None,
+                              config: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    删除凭证附件记录的便捷函数
+    """
+    if config is None:
+        config = load_database_config(script_dir)
+
+    with create_database_backend(config, script_dir) as db:
+        return db.delete_voucher_attachment(attachment_id)
+
+
+def get_voucher_attachment_by_id(attachment_id: int,
+                                 script_dir: Optional[str] = None,
+                                 config: Optional[Dict[str, Any]] = None) -> Optional[VoucherAttachment]:
+    """
+    根据 id 获取凭证附件的便捷函数
+    """
+    if config is None:
+        config = load_database_config(script_dir)
+
+    with create_database_backend(config, script_dir) as db:
+        return db.get_voucher_attachment(attachment_id)
+
+
+def query_voucher_attachments(transaction_id: Optional[str] = None,
+                              attachment_type: Optional[str] = None,
+                              keyword: Optional[str] = None,
+                              limit: Optional[int] = None,
+                              offset: int = 0,
+                              script_dir: Optional[str] = None,
+                              config: Optional[Dict[str, Any]] = None) -> VoucherAttachmentQueryResult:
+    """
+    按条件查询凭证附件的便捷函数
+    """
+    if config is None:
+        config = load_database_config(script_dir)
+
+    with create_database_backend(config, script_dir) as db:
+        return db.query_voucher_attachments(
+            transaction_id=transaction_id,
+            attachment_type=attachment_type,
+            keyword=keyword,
+            limit=limit,
+            offset=offset,
+        )
