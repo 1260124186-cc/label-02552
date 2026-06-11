@@ -131,17 +131,26 @@ def _account_key(value):
 
 @dataclass
 class LookupEntry:
-    """查找表条目：主体名称 + 银行账号"""
+    """查找表条目：主体名称 + 银行账号 + 扩展字段"""
     subject: str
     account: str
+    priority: int = 0
+    extra_fields: Dict[str, str] = None
     row_id: Optional[int] = None
 
+    def __post_init__(self):
+        if self.extra_fields is None:
+            self.extra_fields = {}
+
     def to_dict(self) -> Dict[str, any]:
-        return {
+        result = {
             'row_id': self.row_id,
             'subject': self.subject,
             'account': self.account,
+            'priority': self.priority,
         }
+        result.update(self.extra_fields)
+        return result
 
 
 def _copy_lookup_to_output(program_lookup_path, output_dir):
@@ -248,9 +257,34 @@ def _cleanup_temp_file(tmp_path):
             pass
 
 
+def _detect_header_columns(ws) -> Dict[str, int]:
+    """
+    检测表头列，返回列名到列索引的映射。
+    标准列：主体名称、银行账号、优先级
+    其他列作为扩展字段
+    """
+    header_map = {}
+    for col_idx in range(1, ws.max_column + 1):
+        cell_value = ws.cell(row=1, column=col_idx).value
+        if cell_value is None:
+            continue
+        col_name = str(cell_value).strip()
+        if col_name:
+            header_map[col_name] = col_idx
+    return header_map
+
+
+def _get_col_index(header_map: Dict[str, int], candidates: List[str]) -> Optional[int]:
+    """根据候选列名列表获取列索引"""
+    for name in candidates:
+        if name in header_map:
+            return header_map[name]
+    return None
+
+
 def read_lookup_entries(lookup_file=None) -> List[LookupEntry]:
     """
-    读取查找表中的所有条目
+    读取查找表中的所有条目，支持多列扩展字段
 
     Args:
         lookup_file: 查找表文件路径，不传则自动查找
@@ -273,13 +307,27 @@ def read_lookup_entries(lookup_file=None) -> List[LookupEntry]:
         wb, tmp_path = _open_workbook_compat(lookup_file)
         ws = wb.active
 
-        for row_idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row,
-                                                   min_col=1, max_col=2), start=2):
-            subject_cell = row[0]
-            account_cell = row[1]
+        header_map = _detect_header_columns(ws)
 
-            subject = subject_cell.value
-            account = account_cell.value
+        subject_col = _get_col_index(header_map, ['主体名称', '主体', 'subject', 'Subject'])
+        account_col = _get_col_index(header_map, ['银行账号', '账号', 'account', 'Account'])
+        priority_col = _get_col_index(header_map, ['优先级', 'priority', 'Priority'])
+
+        if subject_col is None:
+            subject_col = 1
+        if account_col is None:
+            account_col = 2
+
+        extra_col_names = [
+            name for name in header_map
+            if name not in {'主体名称', '主体', 'subject', 'Subject',
+                           '银行账号', '账号', 'account', 'Account',
+                           '优先级', 'priority', 'Priority'}
+        ]
+
+        for row_idx in range(2, ws.max_row + 1):
+            subject = ws.cell(row=row_idx, column=subject_col).value if subject_col else None
+            account = ws.cell(row=row_idx, column=account_col).value if account_col else None
 
             if subject is None and account is None:
                 continue
@@ -290,14 +338,32 @@ def read_lookup_entries(lookup_file=None) -> List[LookupEntry]:
             if not account_str:
                 continue
 
+            priority = 0
+            if priority_col is not None:
+                priority_val = ws.cell(row=row_idx, column=priority_col).value
+                if priority_val is not None:
+                    try:
+                        priority = int(priority_val)
+                    except (ValueError, TypeError):
+                        priority = 0
+
+            extra_fields = {}
+            for col_name in extra_col_names:
+                col_idx = header_map[col_name]
+                val = ws.cell(row=row_idx, column=col_idx).value
+                extra_fields[col_name] = str(val).strip() if val is not None else ''
+
             entries.append(LookupEntry(
                 subject=subject_str,
                 account=account_str,
+                priority=priority,
+                extra_fields=extra_fields,
                 row_id=row_idx
             ))
 
         wb.close()
-        logger.info('从查找表读取到 %d 条记录', len(entries))
+        logger.info('从查找表读取到 %d 条记录，扩展字段: %s',
+                    len(entries), extra_col_names if extra_col_names else '无')
     except Exception as e:
         logger.error('读取查找表失败: %s', e, exc_info=True)
     finally:
@@ -309,7 +375,7 @@ def read_lookup_entries(lookup_file=None) -> List[LookupEntry]:
 def save_lookup_entries(entries: List[LookupEntry], lookup_file=None) -> bool:
     """
     保存条目列表到查找表
-    完全覆盖原有内容，按现有格式写入（A列=主体，B列=账号，表头为"主体名称"和"银行账号"）
+    完全覆盖原有内容，按现有格式写入（支持优先级和扩展字段）
 
     Args:
         entries: 要保存的条目列表
@@ -328,12 +394,34 @@ def save_lookup_entries(entries: List[LookupEntry], lookup_file=None) -> bool:
         ws = wb.active
         ws.title = '主体映射'
 
+        all_extra_keys = set()
+        has_priority = any(e.priority != 0 for e in entries)
+        for entry in entries:
+            if entry.extra_fields:
+                all_extra_keys.update(entry.extra_fields.keys())
+
         ws.cell(row=1, column=1, value='主体名称')
         ws.cell(row=1, column=2, value='银行账号')
+        col_idx = 3
+        if has_priority:
+            ws.cell(row=1, column=col_idx, value='优先级')
+            col_idx += 1
+        sorted_extra_keys = sorted(all_extra_keys)
+        for key in sorted_extra_keys:
+            ws.cell(row=1, column=col_idx, value=key)
+            col_idx += 1
 
         for i, entry in enumerate(entries, start=2):
             ws.cell(row=i, column=1, value=entry.subject)
             ws.cell(row=i, column=2, value=entry.account)
+            col_idx = 3
+            if has_priority:
+                ws.cell(row=i, column=col_idx, value=entry.priority)
+                col_idx += 1
+            for key in sorted_extra_keys:
+                val = entry.extra_fields.get(key, '')
+                ws.cell(row=i, column=col_idx, value=val)
+                col_idx += 1
 
         wb.save(lookup_file)
         wb.close()
@@ -364,23 +452,166 @@ def _load_entries_with_duplicate_check() -> Tuple[List[LookupEntry], Dict[str, L
 
 def get_entry_by_account(account: str, lookup_file=None) -> Optional[LookupEntry]:
     """
-    根据账号查找条目
+    根据账号查找条目（精确匹配，返回优先级最高的）
 
     Args:
         account: 银行账号
         lookup_file: 查找表文件路径
 
     Returns:
-        找到的条目，未找到返回 None
+        找到的条目（优先级最高），未找到返回 None
+    """
+    entries = get_entries_by_account(account, lookup_file)
+    if entries:
+        return entries[0]
+    return None
+
+
+def get_entries_by_account(account: str, lookup_file=None) -> List[LookupEntry]:
+    """
+    根据账号查找所有匹配的条目（精确匹配，按优先级降序排序）
+
+    Args:
+        account: 银行账号
+        lookup_file: 查找表文件路径
+
+    Returns:
+        匹配的条目列表，按优先级降序排序
     """
     entries = read_lookup_entries(lookup_file)
     target_key = _account_key(account)
 
+    matched = []
     for entry in entries:
         if _account_key(entry.account) == target_key:
-            return entry
+            matched.append(entry)
 
-    return None
+    matched.sort(key=lambda e: e.priority, reverse=True)
+    return matched
+
+
+def fuzzy_match_entries(account: str, lookup_file=None,
+                        threshold: float = 0.6) -> List[LookupEntry]:
+    """
+    模糊匹配账号，按相似度降序排序
+
+    Args:
+        account: 银行账号
+        lookup_file: 查找表文件路径
+        threshold: 相似度阈值（0-1），默认 0.6
+
+    Returns:
+        匹配的条目列表，按相似度降序排序
+    """
+    entries = read_lookup_entries(lookup_file)
+    target_norm = _normalize_account_str(account)
+
+    if not target_norm:
+        return []
+
+    matched = []
+    for entry in entries:
+        entry_norm = _normalize_account_str(entry.account)
+        if not entry_norm:
+            continue
+        sim = _calculate_similarity(target_norm, entry_norm)
+        if sim >= threshold:
+            matched.append((sim, entry))
+
+    matched.sort(key=lambda x: x[0], reverse=True)
+    return [entry for _, entry in matched]
+
+
+def _calculate_similarity(s1: str, s2: str) -> float:
+    """
+    计算两个字符串的相似度（基于编辑距离）
+    返回 0-1 之间的值，1 表示完全相同
+    """
+    if s1 == s2:
+        return 1.0
+    if not s1 or not s2:
+        return 0.0
+
+    len1, len2 = len(s1), len(s2)
+    if len1 == 0 or len2 == 0:
+        return 0.0
+
+    dp = [[0] * (len2 + 1) for _ in range(len1 + 1)]
+    for i in range(len1 + 1):
+        dp[i][0] = i
+    for j in range(len2 + 1):
+        dp[0][j] = j
+
+    for i in range(1, len1 + 1):
+        for j in range(1, len2 + 1):
+            if s1[i - 1] == s2[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]
+            else:
+                dp[i][j] = min(dp[i - 1][j] + 1,
+                               dp[i][j - 1] + 1,
+                               dp[i - 1][j - 1] + 1)
+
+    max_len = max(len1, len2)
+    if max_len == 0:
+        return 0.0
+    return 1.0 - dp[len1][len2] / max_len
+
+
+def get_subject_info(account: str, lookup_file=None,
+                     use_fuzzy: bool = False,
+                     fuzzy_threshold: float = 0.6) -> Dict[str, any]:
+    """
+    获取账号对应的主体信息（包含扩展字段）
+
+    Args:
+        account: 银行账号
+        lookup_file: 查找表文件路径
+        use_fuzzy: 是否启用模糊匹配
+        fuzzy_threshold: 模糊匹配相似度阈值
+
+    Returns:
+        字典，包含 subject、account、priority、extra_fields、matched 等信息
+    """
+    result = {
+        'subject': '',
+        'account': account,
+        'priority': 0,
+        'extra_fields': {},
+        'matched': False,
+        'fuzzy_matched': False,
+        'similarity': 0.0,
+    }
+
+    if not account:
+        return result
+
+    exact_entries = get_entries_by_account(account, lookup_file)
+    if exact_entries:
+        entry = exact_entries[0]
+        result['subject'] = entry.subject
+        result['account'] = entry.account
+        result['priority'] = entry.priority
+        result['extra_fields'] = dict(entry.extra_fields) if entry.extra_fields else {}
+        result['matched'] = True
+        result['similarity'] = 1.0
+        return result
+
+    if use_fuzzy:
+        fuzzy_entries = fuzzy_match_entries(account, lookup_file, fuzzy_threshold)
+        if fuzzy_entries:
+            entry = fuzzy_entries[0]
+            result['subject'] = entry.subject
+            result['account'] = entry.account
+            result['priority'] = entry.priority
+            result['extra_fields'] = dict(entry.extra_fields) if entry.extra_fields else {}
+            result['matched'] = True
+            result['fuzzy_matched'] = True
+            target_norm = _normalize_account_str(account)
+            entry_norm = _normalize_account_str(entry.account)
+            result['similarity'] = _calculate_similarity(target_norm, entry_norm)
+            return result
+
+    return result
 
 
 def add_entry(subject: str, account: str, lookup_file=None) -> Tuple[bool, str]:
@@ -506,7 +737,7 @@ def delete_entry(account: str, lookup_file=None) -> Tuple[bool, str]:
 def import_from_excel(import_file: str, overwrite: bool = False,
                       lookup_file=None) -> Tuple[bool, str, Dict]:
     """
-    从 Excel 文件导入条目
+    从 Excel 文件导入条目（支持优先级和扩展字段）
 
     Args:
         import_file: 要导入的 Excel 文件路径
@@ -524,37 +755,7 @@ def import_from_excel(import_file: str, overwrite: bool = False,
     stats = {'imported': 0, 'updated': 0, 'skipped': 0, 'total': 0}
 
     try:
-        df = pd.read_excel(import_file, header=None)
-
-        imported_entries: List[LookupEntry] = []
-        header_keywords = {'主体名称', '银行账号', '主体', '账号', 'account', 'subject'}
-
-        for row_idx, (_, row) in enumerate(df.iterrows()):
-            subject = row.iloc[0] if len(row) > 0 else None
-            account = row.iloc[1] if len(row) > 1 else None
-
-            if subject is None and account is None:
-                continue
-
-            subject_str = str(subject).strip() if subject is not None else ''
-            account_str = _normalize_account_str(account)
-
-            if row_idx == 0:
-                first_col = subject_str.lower()
-                second_col = str(account).strip().lower() if account is not None else ''
-                if (first_col in header_keywords or second_col in header_keywords):
-                    logger.debug('检测到表头行，已跳过: %s, %s', subject_str, account_str)
-                    continue
-
-            if not account_str:
-                stats['skipped'] += 1
-                continue
-
-            imported_entries.append(LookupEntry(
-                subject=subject_str,
-                account=account_str
-            ))
-
+        imported_entries = read_lookup_entries(import_file)
         stats['total'] = len(imported_entries)
 
         if overwrite:
@@ -571,8 +772,12 @@ def import_from_excel(import_file: str, overwrite: bool = False,
             key = _account_key(entry.account)
             if key in existing_map:
                 idx = existing_map[key]
-                if existing_entries[idx].subject != entry.subject:
+                if (existing_entries[idx].subject != entry.subject or
+                    existing_entries[idx].priority != entry.priority or
+                    existing_entries[idx].extra_fields != entry.extra_fields):
                     existing_entries[idx].subject = entry.subject
+                    existing_entries[idx].priority = entry.priority
+                    existing_entries[idx].extra_fields = dict(entry.extra_fields)
                     stats['updated'] += 1
                 else:
                     stats['skipped'] += 1
@@ -593,7 +798,7 @@ def import_from_excel(import_file: str, overwrite: bool = False,
 
 def export_to_excel(export_file: str, lookup_file=None) -> Tuple[bool, str]:
     """
-    导出查找表到 Excel 文件
+    导出查找表到 Excel 文件（支持优先级和扩展字段）
 
     Args:
         export_file: 导出文件路径
@@ -611,12 +816,34 @@ def export_to_excel(export_file: str, lookup_file=None) -> Tuple[bool, str]:
         ws = wb.active
         ws.title = '主体映射'
 
+        all_extra_keys = set()
+        has_priority = any(e.priority != 0 for e in entries)
+        for entry in entries:
+            if entry.extra_fields:
+                all_extra_keys.update(entry.extra_fields.keys())
+
         ws.cell(row=1, column=1, value='主体名称')
         ws.cell(row=1, column=2, value='银行账号')
+        col_idx = 3
+        if has_priority:
+            ws.cell(row=1, column=col_idx, value='优先级')
+            col_idx += 1
+        sorted_extra_keys = sorted(all_extra_keys)
+        for key in sorted_extra_keys:
+            ws.cell(row=1, column=col_idx, value=key)
+            col_idx += 1
 
         for i, entry in enumerate(entries, start=2):
             ws.cell(row=i, column=1, value=entry.subject)
             ws.cell(row=i, column=2, value=entry.account)
+            col_idx = 3
+            if has_priority:
+                ws.cell(row=i, column=col_idx, value=entry.priority)
+                col_idx += 1
+            for key in sorted_extra_keys:
+                val = entry.extra_fields.get(key, '')
+                ws.cell(row=i, column=col_idx, value=val)
+                col_idx += 1
 
         wb.save(export_file)
         wb.close()
@@ -629,7 +856,7 @@ def export_to_excel(export_file: str, lookup_file=None) -> Tuple[bool, str]:
 
 def search_entries(keyword: str = '', lookup_file=None) -> List[LookupEntry]:
     """
-    搜索条目（按主体名称或账号模糊匹配）
+    搜索条目（按主体名称、账号、扩展字段模糊匹配）
 
     Args:
         keyword: 搜索关键词
@@ -647,10 +874,20 @@ def search_entries(keyword: str = '', lookup_file=None) -> List[LookupEntry]:
     results = []
 
     for entry in entries:
-        if (keyword in entry.subject.lower() or
-                keyword in entry.account.lower() or
-                keyword in _normalize_account_str(entry.account)):
+        if keyword in entry.subject.lower():
             results.append(entry)
+            continue
+        if keyword in entry.account.lower():
+            results.append(entry)
+            continue
+        if keyword in _normalize_account_str(entry.account):
+            results.append(entry)
+            continue
+        if entry.extra_fields:
+            for val in entry.extra_fields.values():
+                if keyword in str(val).lower():
+                    results.append(entry)
+                    break
 
     return results
 

@@ -74,94 +74,12 @@ except (ImportError, ModuleNotFoundError):
     tk = None
 
 
-def _normalize_path(path):
-    """规范化路径：展开用户目录、去除引号、转为绝对路径、规范化斜杠"""
-    if not path:
-        return ''
-    path = path.strip().strip('"').strip("'")
-    path = os.path.expanduser(path)
-    path = os.path.abspath(path)
-    path = os.path.normpath(path)
-    return path
-
-
-_cli_default_dir = None
-_cli_default_file = None
-
-
-def set_cli_default_dir(path):
-    """设置全局默认文件夹路径，供 cli_askdirectory 使用"""
-    global _cli_default_dir
-    _cli_default_dir = _normalize_path(path) if path else None
-
-
-def get_cli_default_dir():
-    """获取全局默认文件夹路径"""
-    return _cli_default_dir
-
-
-def set_cli_default_file(path):
-    """设置全局默认文件路径，供 cli_askfile 使用"""
-    global _cli_default_file
-    _cli_default_file = _normalize_path(path) if path else None
-
-
-def get_cli_default_file():
-    """获取全局默认文件路径"""
-    return _cli_default_file
-
-
-def cli_askdirectory(title='请选择文件夹', default_path=None, max_retries=3):
-    """
-    命令行模式下让用户输入文件夹路径。
-
-    Args:
-        title: 提示标题
-        default_path: 默认路径，若提供且有效则直接返回，无需用户输入；
-                      若为 None 则尝试使用全局默认路径（set_cli_default_dir 设置）
-        max_retries: 最大重试次数
-
-    Returns:
-        有效的文件夹绝对路径，或空字符串（用户取消/重试次数耗尽）
-    """
-    if default_path is None:
-        default_path = _cli_default_dir
-
-    if default_path:
-        normalized = _normalize_path(default_path)
-        if os.path.isdir(normalized):
-            return normalized
-        else:
-            print(f'\n[提示] 默认路径无效: {default_path}')
-
+def cli_askdirectory(title='请选择文件夹'):
+    """命令行模式下让用户输入文件夹路径"""
     print(f'\n{title}')
-    print('（输入 q 取消，支持 ~ 和相对路径）')
-
-    for attempt in range(max_retries):
-        prompt = '请输入文件夹路径: ' if attempt == 0 else f'请重新输入文件夹路径（还可重试 {max_retries - attempt} 次）: '
-        raw = input(prompt).strip()
-
-        if raw.lower() == 'q':
-            print('已取消选择。')
-            return ''
-
-        if not raw:
-            print('❌ 路径不能为空，请重新输入。')
-            continue
-
-        normalized = _normalize_path(raw)
-
-        if not os.path.exists(normalized):
-            print(f'❌ 路径不存在: {normalized}')
-            continue
-
-        if not os.path.isdir(normalized):
-            print(f'❌ 路径不是文件夹: {normalized}')
-            continue
-
-        return normalized
-
-    print(f'❌ 已超过最大重试次数（{max_retries} 次）。')
+    path = input('请输入文件夹路径: ').strip().strip('"').strip("'")
+    if path and os.path.isdir(path):
+        return path
     return ''
 
 
@@ -175,57 +93,12 @@ def cli_showwarning(title, message):
     print(f'\n[警告 - {title}] {message}')
 
 
-def cli_askfile(title='请选择文件', default_path=None, max_retries=3):
-    """
-    命令行模式下让用户输入文件路径。
-
-    Args:
-        title: 提示标题
-        default_path: 默认路径，若提供且有效则直接返回，无需用户输入；
-                      若为 None 则尝试使用全局默认路径（set_cli_default_file 设置）
-        max_retries: 最大重试次数
-
-    Returns:
-        有效的文件绝对路径，或空字符串（用户取消/重试次数耗尽）
-    """
-    if default_path is None:
-        default_path = _cli_default_file
-
-    if default_path:
-        normalized = _normalize_path(default_path)
-        if os.path.isfile(normalized):
-            return normalized
-        else:
-            print(f'\n[提示] 默认路径无效: {default_path}')
-
+def cli_askfile(title='请选择文件'):
+    """命令行模式下让用户输入文件路径"""
     print(f'\n{title}')
-    print('（输入 q 取消，支持 ~ 和相对路径）')
-
-    for attempt in range(max_retries):
-        prompt = '请输入文件路径: ' if attempt == 0 else f'请重新输入文件路径（还可重试 {max_retries - attempt} 次）: '
-        raw = input(prompt).strip()
-
-        if raw.lower() == 'q':
-            print('已取消选择。')
-            return ''
-
-        if not raw:
-            print('❌ 路径不能为空，请重新输入。')
-            continue
-
-        normalized = _normalize_path(raw)
-
-        if not os.path.exists(normalized):
-            print(f'❌ 路径不存在: {normalized}')
-            continue
-
-        if not os.path.isfile(normalized):
-            print(f'❌ 路径不是文件: {normalized}')
-            continue
-
-        return normalized
-
-    print(f'❌ 已超过最大重试次数（{max_retries} 次）。')
+    path = input('请输入文件路径: ').strip().strip('"').strip("'")
+    if path and os.path.isfile(path):
+        return path
     return ''
 
 
@@ -410,570 +283,6 @@ def _gui_askmode_full():
     return result['mode']
 
 
-# ──────────────────────────────────────────────
-# 进度条窗口与进度回调机制
-# ──────────────────────────────────────────────
-
-@dataclass
-class ProgressInfo:
-    """进度信息数据类"""
-    stage: str = ''
-    stage_index: int = 0
-    total_stages: int = 0
-    percent: int = 0
-    message: str = ''
-    current_file: str = ''
-    processed_files: int = 0
-    total_files: int = 0
-    processed_records: int = 0
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-
-class ProgressWindow:
-    """
-    GUI 进度条窗口，在批量处理时显示当前进度和阶段状态。
-    使用 after() 方法确保 UI 更新在主线程中执行，避免线程安全问题。
-    """
-
-    STAGES = [
-        ('初始化', '正在初始化处理环境...'),
-        ('扫描文件', '正在扫描文件夹中的 Excel 文件...'),
-        ('识别银行', '正在识别各文件的银行类型...'),
-        ('解析文件', '正在解析银行流水文件...'),
-        ('合并数据', '正在合并并去重数据...'),
-        ('导出总表', '正在导出总表文件...'),
-        ('黑白名单', '正在应用对方户名黑白名单...'),
-        ('数据库', '正在写入数据库...'),
-        ('生成报告', '正在生成汇总与检验报告...'),
-        ('完成', '处理完成！'),
-    ]
-
-    def __init__(self, title='处理进度', parent=None):
-        if not HAS_TKINTER or tk is None:
-            self.root = None
-            return
-
-        try:
-            if parent:
-                self.root = tk.Toplevel(parent)
-            else:
-                self.root = tk.Tk()
-                self.root.title(title)
-        except Exception:
-            self.root = None
-            return
-
-        self.root.title(title)
-        self.root.geometry('560x420')
-        self.root.resizable(False, False)
-        self.root.attributes('-topmost', True)
-
-        try:
-            self.root.option_add('*Font', 'Arial 10')
-        except Exception:
-            pass
-
-        self._build_ui()
-        self._cancelled = False
-        self._closed = False
-
-    def _build_ui(self):
-        """构建 UI 组件"""
-        main_frame = tk.Frame(self.root, padx=20, pady=15)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        title_label = tk.Label(
-            main_frame,
-            text='银行流水批量处理',
-            font=('Arial', 16, 'bold'),
-            fg='#2c3e50',
-        )
-        title_label.pack(pady=(0, 5))
-
-        self.stage_label = tk.Label(
-            main_frame,
-            text='准备中...',
-            font=('Arial', 12, 'bold'),
-            fg='#3498db',
-            anchor='w',
-        )
-        self.stage_label.pack(fill=tk.X, pady=(10, 3))
-
-        from tkinter import ttk
-        self.progress_bar = ttk.Progressbar(
-            main_frame,
-            orient='horizontal',
-            length=520,
-            mode='determinate',
-            maximum=100,
-        )
-        self.progress_bar.pack(fill=tk.X, pady=5)
-
-        self.percent_label = tk.Label(
-            main_frame,
-            text='0%',
-            font=('Arial', 11),
-            fg='#7f8c8d',
-            anchor='e',
-        )
-        self.percent_label.pack(fill=tk.X, pady=(0, 10))
-
-        self.message_label = tk.Label(
-            main_frame,
-            text='正在准备处理任务...',
-            font=('Arial', 10),
-            fg='#555',
-            anchor='w',
-            wraplength=520,
-            justify='left',
-        )
-        self.message_label.pack(fill=tk.X, pady=(5, 5))
-
-        file_frame = tk.Frame(main_frame)
-        file_frame.pack(fill=tk.X, pady=(5, 5))
-        tk.Label(
-            file_frame,
-            text='当前文件:',
-            font=('Arial', 9, 'bold'),
-            fg='#666',
-        ).pack(side=tk.LEFT, anchor='w')
-        self.current_file_label = tk.Label(
-            file_frame,
-            text='-',
-            font=('Arial', 9),
-            fg='#888',
-            anchor='w',
-        )
-        self.current_file_label.pack(side=tk.LEFT, padx=(5, 0), anchor='w')
-
-        stats_frame = tk.LabelFrame(main_frame, text='处理统计', padx=10, pady=8)
-        stats_frame.pack(fill=tk.X, pady=(10, 5))
-
-        self.stats_labels = {}
-        stats = [
-            ('files', '文件进度', '0 / 0'),
-            ('records', '记录数', '0'),
-            ('success', '成功文件', '0'),
-            ('errors', '出错文件', '0'),
-        ]
-        for i, (key, name, default) in enumerate(stats):
-            col = i % 2
-            row = i // 2
-            frm = tk.Frame(stats_frame)
-            frm.grid(row=row, column=col, sticky='w', padx=10, pady=3)
-            tk.Label(
-                frm,
-                text=f'{name}:',
-                font=('Arial', 9, 'bold'),
-                fg='#555',
-                width=10,
-                anchor='w',
-            ).pack(side=tk.LEFT)
-            lbl = tk.Label(
-                frm,
-                text=default,
-                font=('Arial', 9),
-                fg='#333',
-                anchor='w',
-            )
-            lbl.pack(side=tk.LEFT)
-            self.stats_labels[key] = lbl
-
-        btn_frame = tk.Frame(main_frame)
-        btn_frame.pack(fill=tk.X, pady=(15, 0))
-        self.cancel_btn = tk.Button(
-            btn_frame,
-            text='取消处理',
-            width=12,
-            command=self._on_cancel,
-            bg='#e74c3c',
-            fg='white',
-            font=('Arial', 10, 'bold'),
-        )
-        self.cancel_btn.pack(side=tk.RIGHT)
-
-        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
-
-    def _on_cancel(self):
-        """点击取消按钮"""
-        self._cancelled = True
-        self.cancel_btn.config(state=tk.DISABLED, text='取消中...')
-        self.message_label.config(text='正在取消，请稍候...', fg='#e74c3c')
-
-    def _on_close(self):
-        """关闭窗口"""
-        self._cancelled = True
-        self._closed = True
-        try:
-            self.root.destroy()
-        except Exception:
-            pass
-
-    def is_cancelled(self) -> bool:
-        return self._cancelled
-
-    def update_progress(self, info: ProgressInfo):
-        """
-        线程安全地更新进度。通过 after() 将 UI 更新投递到主线程。
-        """
-        if self.root is None or self._closed:
-            return
-        try:
-            self.root.after(0, self._do_update, info)
-        except Exception:
-            pass
-
-    def _do_update(self, info: ProgressInfo):
-        """实际执行 UI 更新（在主线程中）"""
-        if self._closed:
-            return
-
-        try:
-            if info.stage:
-                self.stage_label.config(text=f'【{info.stage_index + 1}/{info.total_stages}】{info.stage}')
-
-            self.progress_bar['value'] = info.percent
-            self.percent_label.config(text=f'{info.percent}%')
-
-            if info.message:
-                self.message_label.config(text=info.message, fg='#555')
-
-            if info.current_file:
-                display_name = os.path.basename(info.current_file)
-                if len(display_name) > 45:
-                    display_name = display_name[:42] + '...'
-                self.current_file_label.config(text=display_name, fg='#2980b9')
-
-            if info.total_files > 0:
-                self.stats_labels['files'].config(text=f'{info.processed_files} / {info.total_files}')
-
-            if info.processed_records > 0:
-                self.stats_labels['records'].config(text=f'{info.processed_records:,}')
-
-            if 'success_count' in info.extra:
-                self.stats_labels['success'].config(text=str(info.extra['success_count']))
-
-            if 'error_count' in info.extra:
-                self.stats_labels['errors'].config(text=str(info.extra['error_count']),
-                                                    fg='#e74c3c' if info.extra['error_count'] > 0 else '#333')
-
-            self.root.update_idletasks()
-        except Exception:
-            pass
-
-    def set_completed(self, final_message: str = '处理完成！'):
-        """标记为完成状态"""
-        if self.root is None or self._closed:
-            return
-        try:
-            self.root.after(0, self._do_completed, final_message)
-        except Exception:
-            pass
-
-    def _do_completed(self, final_message: str):
-        self.progress_bar['value'] = 100
-        self.percent_label.config(text='100%')
-        self.stage_label.config(text=f'【{len(self.STAGES)}/{len(self.STAGES)}】完成', fg='#27ae60')
-        self.message_label.config(text=final_message, fg='#27ae60')
-        self.cancel_btn.config(text='关闭', command=self._on_close, bg='#27ae60')
-        try:
-            self.root.update_idletasks()
-        except Exception:
-            pass
-
-    def set_error(self, error_message: str):
-        """标记为错误状态"""
-        if self.root is None or self._closed:
-            return
-        try:
-            self.root.after(0, self._do_error, error_message)
-        except Exception:
-            pass
-
-    def _do_error(self, error_message: str):
-        self.stage_label.config(text='处理出错', fg='#e74c3c')
-        self.message_label.config(text=error_message, fg='#e74c3c')
-        self.cancel_btn.config(text='关闭', command=self._on_close, bg='#e74c3c')
-        try:
-            self.root.update_idletasks()
-        except Exception:
-            pass
-
-    def show(self):
-        """显示窗口"""
-        if self.root is None:
-            return
-        try:
-            self.root.update()
-            self.root.deiconify()
-            self.root.lift()
-        except Exception:
-            pass
-
-    def close(self):
-        """关闭窗口"""
-        self._closed = True
-        if self.root is not None:
-            try:
-                self.root.after(0, self.root.destroy)
-            except Exception:
-                pass
-
-    def wait(self, timeout_ms: int = 100):
-        """等待指定时间，同时处理 UI 事件"""
-        if self.root is None or self._closed:
-            return
-        try:
-            self.root.update()
-            self.root.after(timeout_ms)
-        except Exception:
-            pass
-
-
-class ResultDetailWindow:
-    """
-    GUI 结果详情窗口，展示处理完成后以结构化方式展示统计摘要和文件清单。
-    包含按银行、按主体统计摘要，以及成功/未处理/失败三类文件清单。
-    """
-
-    def __init__(self, result: ProcessingResult, title='处理结果详情', parent=None):
-        if not HAS_TKINTER or tk is None:
-            self.root = None
-            return
-
-        try:
-            if parent:
-                self.root = tk.Toplevel(parent)
-            else:
-                self.root = tk.Tk()
-                self.root.title(title)
-        except Exception:
-            self.root = None
-            return
-
-        self.root.title(title)
-        self.root.geometry('780x620')
-        self.root.minsize(640, 480)
-        self.root.attributes('-topmost', True)
-
-        try:
-            self.root.option_add('*Font', 'Arial 10')
-        except Exception:
-            pass
-
-        self.result = result
-        self.summary = build_processing_summary(result.file_process_details)
-        self._closed = False
-
-        self._build_ui()
-
-    def _build_ui(self):
-        """构建 UI 组件"""
-        from tkinter import ttk
-
-        main_frame = tk.Frame(self.root, padx=15, pady=12)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        title_label = tk.Label(
-            main_frame,
-            text='处理结果详情',
-            font=('Arial', 16, 'bold'),
-            fg='#2c3e50',
-        )
-        title_label.pack(pady=(0, 8))
-
-        self._build_summary_section(main_frame)
-        self._build_tabs(main_frame)
-
-        btn_frame = tk.Frame(main_frame)
-        btn_frame.pack(fill=tk.X, pady=(10, 0))
-        close_btn = tk.Button(
-            btn_frame,
-            text='关闭',
-            width=12,
-            command=self._on_close,
-            bg='#3498db',
-            fg='white',
-            font=('Arial', 10, 'bold'),
-        )
-        close_btn.pack(side=tk.RIGHT)
-
-        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
-
-    def _build_summary_section(self, parent):
-        """构建统计摘要区域"""
-        total = self.summary['total']
-        by_bank = self.summary['by_bank']
-        by_subject = self.summary['by_subject']
-
-        summary_frame = tk.LabelFrame(parent, text='总体统计摘要', padx=12, pady=8)
-        summary_frame.pack(fill=tk.X, pady=(0, 8))
-
-        stats = [
-            ('总文件数', total['files'], '#2c3e50'),
-            ('银行数', total['banks'], '#3498db'),
-            ('主体数', total['subjects'], '#9b59b6'),
-            ('成功文件', total['success'], '#27ae60'),
-            ('未处理文件', total['unprocessed'], '#f39c12'),
-            ('失败文件', total['error'], '#e74c3c'),
-            ('提取记录', f"{total['records']:,}", '#2c3e50'),
-            ('跳过行', f"{total['skipped_rows']:,}", '#7f8c8d'),
-        ]
-        for i, (name, value, color) in enumerate(stats):
-            col = i % 4
-            row = i // 4
-            frm = tk.Frame(summary_frame)
-            frm.grid(row=row, column=col, sticky='w', padx=15, pady=3)
-            tk.Label(
-                frm,
-                text=f'{name}:',
-                font=('Arial', 9, 'bold'),
-                fg='#555',
-                width=10,
-                anchor='w',
-            ).pack(side=tk.LEFT)
-            tk.Label(
-                frm,
-                text=str(value),
-                font=('Arial', 10, 'bold'),
-                fg=color,
-                anchor='w',
-            ).pack(side=tk.LEFT)
-
-    def _build_tabs(self, parent):
-        """构建文件清单标签页"""
-        from tkinter import ttk
-
-        tab_frame = tk.LabelFrame(parent, text='文件清单', padx=8, pady=6)
-        tab_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
-
-        notebook = ttk.Notebook(tab_frame)
-        notebook.pack(fill=tk.BOTH, expand=True)
-
-        success_files = self.summary['by_status']['success']
-        unprocessed_files = self.summary['by_status']['unprocessed']
-        error_files = self.summary['by_status']['error']
-
-        self._build_file_tab(notebook, f'成功文件 ({len(success_files)})', success_files, 'success')
-        self._build_file_tab(notebook, f'未处理文件 ({len(unprocessed_files)})', unprocessed_files, 'unprocessed')
-        self._build_file_tab(notebook, f'失败文件 ({len(error_files)})', error_files, 'error')
-
-    def _build_file_tab(self, notebook, tab_title, files, status_type):
-        """构建单个文件清单标签页"""
-        from tkinter import ttk
-
-        frame = tk.Frame(notebook, padx=5, pady=5)
-        notebook.add(frame, text=tab_title)
-
-        columns = ('file_name', 'bank_name', 'subject', 'records', 'skipped_rows')
-        tree = ttk.Treeview(frame, columns=columns, show='headings', height=12)
-
-        tree.heading('file_name', text='文件名')
-        tree.heading('bank_name', text='银行')
-        tree.heading('subject', text='主体')
-        tree.heading('records', text='提取记录')
-        tree.heading('skipped_rows', text='跳过行')
-
-        tree.column('file_name', width=280, anchor='w')
-        tree.column('bank_name', width=120, anchor='center')
-        tree.column('subject', width=140, anchor='center')
-        tree.column('records', width=90, anchor='e')
-        tree.column('skipped_rows', width=80, anchor='e')
-
-        scrollbar = ttk.Scrollbar(frame, orient='vertical', command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        tag_colors = {
-            'success': '#e8f5e9',
-            'unprocessed': '#fff8e1',
-            'error': '#ffebee',
-        }
-        tree.tag_configure(status_type, background=tag_colors.get(status_type, 'white'))
-
-        for d in files:
-            values = (
-                d.file_name or os.path.basename(d.file_path),
-                d.bank_name or '-',
-                d.subject or '-',
-                f"{d.extracted_records:,}" if d.extracted_records else '-',
-                f"{d.skipped_rows:,}" if d.skipped_rows else '-',
-            )
-            tree.insert('', 'end', values=values, tags=(status_type,))
-
-        if not files:
-            tree.insert('', 'end', values=('（无）', '', '', '', ''), tags=('empty',))
-            tree.tag_configure('empty', foreground='#999')
-
-    def _on_close(self):
-        """关闭窗口"""
-        self._closed = True
-        try:
-            self.root.destroy()
-        except Exception:
-            pass
-
-    def show(self):
-        """显示窗口并进入事件循环"""
-        if self.root is None:
-            return
-        try:
-            self.root.update()
-            self.root.deiconify()
-            self.root.lift()
-            self.root.mainloop()
-        except Exception:
-            pass
-
-    def is_closed(self) -> bool:
-        return self._closed
-
-
-def create_progress_callback(progress_window: Optional[ProgressWindow]):
-    """
-    创建进度回调函数。
-    返回一个可调用对象，接收 ProgressInfo 并更新窗口。
-    """
-    if progress_window is None:
-        def _noop_callback(*args, **kwargs):
-            pass
-        return _noop_callback
-
-    def _callback(info: ProgressInfo):
-        progress_window.update_progress(info)
-        if progress_window.is_cancelled():
-            raise RuntimeError('用户取消了操作')
-
-    return _callback
-
-
-def show_result_detail_dialog(result: ProcessingResult, parent=None) -> bool:
-    """
-    显示结果详情对话框。GUI 模式下显示结构化窗口，CLI 模式下打印文本消息。
-
-    Returns:
-        True 表示成功显示了详情窗口，False 表示退化为文本消息
-    """
-    if not HAS_TKINTER or tk is None:
-        return False
-
-    if not result.file_process_details:
-        return False
-
-    try:
-        win = ResultDetailWindow(result, title='处理结果详情', parent=parent)
-        if win.root is not None:
-            win.show()
-            return True
-    except Exception as e:
-        logger = get_logger()
-        logger.warning('结果详情窗口显示失败: %s', e)
-
-    return False
-
-
 def _ask_monitor_or_scheduler():
     """二级菜单：选择监控或调度"""
     if tk is not None:
@@ -1046,105 +355,14 @@ def get_script_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def get_program_dir():
-    """
-    获取程序所在目录（只读目录，用于读取配置文件）。
-    与 get_script_dir() 功能相同，但语义更清晰。
-    """
-    return get_script_dir()
-
-
-def is_writable(dir_path):
-    """
-    检测目录是否具有写入权限。
-
-    Args:
-        dir_path: 待检测的目录路径
-
-    Returns:
-        bool: True 表示可写，False 表示不可写
-    """
-    if not os.path.isdir(dir_path):
-        return False
-    try:
-        test_file = os.path.join(dir_path, '.bankcheck_write_test_' + uuid.uuid4().hex[:8])
-        with open(test_file, 'w') as f:
-            f.write('test')
-        os.remove(test_file)
-        return True
-    except (OSError, IOError):
-        return False
-
-
-def get_user_data_dir():
-    """
-    获取用户可写的应用数据目录。
-    跨平台策略：
-    - Windows: %APPDATA%\\bankcheck 或 %USERPROFILE%\\AppData\\Roaming\\bankcheck
-    - macOS: ~/Library/Application Support/bankcheck
-    - Linux: ~/.bankcheck
-
-    Returns:
-        str: 用户数据目录的绝对路径
-    """
-    app_name = 'bankcheck'
-    if sys.platform.startswith('win'):
-        base_dir = os.environ.get('APPDATA')
-        if not base_dir:
-            base_dir = os.path.expanduser('~\\AppData\\Roaming')
-        return os.path.join(base_dir, app_name)
-    elif sys.platform == 'darwin':
-        return os.path.join(os.path.expanduser('~/Library/Application Support'), app_name)
-    else:
-        return os.path.join(os.path.expanduser('~'), '.' + app_name)
-
-
-def get_writable_dir():
-    """
-    获取可写的工作目录。
-    策略：
-    1. 优先尝试使用程序目录（get_program_dir()）
-    2. 如果程序目录不可写（如安装在 Program Files、/Applications 等受保护目录），
-       则使用用户数据目录（get_user_data_dir()）
-
-    Returns:
-        str: 可写目录的绝对路径
-    """
-    program_dir = get_program_dir()
-    if is_writable(program_dir):
-        return program_dir
-    user_data_dir = get_user_data_dir()
-    os.makedirs(user_data_dir, exist_ok=True)
-    return user_data_dir
-
-
-def get_output_dir(subdir=None):
-    """
-    获取输出文件目录，用于保存日志、总表、查找表、数据库等可写文件。
-
-    Args:
-        subdir: 可选子目录名称，如 'logs'、'history' 等
-
-    Returns:
-        str: 输出目录的绝对路径
-    """
-    base_dir = get_writable_dir()
-    if subdir:
-        output_dir = os.path.join(base_dir, subdir)
-    else:
-        output_dir = base_dir
-    os.makedirs(output_dir, exist_ok=True)
-    return output_dir
-
-
 def setup_logging():
     """
     初始化日志系统。
     - 控制台输出 INFO 级别及以上日志
     - 日志文件（bankcheck.log）记录 DEBUG 级别及以上日志，
-      文件保存在可写目录下（优先程序目录，否则用户数据目录）
+      文件保存在脚本/exe 所在目录下
     """
-    log_dir = get_output_dir()
+    log_dir = get_script_dir()
     log_file = os.path.join(log_dir, 'bankcheck.log')
 
     logger = logging.getLogger('bankcheck')
@@ -1226,8 +444,9 @@ def convert_xls_to_xlsx(xls_path):
                 ws.cell(row=row_idx + 1, column=col_idx + 1, value=cell_value)
 
     # 保存为临时 .xlsx 文件
-    fd, tmp_path = tempfile.mkstemp(suffix='.xlsx', prefix='bankcheck_')
-    os.close(fd)
+    tmp_dir = tempfile.gettempdir()
+    base_name = os.path.splitext(os.path.basename(xls_path))[0]
+    tmp_path = os.path.join(tmp_dir, f'{base_name}_converted.xlsx')
     wb.save(tmp_path)
     wb.close()
     xls_book.release_resources()
@@ -1382,7 +601,7 @@ class GenericBankParser:
         self.rule = rule
         self.logger = get_logger()
 
-    def parse(self, filepath: str, lookup_file: str) -> Tuple[List[Dict[str, Any]], FileProcessDetail]:
+    def parse(self, filepath: str, lookup_file: str) -> List[Dict[str, Any]]:
         """
         根据配置规则解析银行流水 Excel 文件
 
@@ -1391,16 +610,9 @@ class GenericBankParser:
             lookup_file: 主体查找表路径
 
         Returns:
-            tuple: (解析后的记录列表, 文件处理详情)
+            解析后的记录列表
         """
         self.logger.info('开始处理%s文件: %s', self.rule.bank_name, filepath)
-
-        detail = FileProcessDetail(
-            file_path=filepath,
-            file_name=os.path.basename(filepath),
-            bank_name=self.rule.bank_name,
-            process_status='处理中',
-        )
 
         wb, tmp_path = open_workbook_compat(filepath)
         try:
@@ -1411,34 +623,17 @@ class GenericBankParser:
                 self.logger.warning('文件「%s」%s 单元格为空，银行账号缺失',
                                     filepath, self.rule.account_cell)
 
-            detail.bank_account = str(bank_account) if bank_account is not None else ''
-            subject = get_subject(bank_account, lookup_file)
-            detail.subject = subject
+            subject_info = get_subject_info(bank_account, lookup_file)
+            subject = subject_info.get('subject', '')
+            extra_fields = subject_info.get('extra_fields', {})
 
             rows = []
             columns = self.rule.columns
             start_row = self.rule.start_row
-            detail.total_rows_in_excel = ws.max_row
 
             for row_idx in range(start_row, ws.max_row + 1):
                 trade_date = ws.cell(row=row_idx, column=columns['trade_date']).value
                 if trade_date is None:
-                    raw_parts = []
-                    for col_name, col_idx in columns.items():
-                        try:
-                            v = ws.cell(row=row_idx, column=col_idx).value
-                            if v is not None:
-                                raw_parts.append(f"{col_name}={v}")
-                        except Exception:
-                            pass
-                    detail.skipped_rows += 1
-                    detail.skipped_details.append(SkippedRowDetail(
-                        file_path=filepath,
-                        file_name=os.path.basename(filepath),
-                        row_number=row_idx,
-                        reason='交易日期为空',
-                        raw_content='; '.join(raw_parts) if raw_parts else '(整行为空)',
-                    ))
                     continue
 
                 payment_val = ws.cell(row=row_idx, column=columns['payment']).value
@@ -1457,7 +652,7 @@ class GenericBankParser:
                 balance = ws.cell(row=row_idx, column=columns['balance']).value
                 transaction_id = ws.cell(row=row_idx, column=columns['transaction_id']).value
 
-                rows.append({
+                record = {
                     '唯一id': generate_unique_id(),
                     '银行': self.rule.bank_name,
                     '银行账号': bank_account,
@@ -1469,18 +664,16 @@ class GenericBankParser:
                     '对方户名': counterpart,
                     '余额': balance,
                     '交易流水号': transaction_id,
-                })
+                }
+                for key, val in extra_fields.items():
+                    record[key] = val
 
-            detail.extracted_records = len(rows)
-            detail.process_status = '成功'
+                rows.append(record)
+
             wb.close()
-            self.logger.info('%s文件处理完成，提取 %d 条记录，跳过 %d 行',
-                             self.rule.bank_name, len(rows), detail.skipped_rows)
-            return rows, detail
-        except Exception as e:
-            detail.process_status = '失败'
-            detail.error_message = str(e)
-            raise
+            self.logger.info('%s文件处理完成，提取 %d 条记录',
+                             self.rule.bank_name, len(rows))
+            return rows
         finally:
             cleanup_temp_file(tmp_path)
 
@@ -1493,13 +686,7 @@ def _create_bank_processor(bank_name: str):
         if rule is None:
             logger = get_logger()
             logger.error('未找到银行「%s」的解析规则', bank_name)
-            return [], FileProcessDetail(
-                file_path=filepath,
-                file_name=os.path.basename(filepath),
-                bank_name=bank_name,
-                process_status='失败',
-                error_message=f'未找到银行「{bank_name}」的解析规则',
-            )
+            return []
         parser = GenericBankParser(rule)
         return parser.parse(filepath, lookup_file)
     return processor
@@ -1549,121 +736,47 @@ def identify_bank(filepath):
 LOOKUP_FILE_NAMES = ['主体查找表.xlsx', '主体查找表.xls']
 
 
-def _find_lookup_in_dir(directory):
+def find_lookup_file(script_dir):
     """
-    在指定目录下查找主体查找表 Excel 文件（内部辅助函数）。
+    在脚本所在目录下查找主体查找表 Excel 文件。
 
     查找策略（按优先级）：
     1. 优先按文件名精确匹配 "主体查找表.xlsx" 或 "主体查找表.xls"
     2. 若未精确匹配到，回退到查找目录下唯一的 Excel 文件（排除输出总表和临时文件）
     """
-    if not directory or not os.path.isdir(directory):
-        return None
+    logger = get_logger()
 
     # ── 策略 1：按文件名精确匹配 ──
     for name in LOOKUP_FILE_NAMES:
-        candidate = os.path.join(directory, name)
+        candidate = os.path.join(script_dir, name)
         if os.path.isfile(candidate):
+            logger.info('精确匹配到主体查找表: %s', candidate)
             return candidate
 
     # ── 策略 2：回退到唯一 Excel 文件 ──
     excel_exts = ('.xlsx', '.xls')
     exclude_names = {'银行流水总表.xlsx', '银行流水总表.xls'}
     excel_files = []
-    try:
-        for f in os.listdir(directory):
-            if f.startswith('~$'):
-                continue
-            if f in exclude_names:
-                continue
-            if f.lower().endswith(excel_exts):
-                excel_files.append(os.path.join(directory, f))
-    except OSError:
-        return None
+    for f in os.listdir(script_dir):
+        if f.startswith('~$'):
+            continue
+        if f in exclude_names:
+            continue
+        if f.lower().endswith(excel_exts):
+            excel_files.append(os.path.join(script_dir, f))
 
     if len(excel_files) == 1:
+        logger.info('找到主体查找表（唯一 Excel 文件）: %s', excel_files[0])
         return excel_files[0]
-    return None
-
-
-def _copy_lookup_to_output(program_lookup_path, output_dir):
-    """
-    将程序目录下的查找表复制到用户可写的输出目录。
-
-    Args:
-        program_lookup_path: 程序目录下的查找表路径
-        output_dir: 输出目录路径
-
-    Returns:
-        str: 复制后的目标路径，失败返回 None
-    """
-    logger = get_logger()
-    if not program_lookup_path or not os.path.isfile(program_lookup_path):
-        return None
-
-    try:
-        filename = os.path.basename(program_lookup_path)
-        target_path = os.path.join(output_dir, filename)
-        if os.path.exists(target_path):
-            return target_path
-        os.makedirs(output_dir, exist_ok=True)
-        shutil.copy2(program_lookup_path, target_path)
-        logger.info('已将查找表从程序目录复制到输出目录: %s -> %s',
-                    program_lookup_path, target_path)
-        return target_path
-    except Exception as e:
-        logger.warning('复制查找表到输出目录失败: %s', e)
-        return None
-
-
-def find_lookup_file(script_dir=None):
-    """
-    智能查找主体查找表 Excel 文件。
-
-    查找策略（按优先级）：
-    1. 如果传入了 script_dir 参数，只在该目录查找（向后兼容，测试专用）
-    2. 否则优先在输出目录（可写目录）查找
-    3. 如果在输出目录没找到，在程序目录查找
-    4. 如果在程序目录找到但输出目录没找到，自动复制到输出目录
-    5. 在每个目录内：
-       - 优先按文件名精确匹配 "主体查找表.xlsx" 或 "主体查找表.xls"
-       - 若未精确匹配到，回退到查找目录下唯一的 Excel 文件
-
-    Args:
-        script_dir: 可选，指定的脚本目录（兼容旧接口）
-
-    Returns:
-        Optional[str]: 查找表文件路径，未找到返回 None
-    """
-    logger = get_logger()
-    output_dir = get_output_dir()
-    program_dir = get_program_dir()
-
-    # ── 策略 0：如果传入了 script_dir，只在该目录查找（向后兼容） ──
-    if script_dir is not None:
-        custom_lookup = _find_lookup_in_dir(script_dir)
-        if custom_lookup:
-            logger.info('在指定目录找到主体查找表: %s', custom_lookup)
-            return custom_lookup
-        logger.warning('在指定目录未找到主体查找表: %s', script_dir)
-        return None
-
-    # ── 策略 1：优先在输出目录查找 ──
-    output_lookup = _find_lookup_in_dir(output_dir)
-    if output_lookup:
-        logger.info('在输出目录找到主体查找表: %s', output_lookup)
-        return output_lookup
-
-    # ── 策略 2：在程序目录查找，并尝试复制到输出目录 ──
-    program_lookup = _find_lookup_in_dir(program_dir)
-    if program_lookup:
-        logger.info('在程序目录找到主体查找表: %s', program_lookup)
-        copied_path = _copy_lookup_to_output(program_lookup, output_dir)
-        if copied_path:
-            return copied_path
-        return program_lookup
-
-    logger.warning('未找到主体查找表文件')
+    elif len(excel_files) == 0:
+        logger.warning('程序目录下未找到任何 Excel 文件作为主体查找表')
+    else:
+        logger.warning(
+            '程序目录下存在 %d 个 Excel 文件，无法确定唯一查找表: %s。'
+            '建议将查找表文件命名为 "主体查找表.xlsx"',
+            len(excel_files),
+            [os.path.basename(f) for f in excel_files],
+        )
     return None
 
 
@@ -1697,37 +810,257 @@ def _account_key(value):
 def get_subject(bank_account, lookup_file):
     """
     根据银行账号在查找表中找到对应的主体。
-    查找表中 B 列为银行账号，取同一行 A 列的值作为主体。
+    同一账号对应多个主体时，返回优先级最高的。
+    """
+    info = get_subject_info(bank_account, lookup_file)
+    return info.get('subject', '')
+
+
+def get_subject_info(bank_account, lookup_file, use_fuzzy=False, fuzzy_threshold=0.6):
+    """
+    根据银行账号获取主体信息（包含扩展字段、优先级等）。
+
+    Args:
+        bank_account: 银行账号
+        lookup_file: 查找表文件路径
+        use_fuzzy: 是否启用模糊匹配
+        fuzzy_threshold: 模糊匹配相似度阈值
+
+    Returns:
+        字典，包含 subject、priority、extra_fields、matched、fuzzy_matched、similarity 等
     """
     logger = get_logger()
 
+    result = {
+        'subject': '',
+        'account': bank_account,
+        'priority': 0,
+        'extra_fields': {},
+        'matched': False,
+        'fuzzy_matched': False,
+        'similarity': 0.0,
+    }
+
     if not lookup_file or not os.path.exists(lookup_file):
         logger.warning('主体查找表不存在或未指定，银行账号「%s」的主体将为空', bank_account)
-        return ''
+        return result
     if bank_account is None:
         logger.warning('银行账号为空，无法查找主体')
-        return ''
+        return result
 
     target_key = _account_key(bank_account)
     tmp_path = None
     try:
         wb, tmp_path = open_workbook_compat(lookup_file)
         ws = wb.active
-        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=2, max_col=2):
-            cell = row[0]
-            if cell.value is not None and _account_key(cell.value) == target_key:
-                subject = ws.cell(row=cell.row, column=1).value
+
+        header_map = _detect_lookup_header_columns(ws)
+
+        subject_col = _get_lookup_col_index(header_map, ['主体名称', '主体', 'subject', 'Subject'])
+        account_col = _get_lookup_col_index(header_map, ['银行账号', '账号', 'account', 'Account'])
+        priority_col = _get_lookup_col_index(header_map, ['优先级', 'priority', 'Priority'])
+
+        if subject_col is None:
+            subject_col = 1
+        if account_col is None:
+            account_col = 2
+
+        extra_col_names = [
+            name for name in header_map
+            if name not in {'主体名称', '主体', 'subject', 'Subject',
+                           '银行账号', '账号', 'account', 'Account',
+                           '优先级', 'priority', 'Priority'}
+        ]
+
+        exact_matches = []
+        for row_idx in range(2, ws.max_row + 1):
+            account_val = ws.cell(row=row_idx, column=account_col).value
+            if account_val is None:
+                continue
+            if _account_key(account_val) == target_key:
+                subject = ws.cell(row=row_idx, column=subject_col).value or ''
+
+                priority = 0
+                if priority_col is not None:
+                    priority_val = ws.cell(row=row_idx, column=priority_col).value
+                    if priority_val is not None:
+                        try:
+                            priority = int(priority_val)
+                        except (ValueError, TypeError):
+                            priority = 0
+
+                extra_fields = {}
+                for col_name in extra_col_names:
+                    col_idx = header_map[col_name]
+                    val = ws.cell(row=row_idx, column=col_idx).value
+                    extra_fields[col_name] = str(val).strip() if val is not None else ''
+
+                exact_matches.append({
+                    'subject': str(subject).strip() if subject else '',
+                    'priority': priority,
+                    'extra_fields': extra_fields,
+                    'row': row_idx,
+                })
+
+        if exact_matches:
+            exact_matches.sort(key=lambda x: x['priority'], reverse=True)
+            best = exact_matches[0]
+            result['subject'] = best['subject']
+            result['priority'] = best['priority']
+            result['extra_fields'] = best['extra_fields']
+            result['matched'] = True
+            result['similarity'] = 1.0
+            wb.close()
+            cleanup_temp_file(tmp_path)
+            logger.debug('银行账号「%s」匹配到主体: %s（优先级: %d）',
+                         bank_account, best['subject'], best['priority'])
+            return result
+
+        if use_fuzzy:
+            target_norm = _normalize_account_str(bank_account)
+            fuzzy_matches = []
+            for row_idx in range(2, ws.max_row + 1):
+                account_val = ws.cell(row=row_idx, column=account_col).value
+                if account_val is None:
+                    continue
+                entry_norm = _normalize_account_str(account_val)
+                if not entry_norm:
+                    continue
+                sim = _calculate_string_similarity(target_norm, entry_norm)
+                if sim >= fuzzy_threshold:
+                    subject = ws.cell(row=row_idx, column=subject_col).value or ''
+
+                    priority = 0
+                    if priority_col is not None:
+                        priority_val = ws.cell(row=row_idx, column=priority_col).value
+                        if priority_val is not None:
+                            try:
+                                priority = int(priority_val)
+                            except (ValueError, TypeError):
+                                priority = 0
+
+                    extra_fields = {}
+                    for col_name in extra_col_names:
+                        col_idx = header_map[col_name]
+                        val = ws.cell(row=row_idx, column=col_idx).value
+                        extra_fields[col_name] = str(val).strip() if val is not None else ''
+
+                    fuzzy_matches.append({
+                        'subject': str(subject).strip() if subject else '',
+                        'priority': priority,
+                        'extra_fields': extra_fields,
+                        'similarity': sim,
+                        'row': row_idx,
+                    })
+
+            if fuzzy_matches:
+                fuzzy_matches.sort(key=lambda x: (x['similarity'], x['priority']), reverse=True)
+                best = fuzzy_matches[0]
+                result['subject'] = best['subject']
+                result['priority'] = best['priority']
+                result['extra_fields'] = best['extra_fields']
+                result['matched'] = True
+                result['fuzzy_matched'] = True
+                result['similarity'] = best['similarity']
                 wb.close()
                 cleanup_temp_file(tmp_path)
-                logger.debug('银行账号「%s」匹配到主体: %s', bank_account, subject)
-                return subject if subject else ''
+                logger.debug('银行账号「%s」模糊匹配到主体: %s（相似度: %.2f）',
+                             bank_account, best['subject'], best['similarity'])
+                return result
+
         wb.close()
         logger.warning('银行账号「%s」在查找表中未找到对应主体', bank_account)
     except Exception as e:
         logger.error('读取主体查找表「%s」时发生错误: %s', lookup_file, e, exc_info=True)
     finally:
         cleanup_temp_file(tmp_path)
-    return ''
+    return result
+
+
+def _detect_lookup_header_columns(ws) -> Dict[str, int]:
+    """检测查找表表头列"""
+    header_map = {}
+    for col_idx in range(1, ws.max_column + 1):
+        cell_value = ws.cell(row=1, column=col_idx).value
+        if cell_value is None:
+            continue
+        col_name = str(cell_value).strip()
+        if col_name:
+            header_map[col_name] = col_idx
+    return header_map
+
+
+def _get_lookup_col_index(header_map: Dict[str, int], candidates: List[str]) -> Optional[int]:
+    """根据候选列名列表获取列索引"""
+    for name in candidates:
+        if name in header_map:
+            return header_map[name]
+    return None
+
+
+def _calculate_string_similarity(s1: str, s2: str) -> float:
+    """计算两个字符串的相似度（基于编辑距离）"""
+    if s1 == s2:
+        return 1.0
+    if not s1 or not s2:
+        return 0.0
+
+    len1, len2 = len(s1), len(s2)
+    if len1 == 0 or len2 == 0:
+        return 0.0
+
+    dp = [[0] * (len2 + 1) for _ in range(len1 + 1)]
+    for i in range(len1 + 1):
+        dp[i][0] = i
+    for j in range(len2 + 1):
+        dp[0][j] = j
+
+    for i in range(1, len1 + 1):
+        for j in range(1, len2 + 1):
+            if s1[i - 1] == s2[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]
+            else:
+                dp[i][j] = min(dp[i - 1][j] + 1,
+                               dp[i][j - 1] + 1,
+                               dp[i - 1][j - 1] + 1)
+
+    max_len = max(len1, len2)
+    if max_len == 0:
+        return 0.0
+    return 1.0 - dp[len1][len2] / max_len
+
+
+def get_lookup_extra_fields(lookup_file) -> List[str]:
+    """
+    获取查找表中的扩展字段名称列表。
+
+    Args:
+        lookup_file: 查找表文件路径
+
+    Returns:
+        扩展字段名称列表
+    """
+    if not lookup_file or not os.path.exists(lookup_file):
+        return []
+
+    tmp_path = None
+    try:
+        wb, tmp_path = open_workbook_compat(lookup_file)
+        ws = wb.active
+        header_map = _detect_lookup_header_columns(ws)
+        wb.close()
+
+        extra_col_names = [
+            name for name in header_map
+            if name not in {'主体名称', '主体', 'subject', 'Subject',
+                           '银行账号', '账号', 'account', 'Account',
+                           '优先级', 'priority', 'Priority'}
+        ]
+        return sorted(extra_col_names)
+    except Exception:
+        return []
+    finally:
+        cleanup_temp_file(tmp_path)
 
 
 # ──────────────────────────────────────────────
@@ -1814,9 +1147,7 @@ class ProcessingResult:
     processed_files: List[str] = field(default_factory=list)
     unprocessed_files: List[str] = field(default_factory=list)
     error_files: List[Tuple[str, str]] = field(default_factory=list)
-    file_process_details: List[FileProcessDetail] = field(default_factory=list)
     output_path: Optional[str] = None
-    output_paths: Dict[str, Any] = field(default_factory=dict)
     subject_summary_path: Optional[str] = None
     balance_check_path: Optional[str] = None
     duplicate_check_path: Optional[str] = None
@@ -1828,57 +1159,6 @@ class ProcessingResult:
     duplicate_record_count: int = 0
     db_inserted_count: int = 0
     db_duplicate_count: int = 0
-    verification_report_path: Optional[str] = None
-    verification_report_md_path: Optional[str] = None
-
-
-@dataclass
-class SkippedRowDetail:
-    """跳过行明细"""
-    file_path: str = ''
-    file_name: str = ''
-    row_number: int = 0
-    reason: str = ''
-    raw_content: str = ''
-
-
-@dataclass
-class FileProcessDetail:
-    """单文件处理详情"""
-    file_path: str = ''
-    file_name: str = ''
-    bank_name: str = ''
-    bank_account: str = ''
-    subject: str = ''
-    total_rows_in_excel: int = 0
-    extracted_records: int = 0
-    skipped_rows: int = 0
-    skipped_details: List[SkippedRowDetail] = field(default_factory=list)
-    process_status: str = ''
-    error_message: str = ''
-
-
-@dataclass
-class UnmatchedAccount:
-    """主体未匹配账号"""
-    bank_account: str = ''
-    bank_name: str = ''
-    record_count: int = 0
-    total_income: float = 0.0
-    total_expense: float = 0.0
-    file_sources: List[str] = field(default_factory=list)
-
-
-@dataclass
-class VerificationReportData:
-    """检验报告完整数据"""
-    source_info: Dict[str, Any] = field(default_factory=dict)
-    file_details: List[FileProcessDetail] = field(default_factory=list)
-    skipped_rows: List[SkippedRowDetail] = field(default_factory=list)
-    unmatched_accounts: List[UnmatchedAccount] = field(default_factory=list)
-    amount_summary: Dict[str, Any] = field(default_factory=dict)
-    by_subject_summary: List[Dict[str, Any]] = field(default_factory=list)
-    by_bank_summary: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -1887,43 +1167,49 @@ class VerificationReportData:
 
 SUMMARY_TABLE_FILENAME = '银行流水总表.xlsx'
 
-OUTPUT_FORMAT_XLSX = 'xlsx'
-OUTPUT_FORMAT_CSV = 'csv'
-OUTPUT_FORMAT_SPLIT_BY_BANK = 'split_by_bank'
 
-OUTPUT_FORMATS = {
-    OUTPUT_FORMAT_XLSX: 'Excel 总表 (.xlsx)',
-    OUTPUT_FORMAT_CSV: 'CSV 总表 (.csv)',
-    OUTPUT_FORMAT_SPLIT_BY_BANK: '按银行拆分多表',
-}
-
-DEFAULT_OUTPUT_FORMATS = [OUTPUT_FORMAT_XLSX]
+def get_summary_table_path(script_dir, output_dir=None):
+    """获取历史总表文件路径"""
+    base_dir = output_dir or script_dir
+    return os.path.join(base_dir, SUMMARY_TABLE_FILENAME)
 
 
-def get_summary_table_path(script_dir=None, output_dir=None, format_type=None):
+STANDARD_COLUMNS = [
+    '唯一id', '银行', '银行账号', '主体', '交易日期',
+    '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+]
+
+
+def get_summary_columns(records=None, lookup_file=None):
     """
-    获取总表文件路径。
-
-    路径策略：
-    - 如果指定了 output_dir，使用 output_dir
-    - 否则使用可写目录（get_output_dir()）
+    获取总表列名列表，包含标准列和扩展字段列。
 
     Args:
-        script_dir: 可选，兼容旧接口，实际不使用
-        output_dir: 可选，指定输出目录
-        format_type: 可选，输出格式类型，用于生成不同后缀
+        records: 记录列表，用于从中提取扩展字段（可选）
+        lookup_file: 查找表文件路径，用于获取扩展字段（可选）
 
     Returns:
-        str: 总表文件的绝对路径
+        列名列表
     """
-    if output_dir:
-        base_dir = output_dir
-    else:
-        base_dir = get_output_dir()
+    columns = list(STANDARD_COLUMNS)
 
-    if format_type == OUTPUT_FORMAT_CSV:
-        return os.path.join(base_dir, '银行流水总表.csv')
-    return os.path.join(base_dir, SUMMARY_TABLE_FILENAME)
+    extra_fields = set()
+
+    if lookup_file:
+        lookup_extra = get_lookup_extra_fields(lookup_file)
+        extra_fields.update(lookup_extra)
+
+    if records:
+        for record in records:
+            for key in record.keys():
+                if key not in columns:
+                    extra_fields.add(key)
+
+    for field in sorted(extra_fields):
+        if field not in columns:
+            columns.append(field)
+
+    return columns
 
 
 def load_existing_keys(summary_path):
@@ -2011,204 +1297,40 @@ def filter_incremental_records(new_rows, existing_keys):
     return incremental_rows, duplicate_count
 
 
-def _sanitize_filename(name):
-    """清理文件名中的非法字符"""
-    import re
-    return re.sub(r'[\\/:*?"<>|]', '_', name).strip() or '未知'
-
-
-def backup_existing_file(file_path):
+def merge_and_export_summary(existing_records, incremental_rows, script_dir, output_dir=None, lookup_file=None):
     """
-    如果目标文件已存在，按时间戳重命名进行备份。
-
-    备份命名规则：原文件名_YYYYMMDD_HHMMSS.原扩展名
-    例如：银行流水总表.xlsx -> 银行流水总表_20260611_143052.xlsx
+    合并历史记录与增量记录，并输出到总表。
 
     Args:
-        file_path: 待检查的目标文件路径
-
-    Returns:
-        str or None: 如果执行了备份，返回备份文件路径；否则返回 None
-    """
-    logger = get_logger()
-
-    if not file_path or not os.path.exists(file_path):
-        return None
-
-    try:
-        dir_name = os.path.dirname(file_path)
-        base_name = os.path.basename(file_path)
-        name_part, ext_part = os.path.splitext(base_name)
-
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        backup_name = f'{name_part}_{timestamp}{ext_part}'
-        backup_path = os.path.join(dir_name, backup_name)
-
-        counter = 1
-        while os.path.exists(backup_path):
-            backup_name = f'{name_part}_{timestamp}_{counter}{ext_part}'
-            backup_path = os.path.join(dir_name, backup_name)
-            counter += 1
-
-        shutil.copy2(file_path, backup_path)
-        logger.info('已备份历史文件: %s -> %s', file_path, backup_path)
-        return backup_path
-
-    except Exception as e:
-        logger.warning('备份历史文件失败，将继续覆盖写入: %s, 错误: %s', file_path, e)
-        return None
-
-
-def export_summary_to_csv(records, output_dir=None, columns=None):
-    """
-    导出总表为 CSV 格式。
-
-    Args:
-        records: 记录列表
-        output_dir: 输出目录
-        columns: 列名列表，默认使用标准列
+        existing_records: 历史记录列表
+        incremental_rows: 新增记录列表
+        script_dir: 脚本目录
+        output_dir: 输出目录，默认为script_dir
+        lookup_file: 查找表文件路径，用于获取扩展字段
 
     Returns:
         str: 输出文件路径
     """
     logger = get_logger()
 
-    if columns is None:
-        columns = [
-            '唯一id', '银行', '银行账号', '主体', '交易日期',
-            '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
-        ]
-
-    if not records:
-        logger.warning('无任何记录可输出')
-        return None
-
-    df = pd.DataFrame(records, columns=columns)
-    output_path = get_summary_table_path(output_dir=output_dir, format_type=OUTPUT_FORMAT_CSV)
-
-    base_dir = os.path.dirname(output_path)
-    os.makedirs(base_dir, exist_ok=True)
-
-    backup_existing_file(output_path)
-
-    df.to_csv(output_path, index=False, encoding='utf-8-sig')
-
-    logger.info('CSV 总表输出完成: %s（共 %d 条记录）', output_path, len(records))
-    return output_path
-
-
-def export_summary_by_bank(records, output_dir=None, columns=None, format_type=OUTPUT_FORMAT_XLSX):
-    """
-    按银行拆分为多个子表文件导出。
-
-    Args:
-        records: 记录列表
-        output_dir: 输出目录
-        columns: 列名列表，默认使用标准列
-        format_type: 子表格式，支持 xlsx 或 csv
-
-    Returns:
-        List[str]: 输出文件路径列表
-    """
-    logger = get_logger()
-
-    if columns is None:
-        columns = [
-            '唯一id', '银行', '银行账号', '主体', '交易日期',
-            '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
-        ]
-
-    if not records:
-        logger.warning('无任何记录可输出')
-        return []
-
-    if output_dir is None:
-        output_dir = get_output_dir()
-
-    bank_output_dir = os.path.join(output_dir, '按银行拆分')
-    os.makedirs(bank_output_dir, exist_ok=True)
-
-    bank_groups: Dict[str, List[Dict[str, Any]]] = {}
-    for rec in records:
-        bank = str(rec.get('银行') or '').strip() or '未知银行'
-        if bank not in bank_groups:
-            bank_groups[bank] = []
-        bank_groups[bank].append(rec)
-
-    output_paths = []
-    for bank, bank_records in bank_groups.items():
-        safe_bank_name = _sanitize_filename(bank)
-        df = pd.DataFrame(bank_records, columns=columns)
-
-        if format_type == OUTPUT_FORMAT_CSV:
-            file_path = os.path.join(bank_output_dir, f'{safe_bank_name}_流水.csv')
-            df.to_csv(file_path, index=False, encoding='utf-8-sig')
-        else:
-            file_path = os.path.join(bank_output_dir, f'{safe_bank_name}_流水.xlsx')
-            df.to_excel(file_path, index=False, engine='openpyxl')
-
-        output_paths.append(file_path)
-        logger.info('银行子表输出完成: %s（%d 条记录）', file_path, len(bank_records))
-
-    logger.info('按银行拆分导出完成，共生成 %d 个文件', len(output_paths))
-    return output_paths
-
-
-def merge_and_export_summary(existing_records, incremental_rows, script_dir=None, output_dir=None, output_formats=None):
-    """
-    合并历史记录与增量记录，并按指定格式输出到总表。
-
-    Args:
-        existing_records: 历史记录列表
-        incremental_rows: 新增记录列表
-        script_dir: 可选，脚本目录（兼容旧接口）
-        output_dir: 可选，输出目录，默认使用可写目录
-        output_formats: 可选，输出格式列表，如 [OUTPUT_FORMAT_XLSX, OUTPUT_FORMAT_CSV]
-
-    Returns:
-        Dict: 各格式输出文件路径映射
-    """
-    logger = get_logger()
-
-    columns = [
-        '唯一id', '银行', '银行账号', '主体', '交易日期',
-        '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
-    ]
-
     merged_records = existing_records + incremental_rows
 
     if not merged_records:
         logger.warning('无任何记录可输出')
-        return {}
+        return None
 
-    if output_formats is None:
-        output_formats = DEFAULT_OUTPUT_FORMATS
-
+    columns = get_summary_columns(merged_records, lookup_file)
     df = pd.DataFrame(merged_records, columns=columns)
-    base_dir = output_dir or get_output_dir()
-    os.makedirs(base_dir, exist_ok=True)
+    output_path = get_summary_table_path(script_dir, output_dir)
 
-    output_paths: Dict[str, Any] = {}
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
-    if OUTPUT_FORMAT_XLSX in output_formats:
-        xlsx_path = get_summary_table_path(script_dir, output_dir)
-        backup_existing_file(xlsx_path)
-        df.to_excel(xlsx_path, index=False, engine='openpyxl')
-        output_paths[OUTPUT_FORMAT_XLSX] = xlsx_path
-        logger.info('Excel 总表输出完成: %s', xlsx_path)
+    df.to_excel(output_path, index=False, engine='openpyxl')
 
-    if OUTPUT_FORMAT_CSV in output_formats:
-        csv_path = export_summary_to_csv(merged_records, output_dir, columns)
-        output_paths[OUTPUT_FORMAT_CSV] = csv_path
-
-    if OUTPUT_FORMAT_SPLIT_BY_BANK in output_formats:
-        split_paths = export_summary_by_bank(merged_records, output_dir, columns)
-        output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK] = split_paths
-
-    logger.info('总表多格式输出完成: 历史 %d 条 + 新增 %d 条 = 共 %d 条，格式: %s',
-                len(existing_records), len(incremental_rows), len(merged_records),
-                ', '.join(output_formats))
-    return output_paths
+    logger.info('总表输出完成: %s（历史 %d 条 + 新增 %d 条 = 共 %d 条）',
+                output_path, len(existing_records), len(incremental_rows), len(merged_records))
+    return output_path
 
 
 def cli_ask_incremental_mode():
@@ -2236,108 +1358,14 @@ def gui_ask_incremental_mode():
     return choice
 
 
-def cli_ask_output_format():
-    """命令行模式下询问用户输出格式"""
-    print('\n请选择输出格式（可多选，用逗号分隔，直接回车默认仅导出Excel）：')
-    for i, (key, desc) in enumerate(OUTPUT_FORMATS.items(), 1):
-        default_mark = ' (默认)' if key == OUTPUT_FORMAT_XLSX else ''
-        print(f'  {i}) {desc}{default_mark}')
-    choice = input('请输入选项（例如: 1 或 1,2 或 1,2,3）: ').strip()
-
-    if not choice:
-        return DEFAULT_OUTPUT_FORMATS
-
-    selected = []
-    for c in choice.replace(',', ' ').split():
-        if c.isdigit():
-            idx = int(c) - 1
-            keys = list(OUTPUT_FORMATS.keys())
-            if 0 <= idx < len(keys):
-                selected.append(keys[idx])
-
-    if not selected:
-        return DEFAULT_OUTPUT_FORMATS
-    return selected
-
-
-def gui_ask_output_format():
-    """GUI 模式下询问用户输出格式"""
-    if not HAS_TKINTER or tk is None:
-        return cli_ask_output_format()
-
-    root = tk.Tk()
-    root.withdraw()
-
-    options = list(OUTPUT_FORMATS.items())
-    choices = []
-
-    top = tk.Toplevel(root)
-    top.title('选择输出格式')
-    top.geometry('400x300')
-
-    tk.Label(top, text='请选择输出格式（可多选）：', font=('Arial', 12)).pack(pady=10)
-
-    vars = []
-    for i, (key, desc) in enumerate(options):
-        var = tk.BooleanVar(value=(key == OUTPUT_FORMAT_XLSX))
-        vars.append(var)
-        tk.Checkbutton(top, text=desc, variable=var).pack(anchor='w', padx=30)
-
-    result = {'selected': []}
-
-    def on_ok():
-        selected = []
-        for i, var in enumerate(vars):
-            if var.get():
-                selected.append(options[i][0])
-        result['selected'] = selected if selected else DEFAULT_OUTPUT_FORMATS
-        top.destroy()
-
-    tk.Button(top, text='确定', command=on_ok, width=10).pack(pady=20)
-    top.grab_set()
-    top.wait_window()
-
-    root.destroy()
-    return result['selected'] or DEFAULT_OUTPUT_FORMATS
-
-
 if HAS_TKINTER:
     ask_incremental_mode = gui_ask_incremental_mode
-    ask_output_format = gui_ask_output_format
 else:
     ask_incremental_mode = cli_ask_incremental_mode
-    ask_output_format = cli_ask_output_format
 
 
-def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
-                 keep_strategy='keep_unprocessed', output_formats=None,
-                 progress_callback=None):
+def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
     logger = get_logger()
-
-    total_stages = 10
-
-    def _report(stage_idx, percent, message='', current_file='',
-                processed_files=0, total_files=0, processed_records=0, extra=None):
-        if progress_callback is None:
-            return
-        try:
-            info = ProgressInfo(
-                stage=ProgressWindow.STAGES[stage_idx][0] if stage_idx < len(ProgressWindow.STAGES) else '',
-                stage_index=stage_idx,
-                total_stages=total_stages,
-                percent=percent,
-                message=message or (ProgressWindow.STAGES[stage_idx][1] if stage_idx < len(ProgressWindow.STAGES) else ''),
-                current_file=current_file,
-                processed_files=processed_files,
-                total_files=total_files,
-                processed_records=processed_records,
-                extra=extra or {},
-            )
-            progress_callback(info)
-        except Exception:
-            pass
-
-    _report(0, 3, message='正在查找主体查找表并初始化...')
 
     lookup_file = find_lookup_file(script_dir)
     lookup_missing = lookup_file is None
@@ -2350,10 +1378,6 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
     duplicate_count = 0
     new_record_count = 0
 
-    if output_formats is None:
-        output_formats = DEFAULT_OUTPUT_FORMATS
-
-    _report(0, 7, message='正在检查增量合并模式...')
     if incremental:
         summary_path = get_summary_table_path(script_dir)
         existing_keys, existing_records = load_existing_keys(summary_path)
@@ -2363,24 +1387,19 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
         else:
             logger.info('无历史数据，将以全量模式运行')
 
-    _report(0, 10, message='初始化完成，准备复制文件夹...')
-
     folder_name = os.path.basename(folder.rstrip('/\\'))
     parent_dir = os.path.dirname(folder.rstrip('/\\'))
     new_folder = os.path.join(parent_dir, f"{folder_name}＋检验版")
 
-    _report(1, 12, message=f'正在复制文件夹为「{folder_name}＋检验版」...')
     if os.path.exists(new_folder):
         logger.info('＋检验版文件夹已存在，先删除: %s', new_folder)
         shutil.rmtree(new_folder)
     shutil.copytree(folder, new_folder)
     logger.info('已复制文件夹为＋检验版: %s', new_folder)
 
-    _report(1, 18, message='正在扫描文件夹中的 Excel 文件...')
     excel_files = scan_excel_files(new_folder)
     if not excel_files:
         logger.warning('检验版文件夹中未发现任何 Excel 文件')
-        _report(9, 100, message='文件夹中未发现任何 Excel 文件')
         return ProcessingResult(
             lookup_missing=lookup_missing,
             folder_empty=True,
@@ -2388,134 +1407,56 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
             existing_record_count=len(existing_records),
         )
 
-    _report(1, 20, message=f'扫描完成，共发现 {len(excel_files)} 个 Excel 文件',
-            total_files=len(excel_files))
-
     all_rows = []
     processed_files = []
     unprocessed_files = []
     error_files = []
-    file_process_details: List[FileProcessDetail] = []
-    success_count = 0
-    error_count = 0
 
-    _report(3, 20, message='开始解析银行流水文件...',
-            total_files=len(excel_files),
-            extra={'success_count': 0, 'error_count': 0})
-
-    for idx, filepath in enumerate(excel_files):
-        _report(3, 20 + int((idx / len(excel_files)) * 40),
-                message=f'正在解析文件 {idx + 1}/{len(excel_files)}: {os.path.basename(filepath)}',
-                current_file=filepath,
-                processed_files=idx,
-                total_files=len(excel_files),
-                processed_records=len(all_rows),
-                extra={'success_count': success_count, 'error_count': error_count})
-
+    for filepath in excel_files:
         bank = identify_bank(filepath)
         if bank and bank in BANK_PROCESSORS:
             try:
                 processor = BANK_PROCESSORS[bank]
-                rows, detail = processor(filepath, lookup_file)
+                rows = processor(filepath, lookup_file)
                 all_rows.extend(rows)
                 processed_files.append(filepath)
-                file_process_details.append(detail)
-                success_count += 1
-                logger.info('成功处理文件: %s（%d 条记录，跳过 %d 行）',
-                            filepath, len(rows), detail.skipped_rows)
+                logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
             except Exception as e:
                 error_files.append((filepath, str(e)))
-                error_count += 1
-                file_process_details.append(FileProcessDetail(
-                    file_path=filepath,
-                    file_name=os.path.basename(filepath),
-                    bank_name=bank or '',
-                    process_status='失败',
-                    error_message=str(e),
-                ))
                 logger.error('处理文件「%s」时发生错误: %s', filepath, e, exc_info=True)
         else:
             unprocessed_files.append(filepath)
-            file_process_details.append(FileProcessDetail(
-                file_path=filepath,
-                file_name=os.path.basename(filepath),
-                bank_name=bank or '未识别',
-                process_status='未处理',
-                error_message='无法识别银行类型' if not bank else f'银行「{bank}」无可用解析规则',
-            ))
 
-    _report(3, 60, message=f'文件解析完成：成功 {success_count} 个，失败 {error_count} 个，未处理 {len(unprocessed_files)} 个',
-            processed_files=len(excel_files),
-            total_files=len(excel_files),
-            processed_records=len(all_rows),
-            extra={'success_count': success_count, 'error_count': error_count})
-
-    _report(4, 63, message='正在清理已处理文件...')
-    delete_processed_files(excel_files, processed_files, error_files, unprocessed_files, strategy=keep_strategy)
+    error_file_paths = {f for f, _ in error_files}
+    delete_processed_files(excel_files, set(unprocessed_files) | error_file_paths)
 
     output_path = None
-    output_paths: Dict[str, Any] = {}
     final_rows = []
 
-    _report(4, 66, message='正在合并数据并去重...')
     if all_rows:
         if actual_incremental:
             incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
             new_record_count = len(incremental_rows)
-            _report(5, 68, message='正在增量合并并导出总表...')
-            output_paths = merge_and_export_summary(
-                existing_records, incremental_rows, script_dir, output_formats=output_formats
+            output_path = merge_and_export_summary(
+                existing_records, incremental_rows, script_dir, lookup_file=lookup_file
             )
             final_rows = existing_records + incremental_rows
         else:
-            columns = [
-                '唯一id', '银行', '银行账号', '主体', '交易日期',
-                '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
-            ]
-            merged_records = all_rows
-            df = pd.DataFrame(merged_records, columns=columns)
-            base_dir = script_dir or get_output_dir()
-            os.makedirs(base_dir, exist_ok=True)
-
-            _report(5, 68, message='正在导出 Excel 总表...')
-            if OUTPUT_FORMAT_XLSX in output_formats:
-                xlsx_path = get_summary_table_path(script_dir)
-                backup_existing_file(xlsx_path)
-                df.to_excel(xlsx_path, index=False, engine='openpyxl')
-                output_paths[OUTPUT_FORMAT_XLSX] = xlsx_path
-                logger.info('Excel 总表输出完成: %s', xlsx_path)
-
-            _report(5, 73, message='正在导出 CSV 总表...')
-            if OUTPUT_FORMAT_CSV in output_formats:
-                csv_path = export_summary_to_csv(merged_records, base_dir, columns)
-                output_paths[OUTPUT_FORMAT_CSV] = csv_path
-
-            _report(5, 76, message='正在按银行拆分子表...')
-            if OUTPUT_FORMAT_SPLIT_BY_BANK in output_formats:
-                split_paths = export_summary_by_bank(merged_records, base_dir, columns)
-                output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK] = split_paths
-
-            logger.info('总表多格式输出完成: 共 %d 条记录，格式: %s',
-                        len(merged_records), ', '.join(output_formats))
+            columns = get_summary_columns(all_rows, lookup_file)
+            df = pd.DataFrame(all_rows, columns=columns)
+            output_path = get_summary_table_path(script_dir)
+            df.to_excel(output_path, index=False, engine='openpyxl')
+            logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
             final_rows = all_rows
             new_record_count = len(all_rows)
     else:
         logger.warning('未提取到任何银行流水记录')
         if existing_records:
-            _report(5, 70, message='无新数据，仅导出历史总表...')
-            output_paths = merge_and_export_summary(
-                existing_records, [], script_dir, output_formats=output_formats
+            output_path = merge_and_export_summary(
+                existing_records, [], script_dir, lookup_file=lookup_file
             )
             final_rows = existing_records
 
-    _report(5, 78, message='总表导出完成', processed_records=len(final_rows))
-
-    if output_paths.get(OUTPUT_FORMAT_XLSX):
-        output_path = output_paths[OUTPUT_FORMAT_XLSX]
-    elif output_paths.get(OUTPUT_FORMAT_CSV):
-        output_path = output_paths[OUTPUT_FORMAT_CSV]
-
-    _report(6, 80, message='正在应用对方户名黑白名单...')
     if final_rows:
         final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
         if _cp_tag_summary.get('tagged_count', 0) > 0:
@@ -2524,41 +1465,18 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
                         _cp_tag_summary.get('tagged_count', 0),
                         _cp_tag_summary.get('blacklist_hits', 0),
                         _cp_tag_summary.get('whitelist_hits', 0))
-            _cp_columns = [
-                '唯一id', '银行', '银行账号', '主体', '交易日期',
-                '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
-                '黑白名单标签', '命中规则名称', '命中关键词',
-            ]
-            _cp_df = pd.DataFrame(final_rows, columns=_cp_columns)
-            if output_paths.get(OUTPUT_FORMAT_XLSX):
-                _cp_df.to_excel(output_paths[OUTPUT_FORMAT_XLSX], index=False, engine='openpyxl')
-                logger.info('已将黑白名单打标结果回写到Excel总表: %s', output_paths[OUTPUT_FORMAT_XLSX])
-            if output_paths.get(OUTPUT_FORMAT_CSV):
-                _cp_df.to_csv(output_paths[OUTPUT_FORMAT_CSV], index=False, encoding='utf-8-sig')
-                logger.info('已将黑白名单打标结果回写到CSV总表: %s', output_paths[OUTPUT_FORMAT_CSV])
-            if output_paths.get(OUTPUT_FORMAT_SPLIT_BY_BANK):
-                bank_groups: Dict[str, List[Dict[str, Any]]] = {}
-                for rec in final_rows:
-                    bank = str(rec.get('银行') or '').strip() or '未知银行'
-                    if bank not in bank_groups:
-                        bank_groups[bank] = []
-                    bank_groups[bank].append(rec)
-                for bank, bank_records in bank_groups.items():
-                    safe_bank_name = _sanitize_filename(bank)
-                    for sp in output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK]:
-                        if safe_bank_name in os.path.basename(sp):
-                            pd.DataFrame(bank_records, columns=_cp_columns).to_excel(
-                                sp, index=False, engine='openpyxl')
-                            logger.info('已将黑白名单打标结果回写到银行子表: %s', sp)
-                            break
-
-    _report(6, 82,
-            message=f'黑白名单处理完成：命中 {_cp_tag_summary.get("tagged_count", 0) if final_rows else 0} 条记录',
-            processed_records=len(final_rows))
+            if output_path:
+                base_columns = get_summary_columns(final_rows, lookup_file)
+                cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
+                _cp_columns = base_columns + [
+                    col for col in cp_extra_cols if col not in base_columns
+                ]
+                pd.DataFrame(final_rows, columns=_cp_columns).to_excel(
+                    output_path, index=False, engine='openpyxl')
+                logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
 
     db_inserted = 0
     db_duplicates = 0
-    _report(7, 84, message='正在写入数据库...')
     if HAS_DATABASE and final_rows:
         try:
             if batch_id is None:
@@ -2576,19 +1494,8 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
         except Exception as e:
             logger.error('数据库持久化失败: %s', e, exc_info=True)
 
-    _report(7, 87,
-            message=f'数据库写入完成：新增 {db_inserted} 条，跳过重复 {db_duplicates} 条')
-
     subject_summary_path = None
     balance_check_path = None
-    duplicate_check_path = None
-    verification_report_path = None
-    verification_report_md_path = None
-
-    _report(8, 88, message='正在生成各类汇总与检验报告...')
-    report_count = 0
-    total_reports = 4
-
     if final_rows:
         try:
             output_dir = script_dir
@@ -2601,12 +1508,10 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
                 '运行模式': '增量合并' if actual_incremental else '全量覆盖',
                 '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
-            _report(8, 89, message='[1/4] 正在生成主体维度汇总分析...')
             subject_summary_path = generate_subject_summary_from_records(
                 final_rows, output_dir, source_info
             )
             if subject_summary_path:
-                report_count += 1
                 logger.info('主体维度汇总分析已自动生成: %s', subject_summary_path)
         except Exception as e:
             logger.error('自动生成主体汇总分析失败: %s', e, exc_info=True)
@@ -2623,17 +1528,16 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
                 '运行模式': '增量合并' if actual_incremental else '全量覆盖',
                 '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
-            _report(8, 91, message='[2/4] 正在生成余额连续性校验报告...')
             balance_check_path = generate_balance_check_from_records(
                 final_rows, output_dir, source_info
             )
             if balance_check_path:
-                report_count += 1
                 logger.info('余额连续性校验报告已自动生成: %s', balance_check_path)
         except Exception as e:
             logger.error('自动生成余额连续性校验报告失败: %s', e, exc_info=True)
             balance_check_path = None
 
+    duplicate_check_path = None
     if final_rows:
         try:
             output_dir = script_dir
@@ -2646,61 +1550,24 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
                 '运行模式': '增量合并' if actual_incremental else '全量覆盖',
                 '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
-            _report(8, 93, message='[3/4] 正在生成重复交易检测报告...')
             duplicate_check_path = generate_duplicate_check_from_records(
                 final_rows, output_dir, source_info
             )
             if duplicate_check_path:
-                report_count += 1
                 logger.info('重复交易检测报告已自动生成: %s', duplicate_check_path)
         except Exception as e:
             logger.error('自动生成重复交易检测报告失败: %s', e, exc_info=True)
             duplicate_check_path = None
-
-    try:
-        output_dir = script_dir
-        if output_path:
-            output_dir = os.path.dirname(output_path) or script_dir
-        source_info = {
-            '数据来源': '主流程自动生成',
-            '总表文件': os.path.basename(output_path) if output_path else '内存数据',
-            '输入文件夹': folder,
-            '运行模式': '增量合并' if actual_incremental else '全量覆盖',
-            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            '操作人': get_current_user(),
-        }
-        _report(8, 96, message='[4/4] 正在生成流水检验报告...')
-        verification_report_path, verification_report_md_path = generate_verification_report_from_records(
-            final_rows, file_process_details, output_dir, source_info
-        )
-        if verification_report_path:
-            report_count += 1
-            logger.info('流水检验报告(Excel)已自动生成: %s', verification_report_path)
-        if verification_report_md_path:
-            logger.info('流水检验报告(Markdown)已自动生成: %s', verification_report_md_path)
-    except Exception as e:
-        logger.error('自动生成流水检验报告失败: %s', e, exc_info=True)
-        verification_report_path = None
-        verification_report_md_path = None
-
-    _report(8, 98, message=f'报告生成完成：共生成 {report_count}/{total_reports} 份报告')
-    _report(9, 100, message='全部处理完成！')
-
-    log_processing_summary(file_process_details)
 
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
-        file_process_details=file_process_details,
         output_path=output_path,
-        output_paths=output_paths,
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
         duplicate_check_path=duplicate_check_path,
-        verification_report_path=verification_report_path,
-        verification_report_md_path=verification_report_md_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -2709,170 +1576,6 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
         db_inserted_count=db_inserted,
         db_duplicate_count=db_duplicates,
     )
-
-
-def build_processing_summary(file_details: List[FileProcessDetail]) -> Dict[str, Any]:
-    """
-    构建处理统计摘要，按银行、按主体、按文件状态三个维度统计。
-
-    返回结构：
-    {
-        'by_bank': [{'银行': str, '文件数': int, '成功文件': int, '失败文件': int, '未处理文件': int, '提取记录数': int, '跳过行数': int}, ...],
-        'by_subject': [{'主体': str, '文件数': int, '银行数': int, '提取记录数': int, '跳过行数': int}, ...],
-        'by_status': {
-            'success': [FileProcessDetail, ...],
-            'unprocessed': [FileProcessDetail, ...],
-            'error': [FileProcessDetail, ...],
-        },
-        'total': {
-            'files': int,
-            'success': int,
-            'unprocessed': int,
-            'error': int,
-            'records': int,
-            'skipped_rows': int,
-            'banks': int,
-            'subjects': int,
-        }
-    }
-    """
-    if not file_details:
-        return {
-            'by_bank': [],
-            'by_subject': [],
-            'by_status': {'success': [], 'unprocessed': [], 'error': []},
-            'total': {'files': 0, 'success': 0, 'unprocessed': 0, 'error': 0,
-                      'records': 0, 'skipped_rows': 0, 'banks': 0, 'subjects': 0},
-        }
-
-    by_bank_map: Dict[str, Dict[str, Any]] = {}
-    by_subject_map: Dict[str, Dict[str, Any]] = {}
-    success_files: List[FileProcessDetail] = []
-    unprocessed_files: List[FileProcessDetail] = []
-    error_files: List[FileProcessDetail] = []
-
-    for d in file_details:
-        bank = d.bank_name or '未知银行'
-        subject = d.subject or '未指定主体'
-        status = d.process_status
-
-        if bank not in by_bank_map:
-            by_bank_map[bank] = {
-                '银行': bank,
-                '文件数': 0,
-                '成功文件': 0,
-                '失败文件': 0,
-                '未处理文件': 0,
-                '提取记录数': 0,
-                '跳过行数': 0,
-            }
-        by_bank_map[bank]['文件数'] += 1
-        if status == '成功':
-            by_bank_map[bank]['成功文件'] += 1
-            by_bank_map[bank]['提取记录数'] += d.extracted_records
-            by_bank_map[bank]['跳过行数'] += d.skipped_rows
-        elif status == '失败':
-            by_bank_map[bank]['失败文件'] += 1
-        elif status == '未处理':
-            by_bank_map[bank]['未处理文件'] += 1
-
-        if subject not in by_subject_map:
-            by_subject_map[subject] = {
-                '主体': subject,
-                '文件数': 0,
-                '银行数': 0,
-                '银行集合': set(),
-                '提取记录数': 0,
-                '跳过行数': 0,
-            }
-        by_subject_map[subject]['文件数'] += 1
-        by_subject_map[subject]['银行集合'].add(bank)
-        if status == '成功':
-            by_subject_map[subject]['提取记录数'] += d.extracted_records
-            by_subject_map[subject]['跳过行数'] += d.skipped_rows
-
-        if status == '成功':
-            success_files.append(d)
-        elif status == '未处理':
-            unprocessed_files.append(d)
-        elif status == '失败':
-            error_files.append(d)
-
-    for s in by_subject_map.values():
-        s['银行数'] = len(s['银行集合'])
-        del s['银行集合']
-
-    by_bank_list = sorted(by_bank_map.values(), key=lambda x: x['提取记录数'], reverse=True)
-    by_subject_list = sorted(by_subject_map.values(), key=lambda x: x['提取记录数'], reverse=True)
-
-    total_files = len(file_details)
-    total_success = len(success_files)
-    total_unprocessed = len(unprocessed_files)
-    total_error = len(error_files)
-    total_records = sum(d.extracted_records for d in success_files)
-    total_skipped = sum(d.skipped_rows for d in success_files)
-    total_banks = len(by_bank_map)
-    total_subjects = len(by_subject_map)
-
-    return {
-        'by_bank': by_bank_list,
-        'by_subject': by_subject_list,
-        'by_status': {
-            'success': success_files,
-            'unprocessed': unprocessed_files,
-            'error': error_files,
-        },
-        'total': {
-            'files': total_files,
-            'success': total_success,
-            'unprocessed': total_unprocessed,
-            'error': total_error,
-            'records': total_records,
-            'skipped_rows': total_skipped,
-            'banks': total_banks,
-            'subjects': total_subjects,
-        },
-    }
-
-
-def log_processing_summary(file_details: List[FileProcessDetail]):
-    """将处理统计摘要输出到日志"""
-    logger = get_logger()
-    if not file_details:
-        logger.info('处理统计：无文件处理详情')
-        return
-
-    summary = build_processing_summary(file_details)
-    total = summary['total']
-    by_bank = summary['by_bank']
-    by_subject = summary['by_subject']
-
-    logger.info('=' * 60)
-    logger.info('处理统计摘要')
-    logger.info('=' * 60)
-    logger.info('文件总数: %d  银行数: %d  主体数: %d',
-                total['files'], total['banks'], total['subjects'])
-    logger.info('成功: %d  未处理: %d  失败: %d',
-                total['success'], total['unprocessed'], total['error'])
-    logger.info('提取记录: %d  跳过行: %d',
-                total['records'], total['skipped_rows'])
-
-    if by_bank:
-        logger.info('─' * 40)
-        logger.info('按银行统计：')
-        for item in by_bank:
-            logger.info('  %-15s 文件:%-3d 成功:%-3d 失败:%-3d 未处理:%-3d 记录:%d',
-                        item['银行'], item['文件数'], item['成功文件'],
-                        item['失败文件'], item['未处理文件'], item['提取记录数'])
-
-    if by_subject:
-        logger.info('─' * 40)
-        logger.info('按主体统计：')
-        for item in by_subject:
-            logger.info('  %-20s 文件:%-3d 银行数:%-3d 记录:%d',
-                        item['主体'], item['文件数'], item['银行数'], item['提取记录数'])
-
-    logger.info('=' * 60)
 
 
 def format_result_message(result):
@@ -2890,6 +1593,7 @@ def format_result_message(result):
                 f'├─ 重复记录（已跳过）：{result.duplicate_record_count}\n'
                 f'└─ 新增记录（已追加）：{result.new_record_count}\n'
                 f'总表当前总记录数：{len(result.all_rows)}\n'
+                f'总表路径：{result.output_path}'
             )
         else:
             msg = (
@@ -2897,20 +1601,8 @@ def format_result_message(result):
                 f'运行模式：全量覆盖\n'
                 f'已处理文件数：{len(result.processed_files)}\n'
                 f'提取记录数：{len(result.all_rows)}\n'
+                f'总表路径：{result.output_path}'
             )
-
-        output_files = []
-        if result.output_paths.get(OUTPUT_FORMAT_XLSX):
-            output_files.append(f'Excel 总表：{result.output_paths[OUTPUT_FORMAT_XLSX]}')
-        if result.output_paths.get(OUTPUT_FORMAT_CSV):
-            output_files.append(f'CSV 总表：{result.output_paths[OUTPUT_FORMAT_CSV]}')
-        if result.output_paths.get(OUTPUT_FORMAT_SPLIT_BY_BANK):
-            split_dir = os.path.dirname(result.output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK][0])
-            output_files.append(f'按银行拆分（{len(result.output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK])} 个文件）：{split_dir}')
-        elif result.output_path:
-            output_files.append(f'总表路径：{result.output_path}')
-
-        msg += '\n'.join(output_files)
 
         if HAS_DATABASE and (result.db_inserted_count > 0 or result.db_duplicate_count > 0):
             msg += (
@@ -2927,38 +1619,16 @@ def format_result_message(result):
 
         if result.duplicate_check_path:
             msg += f'\n\n重复交易检测：{result.duplicate_check_path}'
-
-        if result.verification_report_path:
-            msg += f'\n\n检验报告(Excel)：{result.verification_report_path}'
-
-        if result.verification_report_md_path:
-            msg += f'\n检验报告(Markdown)：{result.verification_report_md_path}'
     else:
         if result.incremental_mode and result.existing_record_count > 0:
             msg = (
                 f'本次未提取到任何新增银行流水记录。\n\n'
                 f'运行模式：增量合并\n'
                 f'历史记录保留：{result.existing_record_count} 条\n'
+                f'总表路径：{result.output_path}'
             )
-            output_files = []
-            if result.output_paths.get(OUTPUT_FORMAT_XLSX):
-                output_files.append(f'Excel 总表：{result.output_paths[OUTPUT_FORMAT_XLSX]}')
-            if result.output_paths.get(OUTPUT_FORMAT_CSV):
-                output_files.append(f'CSV 总表：{result.output_paths[OUTPUT_FORMAT_CSV]}')
-            if result.output_paths.get(OUTPUT_FORMAT_SPLIT_BY_BANK):
-                split_dir = os.path.dirname(result.output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK][0])
-                output_files.append(f'按银行拆分（{len(result.output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK])} 个文件）：{split_dir}')
-            elif result.output_path:
-                output_files.append(f'总表路径：{result.output_path}')
-            msg += '\n'.join(output_files)
         else:
             msg = '未提取到任何银行流水记录。'
-
-        if result.verification_report_path:
-            msg += f'\n\n检验报告(Excel)：{result.verification_report_path}'
-
-        if result.verification_report_md_path:
-            msg += f'\n检验报告(Markdown)：{result.verification_report_md_path}'
 
     if result.unprocessed_files:
         names = '\n  '.join(os.path.basename(f) for f in result.unprocessed_files)
@@ -2967,108 +1637,18 @@ def format_result_message(result):
         err_info = '\n  '.join(f'{os.path.basename(f)}: {e}' for f, e in result.error_files)
         msg += f'\n\n处理出错的文件（{len(result.error_files)} 个，已保留）：\n  {err_info}'
 
-    if result.file_process_details:
-        summary = build_processing_summary(result.file_process_details)
-        total = summary['total']
-        by_bank = summary['by_bank']
-        by_subject = summary['by_subject']
-
-        if by_bank:
-            msg += '\n\n━━━ 按银行统计 ━━━'
-            for item in by_bank:
-                msg += (
-                    f'\n  ● {item["银行"]}'
-                    f'  文件:{item["文件数"]}'
-                    f'  成功:{item["成功文件"]}'
-                    f'  失败:{item["失败文件"]}'
-                    f'  未处理:{item["未处理文件"]}'
-                    f'  记录:{item["提取记录数"]:,}'
-                )
-
-        if by_subject:
-            msg += '\n\n━━━ 按主体统计 ━━━'
-            for item in by_subject:
-                msg += (
-                    f'\n  ● {item["主体"]}'
-                    f'  文件:{item["文件数"]}'
-                    f'  银行数:{item["银行数"]}'
-                    f'  记录:{item["提取记录数"]:,}'
-                )
-
-        msg += (
-            f'\n\n━━━ 文件维度汇总 ━━━'
-            f'\n  总文件数: {total["files"]}'
-            f'  银行数: {total["banks"]}'
-            f'  主体数: {total["subjects"]}'
-            f'\n  成功: {total["success"]}'
-            f'  未处理: {total["unprocessed"]}'
-            f'  失败: {total["error"]}'
-            f'  提取记录: {total["records"]:,}'
-            f'  跳过行: {total["skipped_rows"]:,}'
-        )
-
     return msg
 
 
-def delete_processed_files(excel_files, processed_files, error_files, unprocessed_files,
-                           strategy='keep_unprocessed', archive_dir_name='已处理归档'):
+def delete_processed_files(excel_files, keep_set):
     logger = get_logger()
-
-    if strategy == 'keep_all':
-        logger.info('保留策略：保留所有文件')
-        return
-
-    error_file_paths = {f for f, _ in error_files}
-    processed_set = set(processed_files)
-
-    if strategy == 'keep_unprocessed':
-        logger.info('保留策略：仅保留未处理文件')
-        for filepath in excel_files:
-            if filepath in processed_set:
-                try:
-                    os.remove(filepath)
-                    logger.debug('已删除文件: %s', filepath)
-                except OSError as e:
-                    logger.error('删除文件「%s」失败: %s', filepath, e)
-
-    elif strategy == 'delete_all':
-        logger.info('保留策略：删除所有已处理文件')
-        for filepath in excel_files:
+    for filepath in excel_files:
+        if filepath not in keep_set:
             try:
                 os.remove(filepath)
                 logger.debug('已删除文件: %s', filepath)
             except OSError as e:
                 logger.error('删除文件「%s」失败: %s', filepath, e)
-
-    elif strategy == 'move_to_archive':
-        logger.info('保留策略：移动到已处理归档子目录')
-        if not excel_files:
-            return
-        parent_dir = os.path.dirname(excel_files[0])
-        archive_dir = os.path.join(parent_dir, archive_dir_name)
-        os.makedirs(archive_dir, exist_ok=True)
-        for filepath in processed_files:
-            try:
-                dest = os.path.join(archive_dir, os.path.basename(filepath))
-                counter = 1
-                base, ext = os.path.splitext(dest)
-                while os.path.exists(dest):
-                    dest = f"{base}_{counter}{ext}"
-                    counter += 1
-                shutil.move(filepath, dest)
-                logger.debug('已移动文件到归档: %s -> %s', filepath, dest)
-            except (OSError, shutil.Error) as e:
-                logger.error('移动文件「%s」到归档失败: %s', filepath, e)
-
-    else:
-        logger.warning('未知保留策略「%s」，回退为仅保留未处理文件', strategy)
-        for filepath in excel_files:
-            if filepath in processed_set:
-                try:
-                    os.remove(filepath)
-                    logger.debug('已删除文件: %s', filepath)
-                except OSError as e:
-                    logger.error('删除文件「%s」失败: %s', filepath, e)
 
 
 # ──────────────────────────────────────────────
@@ -3346,7 +1926,7 @@ def format_diff_message(diff_result):
 
 
 def run_pipeline_flow(script_dir):
-    """主流程：处理银行流水文件夹，输出总表（带进度条，简化版本）"""
+    """主流程：处理银行流水文件夹，输出总表"""
     logger = get_logger()
 
     folder = ask_directory('请选择银行流水文件夹')
@@ -3363,99 +1943,17 @@ def run_pipeline_flow(script_dir):
         return
     logger.info('用户选择运行模式: %s', '增量合并' if incremental else '全量覆盖')
 
-    keep_strategy = ask_keep_strategy()
-    if keep_strategy is None:
-        logger.info('用户取消保留策略选择，返回主菜单')
-        return
-    logger.info('用户选择保留策略: %s', KEEP_STRATEGIES.get(keep_strategy, keep_strategy))
+    result = run_pipeline(folder, script_dir, incremental=incremental)
 
-    output_formats = ask_output_format()
-    logger.info('用户选择输出格式: %s', ', '.join(output_formats))
-
-    progress_win = None
-    pipeline_error = None
-    try:
-        if HAS_TKINTER and tk is not None:
-            try:
-                progress_win = ProgressWindow(title='银行流水处理进度')
-                progress_win.show()
-                logger.info('进度条窗口已创建')
-            except Exception as e:
-                logger.warning('进度条窗口创建失败: %s', e)
-                progress_win = None
-    except Exception:
-        progress_win = None
-
-    progress_cb = create_progress_callback(progress_win)
-
-    try:
-        result = run_pipeline(
-            folder, script_dir,
-            incremental=incremental,
-            keep_strategy=keep_strategy,
-            output_formats=output_formats,
-            progress_callback=progress_cb,
+    if result.lookup_missing:
+        show_warning(
+            '警告',
+            '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
+            '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
         )
 
-        if result.lookup_missing and progress_win is None:
-            show_warning(
-                '警告',
-                '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
-                '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
-            )
-
-        msg = format_result_message(result)
-        if progress_win:
-            progress_win.set_completed(f'处理完成！共 {len(result.all_rows):,} 条记录'
-                                       if result.all_rows else '处理完成')
-            try:
-                for _ in range(30):
-                    progress_win.wait(50)
-                    if progress_win.is_cancelled() or progress_win._closed:
-                        break
-            except Exception:
-                pass
-            show_result_detail_dialog(result, progress_win.root)
-        else:
-            if not show_result_detail_dialog(result):
-                show_info('完成' if result.all_rows else '提示', msg)
-
-    except RuntimeError as e:
-        if '用户取消了操作' in str(e):
-            pipeline_error = '用户已取消处理'
-            logger.info('用户取消了处理操作')
-            if progress_win:
-                progress_win.set_error('处理已取消')
-            else:
-                show_warning('已取消', '用户已取消处理操作')
-        else:
-            pipeline_error = str(e)
-            logger.error('处理失败: %s', e, exc_info=True)
-            if progress_win:
-                progress_win.set_error(f'处理出错: {str(e)[:80]}')
-            else:
-                show_warning('错误', f'处理出错：\n{e}')
-    except Exception as e:
-        pipeline_error = str(e)
-        logger.error('处理失败: %s', e, exc_info=True)
-        if progress_win:
-            progress_win.set_error(f'处理出错: {str(e)[:80]}')
-        else:
-            show_warning('错误', f'处理出错：\n{e}')
-    finally:
-        if progress_win:
-            try:
-                if pipeline_error:
-                    try:
-                        for _ in range(60):
-                            progress_win.wait(50)
-                            if progress_win._closed:
-                                break
-                    except Exception:
-                        pass
-                progress_win.close()
-            except Exception:
-                pass
+    msg = format_result_message(result)
+    show_info('完成' if result.all_rows else '提示', msg)
 
 
 def run_diff_flow(script_dir):
@@ -3500,24 +1998,10 @@ AUDIT_DB_FILENAME = 'audit_log.db'
 
 
 def get_audit_db_path(script_dir=None):
-    """
-    获取审计数据库文件路径。
-
-    路径策略：
-    - 如果指定了 script_dir 且可写，使用 script_dir
-    - 否则使用可写目录（get_output_dir()）
-
-    Args:
-        script_dir: 可选，指定的目录
-
-    Returns:
-        str: 审计数据库文件的绝对路径
-    """
-    if script_dir and is_writable(script_dir):
-        base_dir = script_dir
-    else:
-        base_dir = get_output_dir()
-    return os.path.join(base_dir, AUDIT_DB_FILENAME)
+    """获取审计数据库文件路径"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    return os.path.join(script_dir, AUDIT_DB_FILENAME)
 
 
 def init_audit_db(db_path=None):
@@ -6557,7 +5041,7 @@ def run_monitor_flow(script_dir):
 
 
 def run_pipeline_flow(script_dir):
-    """主流程：处理银行流水文件夹，输出总表（带进度条）"""
+    """主流程：处理银行流水文件夹，输出总表"""
     logger = get_logger()
 
     folder = ask_directory('请选择银行流水文件夹')
@@ -6589,184 +5073,68 @@ def run_pipeline_flow(script_dir):
         return
     logger.info('用户选择运行模式: %s', '增量合并' if incremental else '全量覆盖')
 
-    keep_strategy = ask_keep_strategy()
-    if keep_strategy is None:
-        logger.info('用户取消保留策略选择，返回主菜单')
-        return
-    logger.info('用户选择保留策略: %s', KEEP_STRATEGIES.get(keep_strategy, keep_strategy))
-
-    progress_win = None
-    try:
-        if HAS_TKINTER and tk is not None:
-            try:
-                progress_win = ProgressWindow(title='银行流水处理进度')
-                progress_win.show()
-                logger.info('进度条窗口已创建')
-            except Exception as e:
-                logger.warning('进度条窗口创建失败，将继续后台处理: %s', e)
-                progress_win = None
-    except Exception:
-        progress_win = None
-
-    progress_cb = create_progress_callback(progress_win)
-
     batch_id = None
     batch_manager = None
-    result = None
-    pipeline_error = None
+    if HAS_BATCH_MANAGER:
+        try:
+            batch_manager = batch_module.get_batch_manager(script_dir)
+            operator = get_current_user()
+            batch_info = batch_manager.start_batch(input_folder=folder, operator=operator)
+            batch_id = batch_info.batch_id
+            logger.info('批次管理已启用，批次号: %s', batch_id)
+        except Exception as e:
+            logger.error('批次创建失败: %s', e, exc_info=True)
+            batch_manager = None
 
-    try:
-        if HAS_BATCH_MANAGER:
-            try:
-                batch_manager = batch_module.get_batch_manager(script_dir)
-                operator = get_current_user()
-                batch_info = batch_manager.start_batch(input_folder=folder, operator=operator)
-                batch_id = batch_info.batch_id
-                logger.info('批次管理已启用，批次号: %s', batch_id)
-            except Exception as e:
-                logger.error('批次创建失败: %s', e, exc_info=True)
-                batch_manager = None
+    with AuditLogger('pipeline', script_dir) as audit:
+        audit.record_input(folder)
 
-        with AuditLogger('pipeline', script_dir) as audit:
-            audit.record_input(folder)
+        result = run_pipeline(folder, script_dir, incremental=incremental, batch_id=batch_id)
+        audit.record_result(result)
 
-            result = run_pipeline(
-                folder, script_dir,
-                incremental=incremental,
-                batch_id=batch_id,
-                keep_strategy=keep_strategy,
-                progress_callback=progress_cb,
+        if result.lookup_missing:
+            show_warning(
+                '警告',
+                '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
+                '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
             )
-            audit.record_result(result)
 
-            if result.lookup_missing and progress_win is None:
-                show_warning(
-                    '警告',
-                    '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
-                    '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
-                )
+        msg = format_result_message(result)
+        msg += f'\n\n审计编号: {audit.audit_id}'
+        if change_result.change_id:
+            msg += f'\n配置变更编号: {change_result.change_id}'
 
-            msg = format_result_message(result)
-            msg += f'\n\n审计编号: {audit.audit_id}'
-            if change_result.change_id:
-                msg += f'\n配置变更编号: {change_result.change_id}'
-
-            if batch_manager and batch_id:
-                try:
-                    log_file = os.path.join(script_dir, 'bankcheck.log')
-                    result_data = {
-                        'total_records': len(result.all_rows),
-                        'new_records': result.new_record_count,
-                        'duplicate_records': result.duplicate_record_count,
-                        'processed_files': result.processed_files,
-                        'unprocessed_files': result.unprocessed_files,
-                        'error_files': result.error_files,
-                        'incremental_mode': result.incremental_mode,
-                        'output_folder': folder,
-                        'summary_table_path': result.output_path,
-                        'log_file_path': log_file,
-                        'audit_id': audit.audit_id,
-                    }
-                    status = 'success' if result.all_rows or result.existing_record_count > 0 else 'warning'
-                    if result.error_files:
-                        status = 'warning'
-                    batch_manager.finish_batch(batch_id, result_data, status=status)
-                    msg += f'\n批次号: {batch_id}'
-                    msg += f'\n归档目录: {batch_info.batch_dir}'
-                except Exception as e:
-                    logger.error('批次归档失败: %s', e, exc_info=True)
-                    if batch_manager:
-                        try:
-                            batch_manager.finish_batch(batch_id, {}, status='failed', error_message=str(e))
-                        except Exception:
-                            pass
-
-            if progress_win:
-                progress_win.set_completed(f'处理完成！共 {len(result.all_rows):,} 条记录'
-                                           if result.all_rows else '处理完成')
-                try:
-                    for _ in range(30):
-                        progress_win.wait(50)
-                        if progress_win.is_cancelled() or progress_win._closed:
-                            break
-                except Exception:
-                    pass
-                show_result_detail_dialog(result, progress_win.root)
-            else:
-                if not show_result_detail_dialog(result):
-                    show_info('完成' if result.all_rows else '提示', msg)
-
-    except RuntimeError as e:
-        if '用户取消了操作' in str(e):
-            pipeline_error = '用户已取消处理'
-            logger.info('用户取消了处理操作')
-            if progress_win:
-                progress_win.set_error('处理已取消')
-                try:
-                    for _ in range(20):
-                        progress_win.wait(50)
-                        if progress_win._closed:
-                            break
-                except Exception:
-                    pass
-            else:
-                show_warning('已取消', '用户已取消处理操作')
-        else:
-            pipeline_error = str(e)
-            logger.error('主流程执行失败: %s', e, exc_info=True)
-            if progress_win:
-                progress_win.set_error(f'处理出错: {str(e)[:80]}')
-                try:
-                    for _ in range(30):
-                        progress_win.wait(50)
-                        if progress_win._closed:
-                            break
-                except Exception:
-                    pass
-            else:
-                show_warning('错误', f'处理出错：\n{e}')
-
-    except Exception as e:
-        pipeline_error = str(e)
-        logger.error('主流程执行失败: %s', e, exc_info=True)
-        if progress_win:
-            progress_win.set_error(f'处理出错: {str(e)[:80]}')
+        if batch_manager and batch_id:
             try:
-                for _ in range(30):
-                    progress_win.wait(50)
-                    if progress_win._closed:
-                        break
-            except Exception:
-                pass
-        else:
-            show_warning('错误', f'处理出错：\n{e}')
-
-    finally:
-        if progress_win:
-            try:
-                close_timer = None
-
-                def _schedule_close():
-                    nonlocal close_timer
+                log_file = os.path.join(script_dir, 'bankcheck.log')
+                result_data = {
+                    'total_records': len(result.all_rows),
+                    'new_records': result.new_record_count,
+                    'duplicate_records': result.duplicate_record_count,
+                    'processed_files': result.processed_files,
+                    'unprocessed_files': result.unprocessed_files,
+                    'error_files': result.error_files,
+                    'incremental_mode': result.incremental_mode,
+                    'output_folder': folder,
+                    'summary_table_path': result.output_path,
+                    'log_file_path': log_file,
+                    'audit_id': audit.audit_id,
+                }
+                status = 'success' if result.all_rows or result.existing_record_count > 0 else 'warning'
+                if result.error_files:
+                    status = 'warning'
+                batch_manager.finish_batch(batch_id, result_data, status=status)
+                msg += f'\n批次号: {batch_id}'
+                msg += f'\n归档目录: {batch_info.batch_dir}'
+            except Exception as e:
+                logger.error('批次归档失败: %s', e, exc_info=True)
+                if batch_manager:
                     try:
-                        if progress_win and not progress_win._closed:
-                            progress_win.close()
+                        batch_manager.finish_batch(batch_id, {}, status='failed', error_message=str(e))
                     except Exception:
                         pass
 
-                if pipeline_error:
-                    try:
-                        close_timer = progress_win.root.after(3000, _schedule_close)
-                        for _ in range(60):
-                            progress_win.wait(50)
-                            if progress_win._closed:
-                                break
-                    except Exception:
-                        pass
-                progress_win.close()
-            except Exception:
-                pass
-        logger.info('主流程结束')
+        show_info('完成' if result.all_rows else '提示', msg)
 
 
 def run_diff_flow(script_dir):
@@ -7129,14 +5497,10 @@ def run_scheduled_pipeline(job_config, script_dir=None):
     job_name = job_config.get('name', job_id)
     watch_directory = job_config['watch_directory']
     incremental = job_config.get('incremental', True)
-    keep_strategy = job_config.get('keep_strategy', 'keep_unprocessed')
-    output_formats = job_config.get('output_formats', DEFAULT_OUTPUT_FORMATS)
 
     logger.info('========== 定时任务启动 [%s] %s ==========', job_id, job_name)
     logger.info('监控目录: %s', watch_directory)
     logger.info('运行模式: %s', '增量合并' if incremental else '全量覆盖')
-    logger.info('保留策略: %s', KEEP_STRATEGIES.get(keep_strategy, keep_strategy))
-    logger.info('输出格式: %s', ', '.join(output_formats))
 
     run_id = f"SCH{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
     start_time = datetime.now()
@@ -7171,7 +5535,7 @@ def run_scheduled_pipeline(job_config, script_dir=None):
         with AuditLogger('scheduled_pipeline', script_dir, username='scheduler') as audit:
             audit.record_input(watch_directory)
 
-            result = run_pipeline(watch_directory, script_dir, incremental=incremental, keep_strategy=keep_strategy, output_formats=output_formats)
+            result = run_pipeline(watch_directory, script_dir, incremental=incremental)
             audit.record_result(result)
 
             db_path = get_processed_files_db_path(script_dir)
@@ -7194,7 +5558,6 @@ def run_scheduled_pipeline(job_config, script_dir=None):
             run_data['files_skipped'] = len(result.unprocessed_files)
             run_data['records_extracted'] = result.new_record_count
             run_data['output_path'] = result.output_path
-            run_data['output_paths'] = result.output_paths
             run_data['status'] = 'success' if not result.error_files else 'partial'
 
             if result.lookup_missing:
@@ -7206,12 +5569,6 @@ def run_scheduled_pipeline(job_config, script_dir=None):
 
             if result.output_path:
                 logger.info('输出总表: %s', result.output_path)
-            if result.output_paths.get(OUTPUT_FORMAT_CSV):
-                logger.info('输出CSV总表: %s', result.output_paths[OUTPUT_FORMAT_CSV])
-            if result.output_paths.get(OUTPUT_FORMAT_SPLIT_BY_BANK):
-                logger.info('输出银行子表 %d 个，目录: %s/按银行拆分/',
-                            len(result.output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK]),
-                            os.path.dirname(result.output_path) if result.output_path else get_output_dir())
 
     except Exception as e:
         logger.error('定时任务执行失败: %s', e, exc_info=True)
@@ -7681,16 +6038,6 @@ def _add_job_interactive(script_dir=None):
     inc_choice = input('启用增量合并? (Y/n): ').strip().lower()
     job_config['incremental'] = inc_choice != 'n'
 
-    print('\n文件保留策略:')
-    for i, (key, desc) in enumerate(KEEP_STRATEGIES.items(), 1):
-        print(f'  {i}) {desc}')
-    keep_choice = input('请选择 (默认1-仅保留未处理文件): ').strip()
-    keep_keys = list(KEEP_STRATEGIES.keys())
-    if keep_choice.isdigit() and 1 <= int(keep_choice) <= len(keep_keys):
-        job_config['keep_strategy'] = keep_keys[int(keep_choice) - 1]
-    else:
-        job_config['keep_strategy'] = 'keep_unprocessed'
-
     job_config['description'] = input('任务描述 (可选): ').strip()
 
     job_id = add_schedule_job(job_config, script_dir)
@@ -7712,7 +6059,6 @@ def _edit_job_interactive(script_dir=None):
         input('按回车继续...')
         return
 
-    current_keep = job.get('keep_strategy', 'keep_unprocessed')
     print(f'\n当前配置:')
     print(f'  名称: {job.get("name", "")}')
     print(f'  目录: {job.get("watch_directory", "")}')
@@ -7722,7 +6068,6 @@ def _edit_job_interactive(script_dir=None):
     else:
         print(f'  cron: {job.get("cron_expression", "")}')
     print(f'  增量: {"启用" if job.get("incremental", True) else "禁用"}')
-    print(f'  保留策略: {KEEP_STRATEGIES.get(current_keep, current_keep)}')
     print(f'  状态: {"启用" if job.get("enabled", True) else "禁用"}')
 
     print(f'\n编辑 (留空保持当前值):')
@@ -7746,15 +6091,6 @@ def _edit_job_interactive(script_dir=None):
     new_inc = input(f'增量合并? (y/n) [{job.get("incremental", True)}]: ').strip().lower()
     if new_inc in ['y', 'n']:
         updates['incremental'] = new_inc == 'y'
-
-    print('\n文件保留策略:')
-    for i, (key, desc) in enumerate(KEEP_STRATEGIES.items(), 1):
-        marker = ' *' if key == current_keep else ''
-        print(f'  {i}) {desc}{marker}')
-    keep_choice = input('请选择新策略编号 (留空保持当前): ').strip()
-    keep_keys = list(KEEP_STRATEGIES.keys())
-    if keep_choice.isdigit() and 1 <= int(keep_choice) <= len(keep_keys):
-        updates['keep_strategy'] = keep_keys[int(keep_choice) - 1]
 
     if updates:
         update_schedule_job(job_id, updates, script_dir)
@@ -7952,8 +6288,6 @@ def parse_args_and_run():
     parser.add_argument('--once', action='store_true', help='单次运行后退出(配合--watch-dir使用)')
     parser.add_argument('--interval', type=int, metavar='MINUTES', help='单次运行模式下的间隔分钟数')
     parser.add_argument('--no-incremental', action='store_true', help='禁用增量合并，使用全量覆盖')
-    parser.add_argument('--keep-strategy', type=str, metavar='STRATEGY',
-                       help='文件保留策略: keep_all(保留所有文件), keep_unprocessed(仅保留未处理/失败文件), delete_all(删除所有文件), move_to_archive(移动到已处理归档子目录)')
     parser.add_argument('--export', action='store_true', help='进入财务软件对接导出功能')
     parser.add_argument('--export-template', type=str, metavar='TEMPLATE',
                        help='指定导出模板类型: yonyou_voucher(用友), kingdee_voucher(金蝶), bank_journal(日记账)')
@@ -7989,44 +6323,8 @@ def parse_args_and_run():
                        help='指定总表文件直接生成重复交易检测报告')
     parser.add_argument('--duplicate-output', type=str, metavar='OUTPUT_DIR',
                        help='指定重复交易检测报告输出目录')
-    parser.add_argument('--output-format', type=str, action='append', metavar='FORMAT',
-                       help='指定输出格式，可多次指定。可选值: xlsx(默认), csv, split_by_bank。'
-                            '例如: --output-format xlsx --output-format csv')
-    parser.add_argument('--input-dir', type=str, metavar='DIR',
-                       help='默认输入文件夹路径，用于交互式菜单的默认值，支持脚本化批处理')
-    parser.add_argument('--input-file', type=str, metavar='FILE',
-                       help='默认输入文件路径，用于交互式菜单的默认值，支持脚本化批处理')
 
     args = parser.parse_args()
-
-    if args.input_dir:
-        set_cli_default_dir(args.input_dir)
-    elif args.watch_dir:
-        set_cli_default_dir(args.watch_dir)
-
-    if args.input_file:
-        set_cli_default_file(args.input_file)
-    elif args.export_total:
-        set_cli_default_file(args.export_total)
-    elif args.summary_total:
-        set_cli_default_file(args.summary_total)
-    elif args.balance_total:
-        set_cli_default_file(args.balance_total)
-    elif args.duplicate_total:
-        set_cli_default_file(args.duplicate_total)
-
-    output_formats = DEFAULT_OUTPUT_FORMATS
-    if args.output_format:
-        output_formats = []
-        for fmt in args.output_format:
-            fmt_lower = fmt.lower()
-            if fmt_lower in OUTPUT_FORMATS:
-                output_formats.append(fmt_lower)
-            else:
-                logger.warning('忽略无效的输出格式: %s，支持的格式: %s', fmt, ', '.join(OUTPUT_FORMATS.keys()))
-        if not output_formats:
-            output_formats = DEFAULT_OUTPUT_FORMATS
-            logger.warning('没有有效的输出格式，将使用默认格式: %s', ', '.join(output_formats))
 
     script_dir = get_script_dir()
     setup_logging()
@@ -8046,8 +6344,6 @@ def parse_args_and_run():
                 print(f'    调度: 每 {job.get("interval_minutes", 60)} 分钟')
             else:
                 print(f'    调度: {job.get("cron_expression", "")}')
-            keep = KEEP_STRATEGIES.get(job.get('keep_strategy', 'keep_unprocessed'), '未知')
-            print(f'    保留策略: {keep}')
         return True
 
     if args.list_presets:
@@ -8133,10 +6429,8 @@ def parse_args_and_run():
             'name': '单次运行任务',
             'watch_directory': watch_dir,
             'incremental': not args.no_incremental,
-            'keep_strategy': args.keep_strategy or 'keep_unprocessed',
             'schedule_type': 'interval',
             'interval_minutes': args.interval or 60,
-            'output_formats': output_formats,
         }
 
         if args.once:
@@ -9117,94 +7411,7 @@ KEEP_STRATEGIES = {
     'keep_unprocessed': '仅保留未处理文件',
     'keep_all': '保留所有文件',
     'delete_all': '删除所有已处理文件',
-    'move_to_archive': '移动到已处理归档子目录',
 }
-
-
-def cli_ask_keep_strategy():
-    """命令行模式下询问用户文件保留策略"""
-    print('\n请选择文件保留策略：')
-    for i, (key, desc) in enumerate(KEEP_STRATEGIES.items(), 1):
-        marker = '（推荐）' if key == 'keep_unprocessed' else ''
-        print(f'  {i}) {desc}{marker}')
-    choice = input('请输入选项（直接回车默认为 1 仅保留未处理文件）: ').strip()
-    keep_keys = list(KEEP_STRATEGIES.keys())
-    if choice.isdigit() and 1 <= int(choice) <= len(keep_keys):
-        return keep_keys[int(choice) - 1]
-    return 'keep_unprocessed'
-
-
-def gui_ask_keep_strategy():
-    """GUI 模式下询问用户文件保留策略"""
-    if tk is None:
-        return cli_ask_keep_strategy()
-
-    try:
-        root = tk.Tk()
-        root.title('选择文件保留策略')
-        root.geometry('460x400')
-        root.resizable(False, False)
-
-        result = {'strategy': None}
-
-        def select_strategy(strategy):
-            result['strategy'] = strategy
-            root.destroy()
-
-        tk.Label(root, text='请选择文件保留策略', font=('Arial', 14, 'bold')).pack(pady=15)
-
-        strategies = [
-            ('keep_unprocessed', '仅保留未处理文件（推荐）',
-             '删除处理成功的文件，保留出错和无法识别的文件',
-             '#4CAF50'),
-            ('keep_all', '保留所有文件',
-             '不删除任何原始文件',
-             '#2196F3'),
-            ('move_to_archive', '移动到已处理归档子目录',
-             '将处理成功的文件移动到「已处理归档」子目录',
-             '#FF9800'),
-            ('delete_all', '删除所有已处理文件',
-             '删除所有 Excel 文件（包括成功、失败和未识别的）',
-             '#f44336'),
-        ]
-
-        for key, name, desc, color in strategies:
-            frame = tk.Frame(root)
-            frame.pack(fill='x', padx=20, pady=4)
-            btn = tk.Button(
-                frame,
-                text=name,
-                bg=color,
-                fg='white',
-                font=('Arial', 10, 'bold'),
-                width=30,
-                command=lambda k=key: select_strategy(k),
-            )
-            btn.pack(side='left')
-            tk.Label(frame, text=desc, font=('Arial', 8), fg='#666').pack(
-                side='left', padx=10
-            )
-
-        tk.Button(
-            root,
-            text='取消',
-            width=12,
-            command=lambda: select_strategy(None),
-            bg='#9E9E9E',
-            fg='white',
-            font=('Arial', 10),
-        ).pack(pady=15)
-
-        root.mainloop()
-        return result['strategy']
-    except Exception:
-        return cli_ask_keep_strategy()
-
-
-if HAS_TKINTER:
-    ask_keep_strategy = gui_ask_keep_strategy
-else:
-    ask_keep_strategy = cli_ask_keep_strategy
 
 
 def get_preset_config_path(script_dir=None):
@@ -9374,15 +7581,11 @@ def apply_preset_to_pipeline(preset, folder, script_dir):
 
 def run_pipeline_with_options(folder, script_dir, incremental=True,
                               enabled_banks=None, keep_strategy='keep_unprocessed',
-                              start_date='', end_date='', batch_id=None, output_dir=None,
-                              output_formats=None):
+                              start_date='', end_date='', batch_id=None, output_dir=None):
     logger = get_logger()
 
     if enabled_banks is None:
         enabled_banks = BANK_PREFIXES
-
-    if output_formats is None:
-        output_formats = DEFAULT_OUTPUT_FORMATS
 
     lookup_file = find_lookup_file(script_dir)
     lookup_missing = lookup_file is None
@@ -9465,14 +7668,13 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     unprocessed_files = []
     error_files = []
     filtered_out_count = 0
-    file_process_details: List[FileProcessDetail] = []
 
     for filepath in excel_files:
         bank = identify_bank(filepath)
         if bank and bank in BANK_PROCESSORS and bank in enabled_banks:
             try:
                 processor = BANK_PROCESSORS[bank]
-                rows, detail = processor(filepath, lookup_file)
+                rows = processor(filepath, lookup_file)
 
                 if start_dt or end_dt:
                     original_len = len(rows)
@@ -9481,94 +7683,60 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
 
                 all_rows.extend(rows)
                 processed_files.append(filepath)
-                file_process_details.append(detail)
-                logger.info('成功处理文件: %s（%d 条记录，跳过 %d 行）',
-                            filepath, len(rows), detail.skipped_rows)
+                logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
             except Exception as e:
                 error_files.append((filepath, str(e)))
-                file_process_details.append(FileProcessDetail(
-                    file_path=filepath,
-                    file_name=os.path.basename(filepath),
-                    bank_name=bank or '',
-                    process_status='失败',
-                    error_message=str(e),
-                ))
                 logger.error('处理文件「%s」时发生错误: %s', filepath, e, exc_info=True)
         else:
             unprocessed_files.append(filepath)
-            reason = ''
             if bank and bank not in enabled_banks:
-                reason = f'银行「{bank}」不在启用列表中'
                 logger.info('文件「%s」所属银行「%s」不在启用列表中，跳过', filepath, bank)
-            elif not bank:
-                reason = '无法识别银行类型'
-            else:
-                reason = f'银行「{bank}」无可用解析规则'
-            file_process_details.append(FileProcessDetail(
-                file_path=filepath,
-                file_name=os.path.basename(filepath),
-                bank_name=bank or '未识别',
-                process_status='未处理',
-                error_message=reason,
-            ))
 
     if filtered_out_count > 0:
         logger.info('日期过滤共排除 %d 条记录', filtered_out_count)
 
-    delete_processed_files(excel_files, processed_files, error_files, unprocessed_files, strategy=keep_strategy)
+    error_file_paths = {f for f, _ in error_files}
+    keep_set = set(unprocessed_files) | error_file_paths
+
+    if keep_strategy == 'keep_all':
+        keep_set = set(excel_files)
+        logger.info('保留策略：保留所有文件')
+    elif keep_strategy == 'delete_all':
+        keep_set = set()
+        logger.info('保留策略：删除所有已处理文件')
+    else:
+        logger.info('保留策略：仅保留未处理文件')
+
+    delete_processed_files(excel_files, keep_set)
 
     output_path = None
-    output_paths: Dict[str, Any] = {}
     final_rows = []
 
     if all_rows:
         if actual_incremental:
             incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
             new_record_count = len(incremental_rows)
-            output_paths = merge_and_export_summary(
-                existing_records, incremental_rows, script_dir, output_dir, output_formats=output_formats
+            output_path = merge_and_export_summary(
+                existing_records, incremental_rows, script_dir, output_dir, lookup_file=lookup_file
             )
             final_rows = existing_records + incremental_rows
         else:
-            columns = [
-                '唯一id', '银行', '银行账号', '主体', '交易日期',
-                '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
-            ]
-            merged_records = all_rows
-            df = pd.DataFrame(merged_records, columns=columns)
-            base_dir = output_dir or script_dir or get_output_dir()
-            os.makedirs(base_dir, exist_ok=True)
-
-            if OUTPUT_FORMAT_XLSX in output_formats:
-                xlsx_path = get_summary_table_path(script_dir, output_dir)
-                df.to_excel(xlsx_path, index=False, engine='openpyxl')
-                output_paths[OUTPUT_FORMAT_XLSX] = xlsx_path
-                logger.info('Excel 总表输出完成: %s', xlsx_path)
-
-            if OUTPUT_FORMAT_CSV in output_formats:
-                csv_path = export_summary_to_csv(merged_records, base_dir, columns)
-                output_paths[OUTPUT_FORMAT_CSV] = csv_path
-
-            if OUTPUT_FORMAT_SPLIT_BY_BANK in output_formats:
-                split_paths = export_summary_by_bank(merged_records, base_dir, columns)
-                output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK] = split_paths
-
-            logger.info('总表多格式输出完成: 共 %d 条记录，格式: %s',
-                        len(merged_records), ', '.join(output_formats))
+            columns = get_summary_columns(all_rows, lookup_file)
+            df = pd.DataFrame(all_rows, columns=columns)
+            output_path = get_summary_table_path(script_dir, output_dir)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            df.to_excel(output_path, index=False, engine='openpyxl')
+            logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
             final_rows = all_rows
             new_record_count = len(all_rows)
     else:
         logger.warning('未提取到任何银行流水记录')
         if existing_records:
-            output_paths = merge_and_export_summary(
-                existing_records, [], script_dir, output_dir, output_formats=output_formats
+            output_path = merge_and_export_summary(
+                existing_records, [], script_dir, output_dir, lookup_file=lookup_file
             )
             final_rows = existing_records
-
-    if output_paths.get(OUTPUT_FORMAT_XLSX):
-        output_path = output_paths[OUTPUT_FORMAT_XLSX]
-    elif output_paths.get(OUTPUT_FORMAT_CSV):
-        output_path = output_paths[OUTPUT_FORMAT_CSV]
 
     if final_rows:
         final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
@@ -9578,33 +7746,15 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                         _cp_tag_summary.get('tagged_count', 0),
                         _cp_tag_summary.get('blacklist_hits', 0),
                         _cp_tag_summary.get('whitelist_hits', 0))
-            _cp_columns = [
-                '唯一id', '银行', '银行账号', '主体', '交易日期',
-                '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
-                '黑白名单标签', '命中规则名称', '命中关键词',
-            ]
-            _cp_df = pd.DataFrame(final_rows, columns=_cp_columns)
-            if output_paths.get(OUTPUT_FORMAT_XLSX):
-                _cp_df.to_excel(output_paths[OUTPUT_FORMAT_XLSX], index=False, engine='openpyxl')
-                logger.info('已将黑白名单打标结果回写到Excel总表: %s', output_paths[OUTPUT_FORMAT_XLSX])
-            if output_paths.get(OUTPUT_FORMAT_CSV):
-                _cp_df.to_csv(output_paths[OUTPUT_FORMAT_CSV], index=False, encoding='utf-8-sig')
-                logger.info('已将黑白名单打标结果回写到CSV总表: %s', output_paths[OUTPUT_FORMAT_CSV])
-            if output_paths.get(OUTPUT_FORMAT_SPLIT_BY_BANK):
-                bank_groups: Dict[str, List[Dict[str, Any]]] = {}
-                for rec in final_rows:
-                    bank = str(rec.get('银行') or '').strip() or '未知银行'
-                    if bank not in bank_groups:
-                        bank_groups[bank] = []
-                    bank_groups[bank].append(rec)
-                for bank, bank_records in bank_groups.items():
-                    safe_bank_name = _sanitize_filename(bank)
-                    for sp in output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK]:
-                        if safe_bank_name in os.path.basename(sp):
-                            pd.DataFrame(bank_records, columns=_cp_columns).to_excel(
-                                sp, index=False, engine='openpyxl')
-                            logger.info('已将黑白名单打标结果回写到银行子表: %s', sp)
-                            break
+            if output_path:
+                base_columns = get_summary_columns(final_rows, lookup_file)
+                cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
+                _cp_columns = base_columns + [
+                    col for col in cp_extra_cols if col not in base_columns
+                ]
+                pd.DataFrame(final_rows, columns=_cp_columns).to_excel(
+                    output_path, index=False, engine='openpyxl')
+                logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
 
     db_inserted = 0
     db_duplicates = 0
@@ -9672,73 +7822,14 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             logger.error('自动生成余额连续性校验报告失败: %s', e, exc_info=True)
             balance_check_path = None
 
-    duplicate_check_path = None
-    if final_rows:
-        try:
-            output_dir_for_check = output_dir or script_dir
-            if output_path:
-                output_dir_for_check = os.path.dirname(output_path) or output_dir_for_check
-            source_info = {
-                '数据来源': '主流程自动生成(预设)',
-                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
-                '记录数': len(final_rows),
-                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
-                '启用银行': ', '.join(enabled_banks) if enabled_banks else '全部',
-                '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
-                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            }
-            duplicate_check_path = generate_duplicate_check_from_records(
-                final_rows, output_dir_for_check, source_info
-            )
-            if duplicate_check_path:
-                logger.info('重复交易检测报告已自动生成: %s', duplicate_check_path)
-        except Exception as e:
-            logger.error('自动生成重复交易检测报告失败: %s', e, exc_info=True)
-            duplicate_check_path = None
-
-    verification_report_path = None
-    verification_report_md_path = None
-    try:
-        output_dir_for_report = output_dir or script_dir
-        if output_path:
-            output_dir_for_report = os.path.dirname(output_path) or output_dir_for_report
-        source_info = {
-            '数据来源': '主流程自动生成(预设)',
-            '总表文件': os.path.basename(output_path) if output_path else '内存数据',
-            '输入文件夹': folder,
-            '运行模式': '增量合并' if actual_incremental else '全量覆盖',
-            '启用银行': ', '.join(enabled_banks) if enabled_banks else '全部',
-            '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
-            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            '操作人': get_current_user(),
-        }
-        verification_report_path, verification_report_md_path = generate_verification_report_from_records(
-            final_rows, file_process_details, output_dir_for_report, source_info
-        )
-        if verification_report_path:
-            logger.info('流水检验报告(Excel)已自动生成: %s', verification_report_path)
-        if verification_report_md_path:
-            logger.info('流水检验报告(Markdown)已自动生成: %s', verification_report_md_path)
-    except Exception as e:
-        logger.error('自动生成流水检验报告失败: %s', e, exc_info=True)
-        verification_report_path = None
-        verification_report_md_path = None
-
-    log_processing_summary(file_process_details)
-
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
-        file_process_details=file_process_details,
         output_path=output_path,
-        output_paths=output_paths,
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
-        duplicate_check_path=duplicate_check_path,
-        verification_report_path=verification_report_path,
-        verification_report_md_path=verification_report_md_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -9933,8 +8024,7 @@ def gui_preset_manager(script_dir):
             msg = format_result_message(result)
             msg += f'\n\n审计编号: {audit.audit_id}'
             msg += f'\n预设: {preset.get("name", "")} ({pid})'
-            if not show_result_detail_dialog(result):
-                show_info('完成' if result.all_rows else '提示', msg)
+            show_info('完成' if result.all_rows else '提示', msg)
 
     main_frame = tk.Frame(root)
     main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -12141,655 +10231,6 @@ def run_duplicate_check_flow(script_dir):
         logger.error('重复交易检测报告导出失败: %s', e, exc_info=True)
 
     logger.info('========== 重复交易检测结束 ==========')
-
-
-# ──────────────────────────────────────────────
-# 流水检验报告模块
-# ──────────────────────────────────────────────
-
-def _collect_unmatched_accounts(
-    records: List[Dict[str, Any]],
-    file_details: List[FileProcessDetail],
-) -> List[UnmatchedAccount]:
-    """从交易记录和文件处理详情中收集主体未匹配的账号"""
-    logger = get_logger()
-
-    account_map: Dict[str, UnmatchedAccount] = {}
-
-    for rec in records:
-        subject = str(rec.get('主体') or '').strip()
-        bank_account = str(rec.get('银行账号') or '').strip()
-        bank_name = str(rec.get('银行') or '').strip()
-
-        if not bank_account:
-            continue
-        if subject:
-            continue
-
-        key = f"{bank_name}||{bank_account}"
-        if key not in account_map:
-            account_map[key] = UnmatchedAccount(
-                bank_account=bank_account,
-                bank_name=bank_name,
-            )
-
-        payment = to_float(rec.get('付款'))
-        receipt = to_float(rec.get('收款'))
-
-        if receipt is not None and receipt > 0:
-            account_map[key].total_income += receipt
-        if payment is not None and payment < 0:
-            account_map[key].total_expense += abs(payment)
-
-        account_map[key].record_count += 1
-
-    for detail in file_details:
-        if detail.subject or not detail.bank_account:
-            continue
-        key = f"{detail.bank_name}||{detail.bank_account}"
-        if key not in account_map:
-            account_map[key] = UnmatchedAccount(
-                bank_account=detail.bank_account,
-                bank_name=detail.bank_name,
-            )
-        if detail.file_name and detail.file_name not in account_map[key].file_sources:
-            account_map[key].file_sources.append(detail.file_name)
-
-    result = sorted(
-        account_map.values(),
-        key=lambda x: (x.bank_name, x.bank_account),
-    )
-    logger.info('收集到 %d 个主体未匹配的账号', len(result))
-    return result
-
-
-def _collect_all_skipped_rows(
-    file_details: List[FileProcessDetail],
-) -> List[SkippedRowDetail]:
-    """从所有文件处理详情中收集全部跳过行"""
-    all_skipped: List[SkippedRowDetail] = []
-    for detail in file_details:
-        all_skipped.extend(detail.skipped_details)
-    return all_skipped
-
-
-def _build_amount_summary(
-    records: List[Dict[str, Any]],
-) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """构建金额汇总数据（总体、按主体、按银行）"""
-    logger = get_logger()
-
-    total_income = 0.0
-    total_expense = 0.0
-    total_count = 0
-    income_count = 0
-    expense_count = 0
-
-    by_subject: Dict[str, Dict[str, Any]] = {}
-    by_bank: Dict[str, Dict[str, Any]] = {}
-
-    for rec in records:
-        subject = str(rec.get('主体') or '').strip() or '未指定主体'
-        bank = str(rec.get('银行') or '').strip() or '未知银行'
-
-        payment = to_float(rec.get('付款'))
-        receipt = to_float(rec.get('收款'))
-
-        income = 0.0
-        expense = 0.0
-        is_income = False
-        is_expense = False
-
-        if receipt is not None and receipt > 0:
-            income = receipt
-            is_income = True
-        if payment is not None and payment < 0:
-            expense = abs(payment)
-            is_expense = True
-
-        if not is_income and not is_expense:
-            continue
-
-        total_income += income
-        total_expense += expense
-        total_count += 1
-        if is_income:
-            income_count += 1
-        if is_expense:
-            expense_count += 1
-
-        if subject not in by_subject:
-            by_subject[subject] = {
-                '主体': subject,
-                '收入合计': 0.0,
-                '支出合计': 0.0,
-                '净额': 0.0,
-                '交易笔数': 0,
-                '收入笔数': 0,
-                '支出笔数': 0,
-            }
-        s = by_subject[subject]
-        s['收入合计'] += income
-        s['支出合计'] += expense
-        s['净额'] += income - expense
-        s['交易笔数'] += 1
-        if is_income:
-            s['收入笔数'] += 1
-        if is_expense:
-            s['支出笔数'] += 1
-
-        if bank not in by_bank:
-            by_bank[bank] = {
-                '银行': bank,
-                '收入合计': 0.0,
-                '支出合计': 0.0,
-                '净额': 0.0,
-                '交易笔数': 0,
-                '收入笔数': 0,
-                '支出笔数': 0,
-            }
-        b = by_bank[bank]
-        b['收入合计'] += income
-        b['支出合计'] += expense
-        b['净额'] += income - expense
-        b['交易笔数'] += 1
-        if is_income:
-            b['收入笔数'] += 1
-        if is_expense:
-            b['支出笔数'] += 1
-
-    overall = {
-        '总记录数': len(records),
-        '有效交易笔数': total_count,
-        '收入笔数': income_count,
-        '支出笔数': expense_count,
-        '收入合计': total_income,
-        '支出合计': total_expense,
-        '净额': total_income - total_expense,
-        '主体数': len(by_subject),
-        '银行数': len(by_bank),
-    }
-
-    by_subject_list = sorted(
-        by_subject.values(),
-        key=lambda x: abs(x['净额']),
-        reverse=True,
-    )
-    by_bank_list = sorted(
-        by_bank.values(),
-        key=lambda x: abs(x['净额']),
-        reverse=True,
-    )
-
-    logger.info(
-        '金额汇总完成: %d 条记录, 收入 %.2f, 支出 %.2f, 净额 %.2f',
-        total_count, total_income, total_expense, total_income - total_expense,
-    )
-    return overall, by_subject_list, by_bank_list
-
-
-def _build_verification_report_data(
-    records: List[Dict[str, Any]],
-    file_details: List[FileProcessDetail],
-    source_info: Optional[Dict[str, Any]] = None,
-) -> VerificationReportData:
-    """构建完整的检验报告数据"""
-    logger = get_logger()
-
-    skipped_rows = _collect_all_skipped_rows(file_details)
-    unmatched_accounts = _collect_unmatched_accounts(records, file_details)
-    amount_summary, by_subject_summary, by_bank_summary = _build_amount_summary(records)
-
-    total_files = len(file_details)
-    success_count = sum(1 for d in file_details if d.process_status == '成功')
-    failed_count = sum(1 for d in file_details if d.process_status == '失败')
-    unprocessed_count = sum(1 for d in file_details if d.process_status == '未处理')
-    total_extracted = sum(d.extracted_records for d in file_details)
-    total_skipped = sum(d.skipped_rows for d in file_details)
-
-    source = dict(source_info or {})
-    source.update({
-        '文件总数': total_files,
-        '成功处理': success_count,
-        '处理失败': failed_count,
-        '未处理': unprocessed_count,
-        '提取记录总数': total_extracted,
-        '跳过行总数': total_skipped,
-        '未匹配账号数': len(unmatched_accounts),
-    })
-
-    data = VerificationReportData(
-        source_info=source,
-        file_details=file_details,
-        skipped_rows=skipped_rows,
-        unmatched_accounts=unmatched_accounts,
-        amount_summary=amount_summary,
-        by_subject_summary=by_subject_summary,
-        by_bank_summary=by_bank_summary,
-    )
-    logger.info('检验报告数据构建完成')
-    return data
-
-
-def _fmt_amount(val: float) -> str:
-    """格式化金额"""
-    if val is None:
-        return '-'
-    try:
-        return f"{val:,.2f}"
-    except Exception:
-        return str(val)
-
-
-def export_verification_report_markdown(
-    report_data: VerificationReportData,
-    output_path: str,
-) -> str:
-    """导出检验报告为 Markdown 格式"""
-    logger = get_logger()
-    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-
-    lines: List[str] = []
-
-    lines.append('# 银行流水检验报告')
-    lines.append('')
-    lines.append(f'**生成时间**: {report_data.source_info.get("生成时间", "-")}')
-    lines.append(f'**操作人**: {report_data.source_info.get("操作人", "-")}')
-    lines.append(f'**数据来源**: {report_data.source_info.get("数据来源", "-")}')
-    lines.append(f'**输入文件夹**: {report_data.source_info.get("输入文件夹", "-")}')
-    lines.append(f'**总表文件**: {report_data.source_info.get("总表文件", "-")}')
-    lines.append(f'**运行模式**: {report_data.source_info.get("运行模式", "-")}')
-    lines.append('')
-
-    lines.append('## 一、处理总览')
-    lines.append('')
-    lines.append('| 指标 | 数值 |')
-    lines.append('|------|------|')
-    lines.append(f'| 文件总数 | {report_data.source_info.get("文件总数", 0)} |')
-    lines.append(f'| 成功处理 | {report_data.source_info.get("成功处理", 0)} |')
-    lines.append(f'| 处理失败 | {report_data.source_info.get("处理失败", 0)} |')
-    lines.append(f'| 未处理 | {report_data.source_info.get("未处理", 0)} |')
-    lines.append(f'| 提取记录总数 | {report_data.source_info.get("提取记录总数", 0):,} |')
-    lines.append(f'| 跳过行总数 | {report_data.source_info.get("跳过行总数", 0):,} |')
-    lines.append(f'| 未匹配账号数 | {report_data.source_info.get("未匹配账号数", 0)} |')
-    lines.append('')
-
-    lines.append('## 二、金额汇总')
-    lines.append('')
-    s = report_data.amount_summary
-    lines.append('| 指标 | 数值 |')
-    lines.append('|------|------|')
-    lines.append(f"| 总记录数 | {s.get('总记录数', 0):,} |")
-    lines.append(f"| 有效交易笔数 | {s.get('有效交易笔数', 0):,} |")
-    lines.append(f"| 收入笔数 | {s.get('收入笔数', 0):,} |")
-    lines.append(f"| 支出笔数 | {s.get('支出笔数', 0):,} |")
-    lines.append(f"| 收入合计 | {_fmt_amount(s.get('收入合计', 0.0))} |")
-    lines.append(f"| 支出合计 | {_fmt_amount(s.get('支出合计', 0.0))} |")
-    lines.append(f"| 净额 | {_fmt_amount(s.get('净额', 0.0))} |")
-    lines.append(f"| 主体数 | {s.get('主体数', 0)} |")
-    lines.append(f"| 银行数 | {s.get('银行数', 0)} |")
-    lines.append('')
-
-    if report_data.by_subject_summary:
-        lines.append('### 按主体汇总')
-        lines.append('')
-        lines.append('| 主体 | 收入合计 | 支出合计 | 净额 | 交易笔数 | 收入笔数 | 支出笔数 |')
-        lines.append('|------|----------|----------|------|----------|----------|----------|')
-        for row in report_data.by_subject_summary:
-            lines.append(
-                f"| {row['主体']} | {_fmt_amount(row['收入合计'])} | "
-                f"{_fmt_amount(row['支出合计'])} | {_fmt_amount(row['净额'])} | "
-                f"{row['交易笔数']:,} | {row['收入笔数']:,} | {row['支出笔数']:,} |"
-            )
-        lines.append('')
-
-    if report_data.by_bank_summary:
-        lines.append('### 按银行汇总')
-        lines.append('')
-        lines.append('| 银行 | 收入合计 | 支出合计 | 净额 | 交易笔数 | 收入笔数 | 支出笔数 |')
-        lines.append('|------|----------|----------|------|----------|----------|----------|')
-        for row in report_data.by_bank_summary:
-            lines.append(
-                f"| {row['银行']} | {_fmt_amount(row['收入合计'])} | "
-                f"{_fmt_amount(row['支出合计'])} | {_fmt_amount(row['净额'])} | "
-                f"{row['交易笔数']:,} | {row['收入笔数']:,} | {row['支出笔数']:,} |"
-            )
-        lines.append('')
-
-    lines.append('## 三、各文件处理状态')
-    lines.append('')
-    lines.append('| 文件名 | 银行 | 银行账号 | 主体 | 处理状态 | 总行数 | 提取记录 | 跳过行 | 错误信息 |')
-    lines.append('|--------|------|----------|------|----------|--------|----------|--------|----------|')
-    for d in report_data.file_details:
-        err = d.error_message.replace('|', '\\|') if d.error_message else ''
-        lines.append(
-            f"| {d.file_name} | {d.bank_name} | {d.bank_account} | {d.subject or '-'} | "
-            f"{d.process_status} | {d.total_rows_in_excel:,} | {d.extracted_records:,} | "
-            f"{d.skipped_rows:,} | {err} |"
-        )
-    lines.append('')
-
-    lines.append('## 四、跳过行明细')
-    lines.append('')
-    if report_data.skipped_rows:
-        lines.append(f'共 **{len(report_data.skipped_rows)}** 行被跳过。')
-        lines.append('')
-        lines.append('| 文件名 | 行号 | 跳过原因 | 行内容摘要 |')
-        lines.append('|--------|------|----------|------------|')
-        for sr in report_data.skipped_rows:
-            content = (sr.raw_content or '').replace('|', '\\|').replace('\n', ' ')
-            if len(content) > 100:
-                content = content[:100] + '...'
-            lines.append(
-                f"| {sr.file_name} | {sr.row_number} | {sr.reason} | {content} |"
-            )
-    else:
-        lines.append('无跳过行。')
-    lines.append('')
-
-    lines.append('## 五、主体未匹配账号列表')
-    lines.append('')
-    if report_data.unmatched_accounts:
-        lines.append(f'共 **{len(report_data.unmatched_accounts)}** 个账号未匹配到主体。')
-        lines.append('')
-        lines.append('| 银行 | 银行账号 | 记录数 | 收入合计 | 支出合计 | 来源文件 |')
-        lines.append('|------|----------|--------|----------|----------|----------|')
-        for ua in report_data.unmatched_accounts:
-            sources = ', '.join(ua.file_sources) if ua.file_sources else '-'
-            lines.append(
-                f"| {ua.bank_name} | {ua.bank_account} | {ua.record_count:,} | "
-                f"{_fmt_amount(ua.total_income)} | {_fmt_amount(ua.total_expense)} | {sources} |"
-            )
-    else:
-        lines.append('所有账号均已成功匹配主体。')
-    lines.append('')
-
-    lines.append('---')
-    lines.append(f'*本报告由 bankcheck 工具自动生成，生成时间 {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}*')
-
-    content = '\n'.join(lines)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(content)
-
-    logger.info('检验报告(Markdown)已导出: %s', output_path)
-    return output_path
-
-
-def export_verification_report_excel(
-    report_data: VerificationReportData,
-    output_path: str,
-    source_info: Optional[Dict[str, Any]] = None,
-) -> str:
-    """导出检验报告为 Excel 格式（多 Sheet）"""
-    logger = get_logger()
-    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-
-    wb = openpyxl.Workbook()
-
-    ws_info = wb.active
-    ws_info.title = '报告信息'
-    info_title = [
-        ('项目', '内容'),
-    ]
-    info_rows = list(info_title)
-    si = report_data.source_info
-    info_rows.extend([
-        ('报告类型', '银行流水检验报告'),
-        ('生成时间', si.get('生成时间', '')),
-        ('操作人', si.get('操作人', '')),
-        ('数据来源', si.get('数据来源', '')),
-        ('输入文件夹', si.get('输入文件夹', '')),
-        ('总表文件', si.get('总表文件', '')),
-        ('运行模式', si.get('运行模式', '')),
-        ('', ''),
-        ('文件总数', si.get('文件总数', 0)),
-        ('成功处理', si.get('成功处理', 0)),
-        ('处理失败', si.get('处理失败', 0)),
-        ('未处理', si.get('未处理', 0)),
-        ('提取记录总数', si.get('提取记录总数', 0)),
-        ('跳过行总数', si.get('跳过行总数', 0)),
-        ('未匹配账号数', si.get('未匹配账号数', 0)),
-    ])
-    for r_idx, row in enumerate(info_rows, 1):
-        for c_idx, val in enumerate(row, 1):
-            cell = ws_info.cell(row=r_idx, column=c_idx, value=val)
-            if r_idx == 1:
-                cell.font = openpyxl.styles.Font(bold=True)
-    for col_idx, width in enumerate([20, 60], 1):
-        ws_info.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
-
-    ws_amount = wb.create_sheet('金额汇总')
-    amount_header = ['指标', '数值']
-    ws_amount.append(amount_header)
-    s = report_data.amount_summary
-    amount_rows = [
-        ('总记录数', s.get('总记录数', 0)),
-        ('有效交易笔数', s.get('有效交易笔数', 0)),
-        ('收入笔数', s.get('收入笔数', 0)),
-        ('支出笔数', s.get('支出笔数', 0)),
-        ('收入合计', s.get('收入合计', 0.0)),
-        ('支出合计', s.get('支出合计', 0.0)),
-        ('净额', s.get('净额', 0.0)),
-        ('主体数', s.get('主体数', 0)),
-        ('银行数', s.get('银行数', 0)),
-    ]
-    for row in amount_rows:
-        ws_amount.append(list(row))
-    for cell in ws_amount[1]:
-        cell.font = openpyxl.styles.Font(bold=True)
-    for row in ws_amount.iter_rows(min_row=2):
-        for cell in row:
-            if isinstance(cell.value, float):
-                cell.number_format = '#,##0.00'
-            elif isinstance(cell.value, int):
-                cell.number_format = '#,##0'
-    ws_amount.column_dimensions['A'].width = 20
-    ws_amount.column_dimensions['B'].width = 20
-
-    if report_data.by_subject_summary:
-        ws_subject = wb.create_sheet('按主体汇总')
-        subject_header = ['主体', '收入合计', '支出合计', '净额', '交易笔数', '收入笔数', '支出笔数']
-        ws_subject.append(subject_header)
-        for row in report_data.by_subject_summary:
-            ws_subject.append([
-                row['主体'], row['收入合计'], row['支出合计'], row['净额'],
-                row['交易笔数'], row['收入笔数'], row['支出笔数'],
-            ])
-        for cell in ws_subject[1]:
-            cell.font = openpyxl.styles.Font(bold=True)
-        for row in ws_subject.iter_rows(min_row=2):
-            for idx, cell in enumerate(row):
-                if idx in (1, 2, 3):
-                    cell.number_format = '#,##0.00'
-                elif idx in (4, 5, 6):
-                    cell.number_format = '#,##0'
-        widths = [25, 18, 18, 18, 12, 12, 12]
-        for i, w in enumerate(widths, 1):
-            ws_subject.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
-
-    if report_data.by_bank_summary:
-        ws_bank = wb.create_sheet('按银行汇总')
-        bank_header = ['银行', '收入合计', '支出合计', '净额', '交易笔数', '收入笔数', '支出笔数']
-        ws_bank.append(bank_header)
-        for row in report_data.by_bank_summary:
-            ws_bank.append([
-                row['银行'], row['收入合计'], row['支出合计'], row['净额'],
-                row['交易笔数'], row['收入笔数'], row['支出笔数'],
-            ])
-        for cell in ws_bank[1]:
-            cell.font = openpyxl.styles.Font(bold=True)
-        for row in ws_bank.iter_rows(min_row=2):
-            for idx, cell in enumerate(row):
-                if idx in (1, 2, 3):
-                    cell.number_format = '#,##0.00'
-                elif idx in (4, 5, 6):
-                    cell.number_format = '#,##0'
-        widths = [20, 18, 18, 18, 12, 12, 12]
-        for i, w in enumerate(widths, 1):
-            ws_bank.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
-
-    ws_files = wb.create_sheet('文件处理状态')
-    file_header = ['文件名', '银行', '银行账号', '主体', '处理状态',
-                   '总行数', '提取记录', '跳过行', '错误信息']
-    ws_files.append(file_header)
-    for d in report_data.file_details:
-        ws_files.append([
-            d.file_name, d.bank_name, d.bank_account, d.subject or '',
-            d.process_status, d.total_rows_in_excel, d.extracted_records,
-            d.skipped_rows, d.error_message or '',
-        ])
-    for cell in ws_files[1]:
-        cell.font = openpyxl.styles.Font(bold=True)
-    for row in ws_files.iter_rows(min_row=2):
-        for idx, cell in enumerate(row):
-            if idx in (5, 6, 7):
-                cell.number_format = '#,##0'
-    widths = [40, 15, 25, 20, 10, 10, 12, 10, 40]
-    for i, w in enumerate(widths, 1):
-        ws_files.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
-
-    ws_skip = wb.create_sheet('跳过行明细')
-    skip_header = ['文件名', '行号', '跳过原因', '行内容摘要']
-    ws_skip.append(skip_header)
-    for sr in report_data.skipped_rows:
-        ws_skip.append([sr.file_name, sr.row_number, sr.reason, sr.raw_content or ''])
-    for cell in ws_skip[1]:
-        cell.font = openpyxl.styles.Font(bold=True)
-    widths = [40, 10, 15, 80]
-    for i, w in enumerate(widths, 1):
-        ws_skip.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
-
-    ws_unmatched = wb.create_sheet('未匹配账号')
-    unmatched_header = ['银行', '银行账号', '记录数', '收入合计', '支出合计', '来源文件']
-    ws_unmatched.append(unmatched_header)
-    for ua in report_data.unmatched_accounts:
-        ws_unmatched.append([
-            ua.bank_name, ua.bank_account, ua.record_count,
-            ua.total_income, ua.total_expense,
-            ', '.join(ua.file_sources) if ua.file_sources else '',
-        ])
-    for cell in ws_unmatched[1]:
-        cell.font = openpyxl.styles.Font(bold=True)
-    for row in ws_unmatched.iter_rows(min_row=2):
-        for idx, cell in enumerate(row):
-            if idx == 2:
-                cell.number_format = '#,##0'
-            elif idx in (3, 4):
-                cell.number_format = '#,##0.00'
-    widths = [15, 25, 12, 18, 18, 50]
-    for i, w in enumerate(widths, 1):
-        ws_unmatched.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
-
-    wb.save(output_path)
-    logger.info('检验报告(Excel)已导出: %s', output_path)
-    return output_path
-
-
-def generate_verification_report_from_records(
-    records: List[Dict[str, Any]],
-    file_details: List[FileProcessDetail],
-    output_dir: Optional[str] = None,
-    source_info: Optional[Dict[str, Any]] = None,
-) -> Tuple[Optional[str], Optional[str]]:
-    """
-    从交易记录和文件处理详情生成流水检验报告（Excel + Markdown）。
-
-    Args:
-        records: 交易记录列表
-        file_details: 各文件处理详情列表
-        output_dir: 输出目录
-        source_info: 数据源信息
-
-    Returns:
-        tuple: (Excel报告路径, Markdown报告路径)
-    """
-    logger = get_logger()
-
-    if output_dir is None:
-        output_dir = get_script_dir()
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    excel_path = os.path.join(output_dir, f'流水检验报告_{timestamp}.xlsx')
-    md_path = os.path.join(output_dir, f'流水检验报告_{timestamp}.md')
-
-    try:
-        report_data = _build_verification_report_data(records, file_details, source_info)
-
-        excel_result = export_verification_report_excel(report_data, excel_path, source_info)
-        md_result = export_verification_report_markdown(report_data, md_path)
-
-        return excel_result, md_result
-    except Exception as e:
-        logger.error('生成检验报告失败: %s', e, exc_info=True)
-        return None, None
-
-
-def generate_verification_report_from_total(
-    total_path: str,
-    output_dir: Optional[str] = None,
-) -> Tuple[Optional[str], Optional[str]]:
-    """
-    从银行流水总表文件生成检验报告（无文件级详情时退化为汇总模式）。
-
-    Args:
-        total_path: 银行流水总表 Excel 文件路径
-        output_dir: 输出目录
-
-    Returns:
-        tuple: (Excel报告路径, Markdown报告路径)
-    """
-    logger = get_logger()
-
-    records = load_total_table(total_path)
-    if not records:
-        logger.warning('总表无数据: %s', total_path)
-        return None, None
-
-    if output_dir is None:
-        output_dir = os.path.dirname(total_path) or get_script_dir()
-
-    source_info = {
-        '数据来源文件': os.path.basename(total_path),
-        '总表记录数': len(records),
-        '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    }
-
-    file_details: List[FileProcessDetail] = []
-    account_file_map: Dict[Tuple[str, str], set] = {}
-    for rec in records:
-        bank = str(rec.get('银行') or '').strip() or '未知'
-        account = str(rec.get('银行账号') or '').strip()
-        if not account:
-            continue
-        key = (bank, account)
-        if key not in account_file_map:
-            account_file_map[key] = set()
-        account_file_map[key].add(bank)
-
-    for (bank, account), _ in account_file_map.items():
-        subject = ''
-        for rec in records:
-            if str(rec.get('银行账号') or '').strip() == account:
-                subject = str(rec.get('主体') or '').strip()
-                break
-        rec_count = sum(
-            1 for r in records
-            if str(r.get('银行账号') or '').strip() == account
-        )
-        file_details.append(FileProcessDetail(
-            file_name=os.path.basename(total_path),
-            file_path=total_path,
-            bank_name=bank,
-            bank_account=account,
-            subject=subject,
-            total_rows_in_excel=rec_count,
-            extracted_records=rec_count,
-            process_status='汇总',
-        ))
-
-    return generate_verification_report_from_records(records, file_details, output_dir, source_info)
 
 
 if __name__ == '__main__':
