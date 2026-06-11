@@ -1526,6 +1526,7 @@ class ProcessingResult:
     subject_summary_path: Optional[str] = None
     balance_check_path: Optional[str] = None
     duplicate_check_path: Optional[str] = None
+    accounting_period_path: Optional[str] = None
     lookup_missing: bool = False
     folder_empty: bool = False
     incremental_mode: bool = False
@@ -1939,6 +1940,28 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
             logger.error('自动生成重复交易检测报告失败: %s', e, exc_info=True)
             duplicate_check_path = None
 
+    accounting_period_path = None
+    if final_rows:
+        try:
+            output_dir = script_dir
+            if output_path:
+                output_dir = os.path.dirname(output_path) or script_dir
+            source_info = {
+                '数据来源': '主流程自动生成',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            accounting_period_path = generate_accounting_period_report(
+                final_rows, output_dir, source_info
+            )
+            if accounting_period_path:
+                logger.info('会计期间总表已自动生成: %s', accounting_period_path)
+        except Exception as e:
+            logger.error('自动生成会计期间总表失败: %s', e, exc_info=True)
+            accounting_period_path = None
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -1948,6 +1971,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
         duplicate_check_path=duplicate_check_path,
+        accounting_period_path=accounting_period_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -1999,6 +2023,9 @@ def format_result_message(result):
 
         if result.duplicate_check_path:
             msg += f'\n\n重复交易检测：{result.duplicate_check_path}'
+
+        if result.accounting_period_path:
+            msg += f'\n\n会计期间总表：{result.accounting_period_path}'
     else:
         if result.incremental_mode and result.existing_record_count > 0:
             msg = (
@@ -8800,6 +8827,375 @@ def _print_preset_detail(preset):
     print(f'创建时间: {preset.get("created_at", "")}')
     print(f'更新时间: {preset.get("updated_at", "")}')
     print('=' * 50)
+
+
+# ──────────────────────────────────────────────
+# 会计期间自动归属模块
+# ──────────────────────────────────────────────
+
+import calendar as _calendar
+
+
+@dataclass
+class AccountingPeriodConfig:
+    period_type: str = 'monthly'
+    cutoff_day: int = 25
+    fiscal_year_start_month: int = 1
+    period_name_format: str = 'YYYY-MM'
+
+
+class AccountingPeriodManager:
+    _instance = None
+    _config_path = None
+    _config: AccountingPeriodConfig = None
+    _last_modified: float = 0.0
+
+    def __new__(cls, config_path=None):
+        if cls._instance is None:
+            cls._instance = super(AccountingPeriodManager, cls).__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self, config_path=None):
+        if self._initialized:
+            return
+        self._initialized = True
+        if config_path is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(script_dir, BANK_RULES_CONFIG_FILE)
+        self._config_path = config_path
+        self._config = AccountingPeriodConfig()
+        self._last_modified = 0.0
+        self.load_config()
+
+    def load_config(self):
+        logger = get_logger()
+        if not os.path.exists(self._config_path):
+            logger.warning('会计期间配置文件不存在: %s，使用默认配置', self._config_path)
+            return False
+        try:
+            current_mtime = os.path.getmtime(self._config_path)
+            if current_mtime == self._last_modified and self._config:
+                return True
+            with open(self._config_path, 'r', encoding='utf-8') as f:
+                config_data = yaml.safe_load(f)
+            period_cfg = config_data.get('accounting_period', {})
+            if not period_cfg:
+                logger.info('未配置 accounting_period 节，使用默认配置')
+                return True
+            cutoff = int(period_cfg.get('cutoff_day', 25))
+            if cutoff < 1:
+                cutoff = 1
+            if cutoff > 31:
+                cutoff = 31
+            fysm = int(period_cfg.get('fiscal_year_start_month', 1))
+            if fysm < 1:
+                fysm = 1
+            if fysm > 12:
+                fysm = 12
+            self._config = AccountingPeriodConfig(
+                period_type=period_cfg.get('period_type', 'monthly'),
+                cutoff_day=cutoff,
+                fiscal_year_start_month=fysm,
+                period_name_format=period_cfg.get('period_name_format', 'YYYY-MM'),
+            )
+            self._last_modified = current_mtime
+            logger.info(
+                '会计期间配置已加载: period_type=%s, cutoff_day=%d, fiscal_year_start_month=%d, format=%s',
+                self._config.period_type, self._config.cutoff_day,
+                self._config.fiscal_year_start_month, self._config.period_name_format,
+            )
+            return True
+        except Exception as e:
+            logger.error('加载会计期间配置失败: %s', e, exc_info=True)
+            return False
+
+    def get_config(self) -> AccountingPeriodConfig:
+        self.load_config()
+        return self._config
+
+
+def get_accounting_period_manager():
+    global _ap_manager_singleton
+    if _ap_manager_singleton is None:
+        _ap_manager_singleton = AccountingPeriodManager()
+    return _ap_manager_singleton
+
+
+_ap_manager_singleton = None
+
+
+def _determine_monthly_period(year, month, day, cutoff_day):
+    if cutoff_day >= 28:
+        last_day = _calendar.monthrange(year, month)[1]
+        effective_cutoff = min(cutoff_day, last_day)
+    else:
+        effective_cutoff = cutoff_day
+    if day > effective_cutoff:
+        if month == 12:
+            return year + 1, 1
+        return year, month + 1
+    return year, month
+
+
+def _determine_quarterly_period(year, month, day, cutoff_day, fiscal_year_start_month):
+    offsets = [(fiscal_year_start_month - 1 + i) % 12 for i in range(12)]
+    q_start_indices = [0, 3, 6, 9]
+    quarter_of_month = None
+    for qi in range(4):
+        q_months = [offsets[q_start_indices[qi] + j] + 1 for j in range(3)]
+        if month in q_months:
+            quarter_of_month = qi
+            break
+    if quarter_of_month is None:
+        return year, quarter_of_month
+    q_months = [offsets[q_start_indices[quarter_of_month] + j] + 1 for j in range(3)]
+    is_last_month_of_quarter = (month == q_months[2])
+    if is_last_month_of_quarter:
+        if day > cutoff_day:
+            next_qi = quarter_of_month + 1
+            if next_qi >= 4:
+                next_q_first_month = offsets[0] + 1
+                if next_q_first_month <= month:
+                    return year + 1, 0
+                return year, 0
+            next_q_first_month = offsets[q_start_indices[next_qi]] + 1
+            if next_q_first_month < month:
+                return year + 1, next_qi
+            return year, next_qi
+        return year, quarter_of_month
+    return year, quarter_of_month
+
+
+def _quarter_label(year, quarter_index, fiscal_year_start_month, period_name_format):
+    q_num = quarter_index + 1
+    if period_name_format == 'YYYY-QN':
+        return f'{year}-Q{q_num}'
+    q_months_offsets = [(fiscal_year_start_month - 1 + i) % 12 for i in range(12)]
+    q_start_indices = [0, 3, 6, 9]
+    q_months = [q_months_offsets[q_start_indices[quarter_index] + j] + 1 for j in range(3)]
+    return f'{year}-Q{q_num}({q_months[0]:02d}-{q_months[2]:02d})'
+
+
+def assign_accounting_period(records, config=None):
+    """
+    根据可配置的账期截止日规则，将每笔交易自动归入对应会计月份或季度。
+
+    Args:
+        records: 交易记录列表，每条包含 '交易日期' 等字段
+        config: AccountingPeriodConfig 实例，默认从配置文件加载
+
+    Returns:
+        tuple: (enriched_records, period_summary)
+            - enriched_records: 每条记录新增 '会计期间' 字段
+            - period_summary: Dict[str, List[Dict]] 按期间分组的记录
+    """
+    logger = get_logger()
+
+    if config is None:
+        manager = get_accounting_period_manager()
+        config = manager.get_config()
+
+    if not records:
+        logger.warning('无交易记录，会计期间归属跳过')
+        return [], {}
+
+    period_summary: Dict[str, List[Dict]] = {}
+    enriched = []
+
+    for rec in records:
+        trade_date = rec.get('交易日期')
+        dt = _normalize_date(trade_date)
+        period_label = '未知期间'
+
+        if dt is not None:
+            year = dt.year
+            month = dt.month
+            day = dt.day
+
+            if config.period_type == 'quarterly':
+                adj_year, q_index = _determine_quarterly_period(
+                    year, month, day, config.cutoff_day, config.fiscal_year_start_month)
+                period_label = _quarter_label(
+                    adj_year, q_index, config.fiscal_year_start_month, config.period_name_format)
+            else:
+                adj_year, adj_month = _determine_monthly_period(
+                    year, month, day, config.cutoff_day)
+                if config.period_name_format == 'YYYY-QN':
+                    q_index = (adj_month - 1) // 3
+                    period_label = f'{adj_year}-Q{q_index + 1}'
+                else:
+                    period_label = f'{adj_year}-{adj_month:02d}'
+
+        new_rec = dict(rec)
+        new_rec['会计期间'] = period_label
+        enriched.append(new_rec)
+
+        if period_label not in period_summary:
+            period_summary[period_label] = []
+        period_summary[period_label].append(new_rec)
+
+    logger.info(
+        '会计期间归属完成: %d 条记录, %d 个期间',
+        len(enriched), len(period_summary),
+    )
+
+    return enriched, period_summary
+
+
+def _compute_period_aggregates(period_summary):
+    result = {}
+    for period, recs in period_summary.items():
+        total_income = 0.0
+        total_expense = 0.0
+        income_count = 0
+        expense_count = 0
+        for rec in recs:
+            receipt = to_float(rec.get('收款'))
+            payment = to_float(rec.get('付款'))
+            if receipt is not None and receipt > 0:
+                total_income += receipt
+                income_count += 1
+            if payment is not None and payment < 0:
+                total_expense += abs(payment)
+                expense_count += 1
+        net = round(total_income - total_expense, 2)
+        result[period] = {
+            '会计期间': period,
+            '收入总额': round(total_income, 2),
+            '支出总额': round(total_expense, 2),
+            '净额': net,
+            '交易笔数': len(recs),
+            '收入笔数': income_count,
+            '支出笔数': expense_count,
+        }
+    return result
+
+
+def export_accounting_period_summary(enriched_records, period_summary, output_path,
+                                      source_info=None):
+    """
+    导出按期间分 Sheet 的总表 Excel，便于结账。
+
+    每个 Sheet 包含该期间的交易明细 + 期间汇总行。
+    额外增加一个"期间汇总"Sheet，汇总所有期间的收支情况。
+
+    Args:
+        enriched_records: 含 '会计期间' 字段的记录列表
+        period_summary: 按期间分组的记录字典
+        output_path: 输出文件路径
+        source_info: 数据源信息字典
+
+    Returns:
+        str: 输出文件路径
+    """
+    logger = get_logger()
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    detail_columns = ['会计期间', '唯一id', '银行', '银行账号', '主体', '交易日期',
+                       '付款', '收款', '摘要', '对方户名', '余额', '交易流水号']
+    extra_keys = set()
+    for rec in enriched_records:
+        for k in rec:
+            if k not in detail_columns:
+                extra_keys.add(k)
+    detail_columns.extend(sorted(extra_keys))
+
+    sorted_periods = sorted(period_summary.keys())
+
+    for period in sorted_periods:
+        recs = period_summary[period]
+        safe_title = period.replace('/', '-').replace('\\', '-')[:31]
+        ws = wb.create_sheet(title=safe_title)
+
+        for col_idx, col_name in enumerate(detail_columns, 1):
+            ws.cell(row=1, column=col_idx, value=col_name)
+
+        for row_idx, rec in enumerate(recs, 2):
+            for col_idx, col_name in enumerate(detail_columns, 1):
+                val = rec.get(col_name)
+                ws.cell(row=row_idx, column=col_idx, value=val)
+
+        summary_row = len(recs) + 3
+        ws.cell(row=summary_row, column=1, value='期间汇总')
+        ws.cell(row=summary_row, column=2, value=f'交易笔数: {len(recs)}')
+
+        income_sum = sum(
+            to_float(r.get('收款')) or 0
+            for r in recs if to_float(r.get('收款')) is not None and to_float(r.get('收款')) > 0
+        )
+        expense_sum = sum(
+            abs(to_float(r.get('付款')) or 0)
+            for r in recs if to_float(r.get('付款')) is not None and to_float(r.get('付款')) < 0
+        )
+        ws.cell(row=summary_row, column=3, value=f'收入合计: {round(income_sum, 2)}')
+        ws.cell(row=summary_row, column=4, value=f'支出合计: {round(expense_sum, 2)}')
+        ws.cell(row=summary_row, column=5, value=f'净额: {round(income_sum - expense_sum, 2)}')
+
+    summary_columns = ['会计期间', '收入总额', '支出总额', '净额', '交易笔数', '收入笔数', '支出笔数']
+    ws_summary = wb.create_sheet(title='期间汇总', index=0)
+
+    if source_info:
+        ws_summary.cell(row=1, column=1, value='数据源信息')
+        for i, (k, v) in enumerate(source_info.items(), 2):
+            ws_summary.cell(row=i, column=1, value=k)
+            ws_summary.cell(row=i, column=2, value=str(v))
+        header_row = len(source_info) + 3
+    else:
+        header_row = 1
+
+    for col_idx, col_name in enumerate(summary_columns, 1):
+        ws_summary.cell(row=header_row, column=col_idx, value=col_name)
+
+    aggregates = _compute_period_aggregates(period_summary)
+    for row_offset, period in enumerate(sorted_periods):
+        agg = aggregates[period]
+        for col_idx, col_name in enumerate(summary_columns, 1):
+            ws_summary.cell(row=header_row + 1 + row_offset, column=col_idx, value=agg.get(col_name, ''))
+
+    wb.save(output_path)
+    wb.close()
+    logger.info('会计期间总表已导出: %s（%d 个期间）', output_path, len(sorted_periods))
+    return output_path
+
+
+def generate_accounting_period_report(records, output_dir=None, source_info=None, config=None):
+    """
+    从交易记录列表直接生成会计期间归属总表。
+
+    Args:
+        records: 交易记录列表
+        output_dir: 输出目录，默认为当前脚本目录
+        source_info: 数据源信息
+        config: AccountingPeriodConfig 实例，默认从配置文件加载
+
+    Returns:
+        str: 生成的文件路径，如无数据则返回 None
+    """
+    logger = get_logger()
+
+    if not records:
+        logger.warning('无交易记录，跳过会计期间报告生成')
+        return None
+
+    if output_dir is None:
+        output_dir = get_script_dir()
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'会计期间总表_{timestamp}.xlsx'
+    output_path = os.path.join(output_dir, filename)
+
+    enriched, period_summary = assign_accounting_period(records, config)
+
+    if not enriched:
+        logger.warning('会计期间归属后无有效记录，跳过导出')
+        return None
+
+    return export_accounting_period_summary(enriched, period_summary, output_path, source_info)
 
 
 # ──────────────────────────────────────────────
