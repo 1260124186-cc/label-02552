@@ -20,11 +20,86 @@ def get_script_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_program_dir():
+    return get_script_dir()
+
+
+def is_writable(dir_path):
+    import uuid
+    if not os.path.isdir(dir_path):
+        return False
+    try:
+        test_file = os.path.join(dir_path, '.lookup_write_test_' + uuid.uuid4().hex[:8])
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        return True
+    except (OSError, IOError):
+        return False
+
+
+def get_user_data_dir():
+    app_name = 'bankcheck'
+    if sys.platform.startswith('win'):
+        base_dir = os.environ.get('APPDATA')
+        if not base_dir:
+            base_dir = os.path.expanduser('~\\AppData\\Roaming')
+        return os.path.join(base_dir, app_name)
+    elif sys.platform == 'darwin':
+        return os.path.join(os.path.expanduser('~/Library/Application Support'), app_name)
+    else:
+        return os.path.join(os.path.expanduser('~'), '.' + app_name)
+
+
+def get_writable_dir():
+    program_dir = get_program_dir()
+    if is_writable(program_dir):
+        return program_dir
+    user_data_dir = get_user_data_dir()
+    os.makedirs(user_data_dir, exist_ok=True)
+    return user_data_dir
+
+
+def get_output_dir(subdir=None):
+    base_dir = get_writable_dir()
+    if subdir:
+        output_dir = os.path.join(base_dir, subdir)
+    else:
+        output_dir = base_dir
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
 def get_logger():
     return logging.getLogger('bankcheck')
 
 
 LOOKUP_FILE_NAMES = ['主体查找表.xlsx', '主体查找表.xls']
+
+
+def _find_lookup_in_dir(directory):
+    if not directory or not os.path.isdir(directory):
+        return None
+    for name in LOOKUP_FILE_NAMES:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate):
+            return candidate
+    excel_exts = ('.xlsx', '.xls')
+    exclude_names = {'银行流水总表.xlsx', '银行流水总表.xls'}
+    excel_files = []
+    try:
+        for f in os.listdir(directory):
+            if f.startswith('~$'):
+                continue
+            if f in exclude_names:
+                continue
+            if f.lower().endswith(excel_exts):
+                excel_files.append(os.path.join(directory, f))
+    except OSError:
+        return None
+    if len(excel_files) == 1:
+        return excel_files[0]
+    return None
 
 
 def _normalize_account_str(value):
@@ -69,34 +144,77 @@ class LookupEntry:
         }
 
 
+def _copy_lookup_to_output(program_lookup_path, output_dir):
+    """将程序目录下的查找表复制到用户可写的输出目录"""
+    logger = get_logger()
+    if not program_lookup_path or not os.path.isfile(program_lookup_path):
+        return None
+    try:
+        filename = os.path.basename(program_lookup_path)
+        target_path = os.path.join(output_dir, filename)
+        if os.path.exists(target_path):
+            return target_path
+        os.makedirs(output_dir, exist_ok=True)
+        import shutil
+        shutil.copy2(program_lookup_path, target_path)
+        logger.info('已将查找表从程序目录复制到输出目录: %s -> %s',
+                    program_lookup_path, target_path)
+        return target_path
+    except Exception as e:
+        logger.warning('复制查找表到输出目录失败: %s', e)
+        return None
+
+
 def find_lookup_file(script_dir=None) -> Optional[str]:
     """
-    在脚本目录下查找主体查找表文件
-    优先匹配 "主体查找表.xlsx" 或 "主体查找表.xls"
+    智能查找主体查找表 Excel 文件。
+
+    查找策略（按优先级）：
+    1. 如果传入了 script_dir 参数，只在该目录查找（向后兼容）
+    2. 否则优先在输出目录（可写目录）查找
+    3. 如果在输出目录没找到，在程序目录查找
+    4. 如果在程序目录找到但输出目录没找到，自动复制到输出目录
     """
-    if script_dir is None:
-        script_dir = get_script_dir()
+    logger = get_logger()
+    output_dir = get_output_dir()
+    program_dir = get_program_dir()
 
-    for name in LOOKUP_FILE_NAMES:
-        candidate = os.path.join(script_dir, name)
-        if os.path.isfile(candidate):
-            return candidate
+    if script_dir is not None:
+        custom_lookup = _find_lookup_in_dir(script_dir)
+        if custom_lookup:
+            logger.info('在指定目录找到主体查找表: %s', custom_lookup)
+            return custom_lookup
+        logger.warning('在指定目录未找到主体查找表: %s', script_dir)
+        return None
 
+    output_lookup = _find_lookup_in_dir(output_dir)
+    if output_lookup:
+        logger.info('在输出目录找到主体查找表: %s', output_lookup)
+        return output_lookup
+
+    program_lookup = _find_lookup_in_dir(program_dir)
+    if program_lookup:
+        logger.info('在程序目录找到主体查找表: %s', program_lookup)
+        copied_path = _copy_lookup_to_output(program_lookup, output_dir)
+        if copied_path:
+            return copied_path
+        return program_lookup
+
+    logger.warning('未找到主体查找表文件')
     return None
 
 
 def get_lookup_file_path(script_dir=None) -> str:
     """
     获取查找表文件路径，如果不存在则返回默认路径（主体查找表.xlsx）
+    默认使用可写目录。
     """
-    if script_dir is None:
-        script_dir = get_script_dir()
-
     existing = find_lookup_file(script_dir)
     if existing:
         return existing
 
-    return os.path.join(script_dir, '主体查找表.xlsx')
+    output_dir = get_output_dir()
+    return os.path.join(output_dir, '主体查找表.xlsx')
 
 
 def _open_workbook_compat(filepath):

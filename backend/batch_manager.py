@@ -33,6 +33,56 @@ def get_script_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_program_dir():
+    return get_script_dir()
+
+
+def is_writable(dir_path):
+    import uuid
+    if not os.path.isdir(dir_path):
+        return False
+    try:
+        test_file = os.path.join(dir_path, '.batch_write_test_' + uuid.uuid4().hex[:8])
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        return True
+    except (OSError, IOError):
+        return False
+
+
+def get_user_data_dir():
+    app_name = 'bankcheck'
+    if sys.platform.startswith('win'):
+        base_dir = os.environ.get('APPDATA')
+        if not base_dir:
+            base_dir = os.path.expanduser('~\\AppData\\Roaming')
+        return os.path.join(base_dir, app_name)
+    elif sys.platform == 'darwin':
+        return os.path.join(os.path.expanduser('~/Library/Application Support'), app_name)
+    else:
+        return os.path.join(os.path.expanduser('~'), '.' + app_name)
+
+
+def get_writable_dir():
+    program_dir = get_program_dir()
+    if is_writable(program_dir):
+        return program_dir
+    user_data_dir = get_user_data_dir()
+    os.makedirs(user_data_dir, exist_ok=True)
+    return user_data_dir
+
+
+def get_output_dir(subdir=None):
+    base_dir = get_writable_dir()
+    if subdir:
+        output_dir = os.path.join(base_dir, subdir)
+    else:
+        output_dir = base_dir
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
 def get_logger():
     return logging.getLogger('bankcheck')
 
@@ -82,7 +132,11 @@ class BatchInfo:
 
 class BatchManager:
     def __init__(self, script_dir: Optional[str] = None):
-        self.script_dir = script_dir or get_script_dir()
+        self.program_dir = get_program_dir()
+        if script_dir and is_writable(script_dir):
+            self.script_dir = script_dir
+        else:
+            self.script_dir = get_output_dir()
         self.db_path = os.path.join(self.script_dir, BATCH_DB_FILENAME)
         self.history_root = os.path.join(self.script_dir, HISTORY_DIR_NAME)
         self.current_batch: Optional[BatchInfo] = None

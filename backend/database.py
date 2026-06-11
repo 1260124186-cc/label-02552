@@ -25,6 +25,56 @@ def get_script_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_program_dir():
+    return get_script_dir()
+
+
+def is_writable(dir_path):
+    import uuid
+    if not os.path.isdir(dir_path):
+        return False
+    try:
+        test_file = os.path.join(dir_path, '.db_write_test_' + uuid.uuid4().hex[:8])
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        return True
+    except (OSError, IOError):
+        return False
+
+
+def get_user_data_dir():
+    app_name = 'bankcheck'
+    if sys.platform.startswith('win'):
+        base_dir = os.environ.get('APPDATA')
+        if not base_dir:
+            base_dir = os.path.expanduser('~\\AppData\\Roaming')
+        return os.path.join(base_dir, app_name)
+    elif sys.platform == 'darwin':
+        return os.path.join(os.path.expanduser('~/Library/Application Support'), app_name)
+    else:
+        return os.path.join(os.path.expanduser('~'), '.' + app_name)
+
+
+def get_writable_dir():
+    program_dir = get_program_dir()
+    if is_writable(program_dir):
+        return program_dir
+    user_data_dir = get_user_data_dir()
+    os.makedirs(user_data_dir, exist_ok=True)
+    return user_data_dir
+
+
+def get_output_dir(subdir=None):
+    base_dir = get_writable_dir()
+    if subdir:
+        output_dir = os.path.join(base_dir, subdir)
+    else:
+        output_dir = base_dir
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
 def get_logger():
     return logging.getLogger('bankcheck')
 
@@ -266,7 +316,7 @@ class SQLiteBackend(DatabaseBackend):
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
-            db_path = os.path.join(get_script_dir(), TRANSACTION_DB_FILENAME)
+            db_path = os.path.join(get_output_dir(), TRANSACTION_DB_FILENAME)
         self.db_path = db_path
         self.conn: Optional[sqlite3.Connection] = None
         self.logger = get_logger()
@@ -1048,15 +1098,13 @@ DATABASE_CONFIG_FILE = 'database_config.json'
 
 def load_database_config(script_dir: Optional[str] = None) -> Dict[str, Any]:
     """加载数据库配置"""
-    if script_dir is None:
-        script_dir = get_script_dir()
-
-    config_path = os.path.join(script_dir, DATABASE_CONFIG_FILE)
+    program_dir = get_program_dir()
+    output_dir = get_output_dir()
 
     default_config = {
         'backend': 'sqlite',
         'sqlite': {
-            'db_path': os.path.join(script_dir, TRANSACTION_DB_FILENAME),
+            'db_path': os.path.join(output_dir, TRANSACTION_DB_FILENAME),
         },
         'postgresql': {
             'host': 'localhost',
@@ -1067,6 +1115,22 @@ def load_database_config(script_dir: Optional[str] = None) -> Dict[str, Any]:
         },
         'auto_persist': True,
     }
+
+    if script_dir is not None:
+        config_path = os.path.join(script_dir, DATABASE_CONFIG_FILE)
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    user_config = json.load(f)
+                    default_config.update(user_config)
+            except Exception as e:
+                logger = get_logger()
+                logger.warning('从指定目录读取数据库配置失败，使用默认配置: %s', e)
+        return default_config
+
+    config_path = os.path.join(output_dir, DATABASE_CONFIG_FILE)
+    if not os.path.exists(config_path):
+        config_path = os.path.join(program_dir, DATABASE_CONFIG_FILE)
 
     if os.path.exists(config_path):
         try:
@@ -1083,11 +1147,17 @@ def load_database_config(script_dir: Optional[str] = None) -> Dict[str, Any]:
 def save_database_config(config: Dict[str, Any],
                          script_dir: Optional[str] = None) -> str:
     """保存数据库配置"""
-    if script_dir is None:
-        script_dir = get_script_dir()
+    if script_dir is not None:
+        os.makedirs(script_dir, exist_ok=True)
+        config_path = os.path.join(script_dir, DATABASE_CONFIG_FILE)
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        return config_path
 
-    config_path = os.path.join(script_dir, DATABASE_CONFIG_FILE)
+    output_dir = get_output_dir()
+    config_path = os.path.join(output_dir, DATABASE_CONFIG_FILE)
 
+    os.makedirs(output_dir, exist_ok=True)
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 

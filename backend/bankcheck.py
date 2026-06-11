@@ -355,14 +355,105 @@ def get_script_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_program_dir():
+    """
+    获取程序所在目录（只读目录，用于读取配置文件）。
+    与 get_script_dir() 功能相同，但语义更清晰。
+    """
+    return get_script_dir()
+
+
+def is_writable(dir_path):
+    """
+    检测目录是否具有写入权限。
+
+    Args:
+        dir_path: 待检测的目录路径
+
+    Returns:
+        bool: True 表示可写，False 表示不可写
+    """
+    if not os.path.isdir(dir_path):
+        return False
+    try:
+        test_file = os.path.join(dir_path, '.bankcheck_write_test_' + uuid.uuid4().hex[:8])
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        return True
+    except (OSError, IOError):
+        return False
+
+
+def get_user_data_dir():
+    """
+    获取用户可写的应用数据目录。
+    跨平台策略：
+    - Windows: %APPDATA%\\bankcheck 或 %USERPROFILE%\\AppData\\Roaming\\bankcheck
+    - macOS: ~/Library/Application Support/bankcheck
+    - Linux: ~/.bankcheck
+
+    Returns:
+        str: 用户数据目录的绝对路径
+    """
+    app_name = 'bankcheck'
+    if sys.platform.startswith('win'):
+        base_dir = os.environ.get('APPDATA')
+        if not base_dir:
+            base_dir = os.path.expanduser('~\\AppData\\Roaming')
+        return os.path.join(base_dir, app_name)
+    elif sys.platform == 'darwin':
+        return os.path.join(os.path.expanduser('~/Library/Application Support'), app_name)
+    else:
+        return os.path.join(os.path.expanduser('~'), '.' + app_name)
+
+
+def get_writable_dir():
+    """
+    获取可写的工作目录。
+    策略：
+    1. 优先尝试使用程序目录（get_program_dir()）
+    2. 如果程序目录不可写（如安装在 Program Files、/Applications 等受保护目录），
+       则使用用户数据目录（get_user_data_dir()）
+
+    Returns:
+        str: 可写目录的绝对路径
+    """
+    program_dir = get_program_dir()
+    if is_writable(program_dir):
+        return program_dir
+    user_data_dir = get_user_data_dir()
+    os.makedirs(user_data_dir, exist_ok=True)
+    return user_data_dir
+
+
+def get_output_dir(subdir=None):
+    """
+    获取输出文件目录，用于保存日志、总表、查找表、数据库等可写文件。
+
+    Args:
+        subdir: 可选子目录名称，如 'logs'、'history' 等
+
+    Returns:
+        str: 输出目录的绝对路径
+    """
+    base_dir = get_writable_dir()
+    if subdir:
+        output_dir = os.path.join(base_dir, subdir)
+    else:
+        output_dir = base_dir
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
 def setup_logging():
     """
     初始化日志系统。
     - 控制台输出 INFO 级别及以上日志
     - 日志文件（bankcheck.log）记录 DEBUG 级别及以上日志，
-      文件保存在脚本/exe 所在目录下
+      文件保存在可写目录下（优先程序目录，否则用户数据目录）
     """
-    log_dir = get_script_dir()
+    log_dir = get_output_dir()
     log_file = os.path.join(log_dir, 'bankcheck.log')
 
     logger = logging.getLogger('bankcheck')
@@ -768,47 +859,121 @@ def identify_bank(filepath):
 LOOKUP_FILE_NAMES = ['主体查找表.xlsx', '主体查找表.xls']
 
 
-def find_lookup_file(script_dir):
+def _find_lookup_in_dir(directory):
     """
-    在脚本所在目录下查找主体查找表 Excel 文件。
+    在指定目录下查找主体查找表 Excel 文件（内部辅助函数）。
 
     查找策略（按优先级）：
     1. 优先按文件名精确匹配 "主体查找表.xlsx" 或 "主体查找表.xls"
     2. 若未精确匹配到，回退到查找目录下唯一的 Excel 文件（排除输出总表和临时文件）
     """
-    logger = get_logger()
+    if not directory or not os.path.isdir(directory):
+        return None
 
     # ── 策略 1：按文件名精确匹配 ──
     for name in LOOKUP_FILE_NAMES:
-        candidate = os.path.join(script_dir, name)
+        candidate = os.path.join(directory, name)
         if os.path.isfile(candidate):
-            logger.info('精确匹配到主体查找表: %s', candidate)
             return candidate
 
     # ── 策略 2：回退到唯一 Excel 文件 ──
     excel_exts = ('.xlsx', '.xls')
     exclude_names = {'银行流水总表.xlsx', '银行流水总表.xls'}
     excel_files = []
-    for f in os.listdir(script_dir):
-        if f.startswith('~$'):
-            continue
-        if f in exclude_names:
-            continue
-        if f.lower().endswith(excel_exts):
-            excel_files.append(os.path.join(script_dir, f))
+    try:
+        for f in os.listdir(directory):
+            if f.startswith('~$'):
+                continue
+            if f in exclude_names:
+                continue
+            if f.lower().endswith(excel_exts):
+                excel_files.append(os.path.join(directory, f))
+    except OSError:
+        return None
 
     if len(excel_files) == 1:
-        logger.info('找到主体查找表（唯一 Excel 文件）: %s', excel_files[0])
         return excel_files[0]
-    elif len(excel_files) == 0:
-        logger.warning('程序目录下未找到任何 Excel 文件作为主体查找表')
-    else:
-        logger.warning(
-            '程序目录下存在 %d 个 Excel 文件，无法确定唯一查找表: %s。'
-            '建议将查找表文件命名为 "主体查找表.xlsx"',
-            len(excel_files),
-            [os.path.basename(f) for f in excel_files],
-        )
+    return None
+
+
+def _copy_lookup_to_output(program_lookup_path, output_dir):
+    """
+    将程序目录下的查找表复制到用户可写的输出目录。
+
+    Args:
+        program_lookup_path: 程序目录下的查找表路径
+        output_dir: 输出目录路径
+
+    Returns:
+        str: 复制后的目标路径，失败返回 None
+    """
+    logger = get_logger()
+    if not program_lookup_path or not os.path.isfile(program_lookup_path):
+        return None
+
+    try:
+        filename = os.path.basename(program_lookup_path)
+        target_path = os.path.join(output_dir, filename)
+        if os.path.exists(target_path):
+            return target_path
+        os.makedirs(output_dir, exist_ok=True)
+        shutil.copy2(program_lookup_path, target_path)
+        logger.info('已将查找表从程序目录复制到输出目录: %s -> %s',
+                    program_lookup_path, target_path)
+        return target_path
+    except Exception as e:
+        logger.warning('复制查找表到输出目录失败: %s', e)
+        return None
+
+
+def find_lookup_file(script_dir=None):
+    """
+    智能查找主体查找表 Excel 文件。
+
+    查找策略（按优先级）：
+    1. 如果传入了 script_dir 参数，只在该目录查找（向后兼容，测试专用）
+    2. 否则优先在输出目录（可写目录）查找
+    3. 如果在输出目录没找到，在程序目录查找
+    4. 如果在程序目录找到但输出目录没找到，自动复制到输出目录
+    5. 在每个目录内：
+       - 优先按文件名精确匹配 "主体查找表.xlsx" 或 "主体查找表.xls"
+       - 若未精确匹配到，回退到查找目录下唯一的 Excel 文件
+
+    Args:
+        script_dir: 可选，指定的脚本目录（兼容旧接口）
+
+    Returns:
+        Optional[str]: 查找表文件路径，未找到返回 None
+    """
+    logger = get_logger()
+    output_dir = get_output_dir()
+    program_dir = get_program_dir()
+
+    # ── 策略 0：如果传入了 script_dir，只在该目录查找（向后兼容） ──
+    if script_dir is not None:
+        custom_lookup = _find_lookup_in_dir(script_dir)
+        if custom_lookup:
+            logger.info('在指定目录找到主体查找表: %s', custom_lookup)
+            return custom_lookup
+        logger.warning('在指定目录未找到主体查找表: %s', script_dir)
+        return None
+
+    # ── 策略 1：优先在输出目录查找 ──
+    output_lookup = _find_lookup_in_dir(output_dir)
+    if output_lookup:
+        logger.info('在输出目录找到主体查找表: %s', output_lookup)
+        return output_lookup
+
+    # ── 策略 2：在程序目录查找，并尝试复制到输出目录 ──
+    program_lookup = _find_lookup_in_dir(program_dir)
+    if program_lookup:
+        logger.info('在程序目录找到主体查找表: %s', program_lookup)
+        copied_path = _copy_lookup_to_output(program_lookup, output_dir)
+        if copied_path:
+            return copied_path
+        return program_lookup
+
+    logger.warning('未找到主体查找表文件')
     return None
 
 
@@ -1031,9 +1196,25 @@ class VerificationReportData:
 SUMMARY_TABLE_FILENAME = '银行流水总表.xlsx'
 
 
-def get_summary_table_path(script_dir, output_dir=None):
-    """获取历史总表文件路径"""
-    base_dir = output_dir or script_dir
+def get_summary_table_path(script_dir=None, output_dir=None):
+    """
+    获取总表文件路径。
+
+    路径策略：
+    - 如果指定了 output_dir，使用 output_dir
+    - 否则使用可写目录（get_output_dir()）
+
+    Args:
+        script_dir: 可选，兼容旧接口，实际不使用
+        output_dir: 可选，指定输出目录
+
+    Returns:
+        str: 总表文件的绝对路径
+    """
+    if output_dir:
+        base_dir = output_dir
+    else:
+        base_dir = get_output_dir()
     return os.path.join(base_dir, SUMMARY_TABLE_FILENAME)
 
 
@@ -1122,15 +1303,15 @@ def filter_incremental_records(new_rows, existing_keys):
     return incremental_rows, duplicate_count
 
 
-def merge_and_export_summary(existing_records, incremental_rows, script_dir, output_dir=None):
+def merge_and_export_summary(existing_records, incremental_rows, script_dir=None, output_dir=None):
     """
     合并历史记录与增量记录，并输出到总表。
 
     Args:
         existing_records: 历史记录列表
         incremental_rows: 新增记录列表
-        script_dir: 脚本目录
-        output_dir: 输出目录，默认为script_dir
+        script_dir: 可选，脚本目录（兼容旧接口）
+        output_dir: 可选，输出目录，默认使用可写目录
 
     Returns:
         str: 输出文件路径
@@ -1151,8 +1332,8 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir, out
     df = pd.DataFrame(merged_records, columns=columns)
     output_path = get_summary_table_path(script_dir, output_dir)
 
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
+    base_dir = os.path.dirname(output_path)
+    os.makedirs(base_dir, exist_ok=True)
 
     df.to_excel(output_path, index=False, engine='openpyxl')
 
@@ -1192,7 +1373,7 @@ else:
     ask_incremental_mode = cli_ask_incremental_mode
 
 
-def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
+def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None):
     logger = get_logger()
 
     lookup_file = find_lookup_file(script_dir)
@@ -1882,10 +2063,24 @@ AUDIT_DB_FILENAME = 'audit_log.db'
 
 
 def get_audit_db_path(script_dir=None):
-    """获取审计数据库文件路径"""
-    if script_dir is None:
-        script_dir = get_script_dir()
-    return os.path.join(script_dir, AUDIT_DB_FILENAME)
+    """
+    获取审计数据库文件路径。
+
+    路径策略：
+    - 如果指定了 script_dir 且可写，使用 script_dir
+    - 否则使用可写目录（get_output_dir()）
+
+    Args:
+        script_dir: 可选，指定的目录
+
+    Returns:
+        str: 审计数据库文件的绝对路径
+    """
+    if script_dir and is_writable(script_dir):
+        base_dir = script_dir
+    else:
+        base_dir = get_output_dir()
+    return os.path.join(base_dir, AUDIT_DB_FILENAME)
 
 
 def init_audit_db(db_path=None):
