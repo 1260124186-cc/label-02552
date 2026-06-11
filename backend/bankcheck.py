@@ -1124,6 +1124,7 @@ class ProcessingResult:
     unprocessed_files: List[str] = field(default_factory=list)
     error_files: List[Tuple[str, str]] = field(default_factory=list)
     output_path: Optional[str] = None
+    output_paths: Dict[str, Any] = field(default_factory=dict)
     subject_summary_path: Optional[str] = None
     balance_check_path: Optional[str] = None
     duplicate_check_path: Optional[str] = None
@@ -1194,8 +1195,20 @@ class VerificationReportData:
 
 SUMMARY_TABLE_FILENAME = '银行流水总表.xlsx'
 
+OUTPUT_FORMAT_XLSX = 'xlsx'
+OUTPUT_FORMAT_CSV = 'csv'
+OUTPUT_FORMAT_SPLIT_BY_BANK = 'split_by_bank'
 
-def get_summary_table_path(script_dir=None, output_dir=None):
+OUTPUT_FORMATS = {
+    OUTPUT_FORMAT_XLSX: 'Excel 总表 (.xlsx)',
+    OUTPUT_FORMAT_CSV: 'CSV 总表 (.csv)',
+    OUTPUT_FORMAT_SPLIT_BY_BANK: '按银行拆分多表',
+}
+
+DEFAULT_OUTPUT_FORMATS = [OUTPUT_FORMAT_XLSX]
+
+
+def get_summary_table_path(script_dir=None, output_dir=None, format_type=None):
     """
     获取总表文件路径。
 
@@ -1206,6 +1219,7 @@ def get_summary_table_path(script_dir=None, output_dir=None):
     Args:
         script_dir: 可选，兼容旧接口，实际不使用
         output_dir: 可选，指定输出目录
+        format_type: 可选，输出格式类型，用于生成不同后缀
 
     Returns:
         str: 总表文件的绝对路径
@@ -1214,6 +1228,9 @@ def get_summary_table_path(script_dir=None, output_dir=None):
         base_dir = output_dir
     else:
         base_dir = get_output_dir()
+
+    if format_type == OUTPUT_FORMAT_CSV:
+        return os.path.join(base_dir, '银行流水总表.csv')
     return os.path.join(base_dir, SUMMARY_TABLE_FILENAME)
 
 
@@ -1302,18 +1319,118 @@ def filter_incremental_records(new_rows, existing_keys):
     return incremental_rows, duplicate_count
 
 
-def merge_and_export_summary(existing_records, incremental_rows, script_dir=None, output_dir=None):
+def _sanitize_filename(name):
+    """清理文件名中的非法字符"""
+    import re
+    return re.sub(r'[\\/:*?"<>|]', '_', name).strip() or '未知'
+
+
+def export_summary_to_csv(records, output_dir=None, columns=None):
     """
-    合并历史记录与增量记录，并输出到总表。
+    导出总表为 CSV 格式。
+
+    Args:
+        records: 记录列表
+        output_dir: 输出目录
+        columns: 列名列表，默认使用标准列
+
+    Returns:
+        str: 输出文件路径
+    """
+    logger = get_logger()
+
+    if columns is None:
+        columns = [
+            '唯一id', '银行', '银行账号', '主体', '交易日期',
+            '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+        ]
+
+    if not records:
+        logger.warning('无任何记录可输出')
+        return None
+
+    df = pd.DataFrame(records, columns=columns)
+    output_path = get_summary_table_path(output_dir=output_dir, format_type=OUTPUT_FORMAT_CSV)
+
+    base_dir = os.path.dirname(output_path)
+    os.makedirs(base_dir, exist_ok=True)
+
+    df.to_csv(output_path, index=False, encoding='utf-8-sig')
+
+    logger.info('CSV 总表输出完成: %s（共 %d 条记录）', output_path, len(records))
+    return output_path
+
+
+def export_summary_by_bank(records, output_dir=None, columns=None, format_type=OUTPUT_FORMAT_XLSX):
+    """
+    按银行拆分为多个子表文件导出。
+
+    Args:
+        records: 记录列表
+        output_dir: 输出目录
+        columns: 列名列表，默认使用标准列
+        format_type: 子表格式，支持 xlsx 或 csv
+
+    Returns:
+        List[str]: 输出文件路径列表
+    """
+    logger = get_logger()
+
+    if columns is None:
+        columns = [
+            '唯一id', '银行', '银行账号', '主体', '交易日期',
+            '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+        ]
+
+    if not records:
+        logger.warning('无任何记录可输出')
+        return []
+
+    if output_dir is None:
+        output_dir = get_output_dir()
+
+    bank_output_dir = os.path.join(output_dir, '按银行拆分')
+    os.makedirs(bank_output_dir, exist_ok=True)
+
+    bank_groups: Dict[str, List[Dict[str, Any]]] = {}
+    for rec in records:
+        bank = str(rec.get('银行') or '').strip() or '未知银行'
+        if bank not in bank_groups:
+            bank_groups[bank] = []
+        bank_groups[bank].append(rec)
+
+    output_paths = []
+    for bank, bank_records in bank_groups.items():
+        safe_bank_name = _sanitize_filename(bank)
+        df = pd.DataFrame(bank_records, columns=columns)
+
+        if format_type == OUTPUT_FORMAT_CSV:
+            file_path = os.path.join(bank_output_dir, f'{safe_bank_name}_流水.csv')
+            df.to_csv(file_path, index=False, encoding='utf-8-sig')
+        else:
+            file_path = os.path.join(bank_output_dir, f'{safe_bank_name}_流水.xlsx')
+            df.to_excel(file_path, index=False, engine='openpyxl')
+
+        output_paths.append(file_path)
+        logger.info('银行子表输出完成: %s（%d 条记录）', file_path, len(bank_records))
+
+    logger.info('按银行拆分导出完成，共生成 %d 个文件', len(output_paths))
+    return output_paths
+
+
+def merge_and_export_summary(existing_records, incremental_rows, script_dir=None, output_dir=None, output_formats=None):
+    """
+    合并历史记录与增量记录，并按指定格式输出到总表。
 
     Args:
         existing_records: 历史记录列表
         incremental_rows: 新增记录列表
         script_dir: 可选，脚本目录（兼容旧接口）
         output_dir: 可选，输出目录，默认使用可写目录
+        output_formats: 可选，输出格式列表，如 [OUTPUT_FORMAT_XLSX, OUTPUT_FORMAT_CSV]
 
     Returns:
-        str: 输出文件路径
+        Dict: 各格式输出文件路径映射
     """
     logger = get_logger()
 
@@ -1326,19 +1443,35 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir=None
 
     if not merged_records:
         logger.warning('无任何记录可输出')
-        return None
+        return {}
+
+    if output_formats is None:
+        output_formats = DEFAULT_OUTPUT_FORMATS
 
     df = pd.DataFrame(merged_records, columns=columns)
-    output_path = get_summary_table_path(script_dir, output_dir)
-
-    base_dir = os.path.dirname(output_path)
+    base_dir = output_dir or get_output_dir()
     os.makedirs(base_dir, exist_ok=True)
 
-    df.to_excel(output_path, index=False, engine='openpyxl')
+    output_paths: Dict[str, Any] = {}
 
-    logger.info('总表输出完成: %s（历史 %d 条 + 新增 %d 条 = 共 %d 条）',
-                output_path, len(existing_records), len(incremental_rows), len(merged_records))
-    return output_path
+    if OUTPUT_FORMAT_XLSX in output_formats:
+        xlsx_path = get_summary_table_path(script_dir, output_dir)
+        df.to_excel(xlsx_path, index=False, engine='openpyxl')
+        output_paths[OUTPUT_FORMAT_XLSX] = xlsx_path
+        logger.info('Excel 总表输出完成: %s', xlsx_path)
+
+    if OUTPUT_FORMAT_CSV in output_formats:
+        csv_path = export_summary_to_csv(merged_records, output_dir, columns)
+        output_paths[OUTPUT_FORMAT_CSV] = csv_path
+
+    if OUTPUT_FORMAT_SPLIT_BY_BANK in output_formats:
+        split_paths = export_summary_by_bank(merged_records, output_dir, columns)
+        output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK] = split_paths
+
+    logger.info('总表多格式输出完成: 历史 %d 条 + 新增 %d 条 = 共 %d 条，格式: %s',
+                len(existing_records), len(incremental_rows), len(merged_records),
+                ', '.join(output_formats))
+    return output_paths
 
 
 def cli_ask_incremental_mode():
@@ -1366,13 +1499,80 @@ def gui_ask_incremental_mode():
     return choice
 
 
+def cli_ask_output_format():
+    """命令行模式下询问用户输出格式"""
+    print('\n请选择输出格式（可多选，用逗号分隔，直接回车默认仅导出Excel）：')
+    for i, (key, desc) in enumerate(OUTPUT_FORMATS.items(), 1):
+        default_mark = ' (默认)' if key == OUTPUT_FORMAT_XLSX else ''
+        print(f'  {i}) {desc}{default_mark}')
+    choice = input('请输入选项（例如: 1 或 1,2 或 1,2,3）: ').strip()
+
+    if not choice:
+        return DEFAULT_OUTPUT_FORMATS
+
+    selected = []
+    for c in choice.replace(',', ' ').split():
+        if c.isdigit():
+            idx = int(c) - 1
+            keys = list(OUTPUT_FORMATS.keys())
+            if 0 <= idx < len(keys):
+                selected.append(keys[idx])
+
+    if not selected:
+        return DEFAULT_OUTPUT_FORMATS
+    return selected
+
+
+def gui_ask_output_format():
+    """GUI 模式下询问用户输出格式"""
+    if not HAS_TKINTER or tk is None:
+        return cli_ask_output_format()
+
+    root = tk.Tk()
+    root.withdraw()
+
+    options = list(OUTPUT_FORMATS.items())
+    choices = []
+
+    top = tk.Toplevel(root)
+    top.title('选择输出格式')
+    top.geometry('400x300')
+
+    tk.Label(top, text='请选择输出格式（可多选）：', font=('Arial', 12)).pack(pady=10)
+
+    vars = []
+    for i, (key, desc) in enumerate(options):
+        var = tk.BooleanVar(value=(key == OUTPUT_FORMAT_XLSX))
+        vars.append(var)
+        tk.Checkbutton(top, text=desc, variable=var).pack(anchor='w', padx=30)
+
+    result = {'selected': []}
+
+    def on_ok():
+        selected = []
+        for i, var in enumerate(vars):
+            if var.get():
+                selected.append(options[i][0])
+        result['selected'] = selected if selected else DEFAULT_OUTPUT_FORMATS
+        top.destroy()
+
+    tk.Button(top, text='确定', command=on_ok, width=10).pack(pady=20)
+    top.grab_set()
+    top.wait_window()
+
+    root.destroy()
+    return result['selected'] or DEFAULT_OUTPUT_FORMATS
+
+
 if HAS_TKINTER:
     ask_incremental_mode = gui_ask_incremental_mode
+    ask_output_format = gui_ask_output_format
 else:
     ask_incremental_mode = cli_ask_incremental_mode
+    ask_output_format = cli_ask_output_format
 
 
-def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_strategy='keep_unprocessed'):
+def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_strategy='keep_unprocessed', output_formats=None):
     logger = get_logger()
 
     lookup_file = find_lookup_file(script_dir)
@@ -1385,6 +1585,9 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
     actual_incremental = False
     duplicate_count = 0
     new_record_count = 0
+
+    if output_formats is None:
+        output_formats = DEFAULT_OUTPUT_FORMATS
 
     if incremental:
         summary_path = get_summary_table_path(script_dir)
@@ -1455,30 +1658,57 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
     delete_processed_files(excel_files, processed_files, error_files, unprocessed_files, strategy=keep_strategy)
 
     output_path = None
+    output_paths: Dict[str, Any] = {}
     final_rows = []
 
     if all_rows:
         if actual_incremental:
             incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
             new_record_count = len(incremental_rows)
-            output_path = merge_and_export_summary(existing_records, incremental_rows, script_dir)
+            output_paths = merge_and_export_summary(
+                existing_records, incremental_rows, script_dir, output_formats=output_formats
+            )
             final_rows = existing_records + incremental_rows
         else:
             columns = [
                 '唯一id', '银行', '银行账号', '主体', '交易日期',
                 '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
             ]
-            df = pd.DataFrame(all_rows, columns=columns)
-            output_path = get_summary_table_path(script_dir)
-            df.to_excel(output_path, index=False, engine='openpyxl')
-            logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
+            merged_records = all_rows
+            df = pd.DataFrame(merged_records, columns=columns)
+            base_dir = script_dir or get_output_dir()
+            os.makedirs(base_dir, exist_ok=True)
+
+            if OUTPUT_FORMAT_XLSX in output_formats:
+                xlsx_path = get_summary_table_path(script_dir)
+                df.to_excel(xlsx_path, index=False, engine='openpyxl')
+                output_paths[OUTPUT_FORMAT_XLSX] = xlsx_path
+                logger.info('Excel 总表输出完成: %s', xlsx_path)
+
+            if OUTPUT_FORMAT_CSV in output_formats:
+                csv_path = export_summary_to_csv(merged_records, base_dir, columns)
+                output_paths[OUTPUT_FORMAT_CSV] = csv_path
+
+            if OUTPUT_FORMAT_SPLIT_BY_BANK in output_formats:
+                split_paths = export_summary_by_bank(merged_records, base_dir, columns)
+                output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK] = split_paths
+
+            logger.info('总表多格式输出完成: 共 %d 条记录，格式: %s',
+                        len(merged_records), ', '.join(output_formats))
             final_rows = all_rows
             new_record_count = len(all_rows)
     else:
         logger.warning('未提取到任何银行流水记录')
         if existing_records:
-            output_path = merge_and_export_summary(existing_records, [], script_dir)
+            output_paths = merge_and_export_summary(
+                existing_records, [], script_dir, output_formats=output_formats
+            )
             final_rows = existing_records
+
+    if output_paths.get(OUTPUT_FORMAT_XLSX):
+        output_path = output_paths[OUTPUT_FORMAT_XLSX]
+    elif output_paths.get(OUTPUT_FORMAT_CSV):
+        output_path = output_paths[OUTPUT_FORMAT_CSV]
 
     if final_rows:
         final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
@@ -1488,15 +1718,33 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
                         _cp_tag_summary.get('tagged_count', 0),
                         _cp_tag_summary.get('blacklist_hits', 0),
                         _cp_tag_summary.get('whitelist_hits', 0))
-            if output_path:
-                _cp_columns = [
-                    '唯一id', '银行', '银行账号', '主体', '交易日期',
-                    '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
-                    '黑白名单标签', '命中规则名称', '命中关键词',
-                ]
-                pd.DataFrame(final_rows, columns=_cp_columns).to_excel(
-                    output_path, index=False, engine='openpyxl')
-                logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
+            _cp_columns = [
+                '唯一id', '银行', '银行账号', '主体', '交易日期',
+                '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+                '黑白名单标签', '命中规则名称', '命中关键词',
+            ]
+            _cp_df = pd.DataFrame(final_rows, columns=_cp_columns)
+            if output_paths.get(OUTPUT_FORMAT_XLSX):
+                _cp_df.to_excel(output_paths[OUTPUT_FORMAT_XLSX], index=False, engine='openpyxl')
+                logger.info('已将黑白名单打标结果回写到Excel总表: %s', output_paths[OUTPUT_FORMAT_XLSX])
+            if output_paths.get(OUTPUT_FORMAT_CSV):
+                _cp_df.to_csv(output_paths[OUTPUT_FORMAT_CSV], index=False, encoding='utf-8-sig')
+                logger.info('已将黑白名单打标结果回写到CSV总表: %s', output_paths[OUTPUT_FORMAT_CSV])
+            if output_paths.get(OUTPUT_FORMAT_SPLIT_BY_BANK):
+                bank_groups: Dict[str, List[Dict[str, Any]]] = {}
+                for rec in final_rows:
+                    bank = str(rec.get('银行') or '').strip() or '未知银行'
+                    if bank not in bank_groups:
+                        bank_groups[bank] = []
+                    bank_groups[bank].append(rec)
+                for bank, bank_records in bank_groups.items():
+                    safe_bank_name = _sanitize_filename(bank)
+                    for sp in output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK]:
+                        if safe_bank_name in os.path.basename(sp):
+                            pd.DataFrame(bank_records, columns=_cp_columns).to_excel(
+                                sp, index=False, engine='openpyxl')
+                            logger.info('已将黑白名单打标结果回写到银行子表: %s', sp)
+                            break
 
     db_inserted = 0
     db_duplicates = 0
@@ -1614,6 +1862,7 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None, keep_
         unprocessed_files=unprocessed_files,
         error_files=error_files,
         output_path=output_path,
+        output_paths=output_paths,
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
         duplicate_check_path=duplicate_check_path,
@@ -1644,7 +1893,6 @@ def format_result_message(result):
                 f'├─ 重复记录（已跳过）：{result.duplicate_record_count}\n'
                 f'└─ 新增记录（已追加）：{result.new_record_count}\n'
                 f'总表当前总记录数：{len(result.all_rows)}\n'
-                f'总表路径：{result.output_path}'
             )
         else:
             msg = (
@@ -1652,8 +1900,20 @@ def format_result_message(result):
                 f'运行模式：全量覆盖\n'
                 f'已处理文件数：{len(result.processed_files)}\n'
                 f'提取记录数：{len(result.all_rows)}\n'
-                f'总表路径：{result.output_path}'
             )
+
+        output_files = []
+        if result.output_paths.get(OUTPUT_FORMAT_XLSX):
+            output_files.append(f'Excel 总表：{result.output_paths[OUTPUT_FORMAT_XLSX]}')
+        if result.output_paths.get(OUTPUT_FORMAT_CSV):
+            output_files.append(f'CSV 总表：{result.output_paths[OUTPUT_FORMAT_CSV]}')
+        if result.output_paths.get(OUTPUT_FORMAT_SPLIT_BY_BANK):
+            split_dir = os.path.dirname(result.output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK][0])
+            output_files.append(f'按银行拆分（{len(result.output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK])} 个文件）：{split_dir}')
+        elif result.output_path:
+            output_files.append(f'总表路径：{result.output_path}')
+
+        msg += '\n'.join(output_files)
 
         if HAS_DATABASE and (result.db_inserted_count > 0 or result.db_duplicate_count > 0):
             msg += (
@@ -1682,8 +1942,18 @@ def format_result_message(result):
                 f'本次未提取到任何新增银行流水记录。\n\n'
                 f'运行模式：增量合并\n'
                 f'历史记录保留：{result.existing_record_count} 条\n'
-                f'总表路径：{result.output_path}'
             )
+            output_files = []
+            if result.output_paths.get(OUTPUT_FORMAT_XLSX):
+                output_files.append(f'Excel 总表：{result.output_paths[OUTPUT_FORMAT_XLSX]}')
+            if result.output_paths.get(OUTPUT_FORMAT_CSV):
+                output_files.append(f'CSV 总表：{result.output_paths[OUTPUT_FORMAT_CSV]}')
+            if result.output_paths.get(OUTPUT_FORMAT_SPLIT_BY_BANK):
+                split_dir = os.path.dirname(result.output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK][0])
+                output_files.append(f'按银行拆分（{len(result.output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK])} 个文件）：{split_dir}')
+            elif result.output_path:
+                output_files.append(f'总表路径：{result.output_path}')
+            msg += '\n'.join(output_files)
         else:
             msg = '未提取到任何银行流水记录。'
 
@@ -2062,7 +2332,10 @@ def run_pipeline_flow(script_dir):
         return
     logger.info('用户选择保留策略: %s', KEEP_STRATEGIES.get(keep_strategy, keep_strategy))
 
-    result = run_pipeline(folder, script_dir, incremental=incremental, keep_strategy=keep_strategy)
+    output_formats = ask_output_format()
+    logger.info('用户选择输出格式: %s', ', '.join(output_formats))
+
+    result = run_pipeline(folder, script_dir, incremental=incremental, keep_strategy=keep_strategy, output_formats=output_formats)
 
     if result.lookup_missing:
         show_warning(
@@ -5637,11 +5910,13 @@ def run_scheduled_pipeline(job_config, script_dir=None):
     watch_directory = job_config['watch_directory']
     incremental = job_config.get('incremental', True)
     keep_strategy = job_config.get('keep_strategy', 'keep_unprocessed')
+    output_formats = job_config.get('output_formats', DEFAULT_OUTPUT_FORMATS)
 
     logger.info('========== 定时任务启动 [%s] %s ==========', job_id, job_name)
     logger.info('监控目录: %s', watch_directory)
     logger.info('运行模式: %s', '增量合并' if incremental else '全量覆盖')
     logger.info('保留策略: %s', KEEP_STRATEGIES.get(keep_strategy, keep_strategy))
+    logger.info('输出格式: %s', ', '.join(output_formats))
 
     run_id = f"SCH{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
     start_time = datetime.now()
@@ -5676,7 +5951,7 @@ def run_scheduled_pipeline(job_config, script_dir=None):
         with AuditLogger('scheduled_pipeline', script_dir, username='scheduler') as audit:
             audit.record_input(watch_directory)
 
-            result = run_pipeline(watch_directory, script_dir, incremental=incremental, keep_strategy=keep_strategy)
+            result = run_pipeline(watch_directory, script_dir, incremental=incremental, keep_strategy=keep_strategy, output_formats=output_formats)
             audit.record_result(result)
 
             db_path = get_processed_files_db_path(script_dir)
@@ -5699,6 +5974,7 @@ def run_scheduled_pipeline(job_config, script_dir=None):
             run_data['files_skipped'] = len(result.unprocessed_files)
             run_data['records_extracted'] = result.new_record_count
             run_data['output_path'] = result.output_path
+            run_data['output_paths'] = result.output_paths
             run_data['status'] = 'success' if not result.error_files else 'partial'
 
             if result.lookup_missing:
@@ -5710,6 +5986,12 @@ def run_scheduled_pipeline(job_config, script_dir=None):
 
             if result.output_path:
                 logger.info('输出总表: %s', result.output_path)
+            if result.output_paths.get(OUTPUT_FORMAT_CSV):
+                logger.info('输出CSV总表: %s', result.output_paths[OUTPUT_FORMAT_CSV])
+            if result.output_paths.get(OUTPUT_FORMAT_SPLIT_BY_BANK):
+                logger.info('输出银行子表 %d 个，目录: %s/按银行拆分/',
+                            len(result.output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK]),
+                            os.path.dirname(result.output_path) if result.output_path else get_output_dir())
 
     except Exception as e:
         logger.error('定时任务执行失败: %s', e, exc_info=True)
@@ -6487,8 +6769,24 @@ def parse_args_and_run():
                        help='指定总表文件直接生成重复交易检测报告')
     parser.add_argument('--duplicate-output', type=str, metavar='OUTPUT_DIR',
                        help='指定重复交易检测报告输出目录')
+    parser.add_argument('--output-format', type=str, action='append', metavar='FORMAT',
+                       help='指定输出格式，可多次指定。可选值: xlsx(默认), csv, split_by_bank。'
+                            '例如: --output-format xlsx --output-format csv')
 
     args = parser.parse_args()
+
+    output_formats = DEFAULT_OUTPUT_FORMATS
+    if args.output_format:
+        output_formats = []
+        for fmt in args.output_format:
+            fmt_lower = fmt.lower()
+            if fmt_lower in OUTPUT_FORMATS:
+                output_formats.append(fmt_lower)
+            else:
+                logger.warning('忽略无效的输出格式: %s，支持的格式: %s', fmt, ', '.join(OUTPUT_FORMATS.keys()))
+        if not output_formats:
+            output_formats = DEFAULT_OUTPUT_FORMATS
+            logger.warning('没有有效的输出格式，将使用默认格式: %s', ', '.join(output_formats))
 
     script_dir = get_script_dir()
     setup_logging()
@@ -6598,6 +6896,7 @@ def parse_args_and_run():
             'keep_strategy': args.keep_strategy or 'keep_unprocessed',
             'schedule_type': 'interval',
             'interval_minutes': args.interval or 60,
+            'output_formats': output_formats,
         }
 
         if args.once:
@@ -7835,11 +8134,15 @@ def apply_preset_to_pipeline(preset, folder, script_dir):
 
 def run_pipeline_with_options(folder, script_dir, incremental=True,
                               enabled_banks=None, keep_strategy='keep_unprocessed',
-                              start_date='', end_date='', batch_id=None, output_dir=None):
+                              start_date='', end_date='', batch_id=None, output_dir=None,
+                              output_formats=None):
     logger = get_logger()
 
     if enabled_banks is None:
         enabled_banks = BANK_PREFIXES
+
+    if output_formats is None:
+        output_formats = DEFAULT_OUTPUT_FORMATS
 
     lookup_file = find_lookup_file(script_dir)
     lookup_missing = lookup_file is None
@@ -7975,32 +8278,57 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     delete_processed_files(excel_files, processed_files, error_files, unprocessed_files, strategy=keep_strategy)
 
     output_path = None
+    output_paths: Dict[str, Any] = {}
     final_rows = []
 
     if all_rows:
         if actual_incremental:
             incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
             new_record_count = len(incremental_rows)
-            output_path = merge_and_export_summary(existing_records, incremental_rows, script_dir, output_dir)
+            output_paths = merge_and_export_summary(
+                existing_records, incremental_rows, script_dir, output_dir, output_formats=output_formats
+            )
             final_rows = existing_records + incremental_rows
         else:
             columns = [
                 '唯一id', '银行', '银行账号', '主体', '交易日期',
                 '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
             ]
-            df = pd.DataFrame(all_rows, columns=columns)
-            output_path = get_summary_table_path(script_dir, output_dir)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
-            df.to_excel(output_path, index=False, engine='openpyxl')
-            logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
+            merged_records = all_rows
+            df = pd.DataFrame(merged_records, columns=columns)
+            base_dir = output_dir or script_dir or get_output_dir()
+            os.makedirs(base_dir, exist_ok=True)
+
+            if OUTPUT_FORMAT_XLSX in output_formats:
+                xlsx_path = get_summary_table_path(script_dir, output_dir)
+                df.to_excel(xlsx_path, index=False, engine='openpyxl')
+                output_paths[OUTPUT_FORMAT_XLSX] = xlsx_path
+                logger.info('Excel 总表输出完成: %s', xlsx_path)
+
+            if OUTPUT_FORMAT_CSV in output_formats:
+                csv_path = export_summary_to_csv(merged_records, base_dir, columns)
+                output_paths[OUTPUT_FORMAT_CSV] = csv_path
+
+            if OUTPUT_FORMAT_SPLIT_BY_BANK in output_formats:
+                split_paths = export_summary_by_bank(merged_records, base_dir, columns)
+                output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK] = split_paths
+
+            logger.info('总表多格式输出完成: 共 %d 条记录，格式: %s',
+                        len(merged_records), ', '.join(output_formats))
             final_rows = all_rows
             new_record_count = len(all_rows)
     else:
         logger.warning('未提取到任何银行流水记录')
         if existing_records:
-            output_path = merge_and_export_summary(existing_records, [], script_dir, output_dir)
+            output_paths = merge_and_export_summary(
+                existing_records, [], script_dir, output_dir, output_formats=output_formats
+            )
             final_rows = existing_records
+
+    if output_paths.get(OUTPUT_FORMAT_XLSX):
+        output_path = output_paths[OUTPUT_FORMAT_XLSX]
+    elif output_paths.get(OUTPUT_FORMAT_CSV):
+        output_path = output_paths[OUTPUT_FORMAT_CSV]
 
     if final_rows:
         final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
@@ -8010,15 +8338,33 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                         _cp_tag_summary.get('tagged_count', 0),
                         _cp_tag_summary.get('blacklist_hits', 0),
                         _cp_tag_summary.get('whitelist_hits', 0))
-            if output_path:
-                _cp_columns = [
-                    '唯一id', '银行', '银行账号', '主体', '交易日期',
-                    '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
-                    '黑白名单标签', '命中规则名称', '命中关键词',
-                ]
-                pd.DataFrame(final_rows, columns=_cp_columns).to_excel(
-                    output_path, index=False, engine='openpyxl')
-                logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
+            _cp_columns = [
+                '唯一id', '银行', '银行账号', '主体', '交易日期',
+                '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+                '黑白名单标签', '命中规则名称', '命中关键词',
+            ]
+            _cp_df = pd.DataFrame(final_rows, columns=_cp_columns)
+            if output_paths.get(OUTPUT_FORMAT_XLSX):
+                _cp_df.to_excel(output_paths[OUTPUT_FORMAT_XLSX], index=False, engine='openpyxl')
+                logger.info('已将黑白名单打标结果回写到Excel总表: %s', output_paths[OUTPUT_FORMAT_XLSX])
+            if output_paths.get(OUTPUT_FORMAT_CSV):
+                _cp_df.to_csv(output_paths[OUTPUT_FORMAT_CSV], index=False, encoding='utf-8-sig')
+                logger.info('已将黑白名单打标结果回写到CSV总表: %s', output_paths[OUTPUT_FORMAT_CSV])
+            if output_paths.get(OUTPUT_FORMAT_SPLIT_BY_BANK):
+                bank_groups: Dict[str, List[Dict[str, Any]]] = {}
+                for rec in final_rows:
+                    bank = str(rec.get('银行') or '').strip() or '未知银行'
+                    if bank not in bank_groups:
+                        bank_groups[bank] = []
+                    bank_groups[bank].append(rec)
+                for bank, bank_records in bank_groups.items():
+                    safe_bank_name = _sanitize_filename(bank)
+                    for sp in output_paths[OUTPUT_FORMAT_SPLIT_BY_BANK]:
+                        if safe_bank_name in os.path.basename(sp):
+                            pd.DataFrame(bank_records, columns=_cp_columns).to_excel(
+                                sp, index=False, engine='openpyxl')
+                            logger.info('已将黑白名单打标结果回写到银行子表: %s', sp)
+                            break
 
     db_inserted = 0
     db_duplicates = 0
@@ -8144,6 +8490,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
         output_path=output_path,
+        output_paths=output_paths,
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
         duplicate_check_path=duplicate_check_path,
