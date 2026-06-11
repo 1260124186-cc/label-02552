@@ -74,12 +74,94 @@ except (ImportError, ModuleNotFoundError):
     tk = None
 
 
-def cli_askdirectory(title='请选择文件夹'):
-    """命令行模式下让用户输入文件夹路径"""
+def _normalize_path(path):
+    """规范化路径：展开用户目录、去除引号、转为绝对路径、规范化斜杠"""
+    if not path:
+        return ''
+    path = path.strip().strip('"').strip("'")
+    path = os.path.expanduser(path)
+    path = os.path.abspath(path)
+    path = os.path.normpath(path)
+    return path
+
+
+_cli_default_dir = None
+_cli_default_file = None
+
+
+def set_cli_default_dir(path):
+    """设置全局默认文件夹路径，供 cli_askdirectory 使用"""
+    global _cli_default_dir
+    _cli_default_dir = _normalize_path(path) if path else None
+
+
+def get_cli_default_dir():
+    """获取全局默认文件夹路径"""
+    return _cli_default_dir
+
+
+def set_cli_default_file(path):
+    """设置全局默认文件路径，供 cli_askfile 使用"""
+    global _cli_default_file
+    _cli_default_file = _normalize_path(path) if path else None
+
+
+def get_cli_default_file():
+    """获取全局默认文件路径"""
+    return _cli_default_file
+
+
+def cli_askdirectory(title='请选择文件夹', default_path=None, max_retries=3):
+    """
+    命令行模式下让用户输入文件夹路径。
+
+    Args:
+        title: 提示标题
+        default_path: 默认路径，若提供且有效则直接返回，无需用户输入；
+                      若为 None 则尝试使用全局默认路径（set_cli_default_dir 设置）
+        max_retries: 最大重试次数
+
+    Returns:
+        有效的文件夹绝对路径，或空字符串（用户取消/重试次数耗尽）
+    """
+    if default_path is None:
+        default_path = _cli_default_dir
+
+    if default_path:
+        normalized = _normalize_path(default_path)
+        if os.path.isdir(normalized):
+            return normalized
+        else:
+            print(f'\n[提示] 默认路径无效: {default_path}')
+
     print(f'\n{title}')
-    path = input('请输入文件夹路径: ').strip().strip('"').strip("'")
-    if path and os.path.isdir(path):
-        return path
+    print('（输入 q 取消，支持 ~ 和相对路径）')
+
+    for attempt in range(max_retries):
+        prompt = '请输入文件夹路径: ' if attempt == 0 else f'请重新输入文件夹路径（还可重试 {max_retries - attempt} 次）: '
+        raw = input(prompt).strip()
+
+        if raw.lower() == 'q':
+            print('已取消选择。')
+            return ''
+
+        if not raw:
+            print('❌ 路径不能为空，请重新输入。')
+            continue
+
+        normalized = _normalize_path(raw)
+
+        if not os.path.exists(normalized):
+            print(f'❌ 路径不存在: {normalized}')
+            continue
+
+        if not os.path.isdir(normalized):
+            print(f'❌ 路径不是文件夹: {normalized}')
+            continue
+
+        return normalized
+
+    print(f'❌ 已超过最大重试次数（{max_retries} 次）。')
     return ''
 
 
@@ -93,12 +175,57 @@ def cli_showwarning(title, message):
     print(f'\n[警告 - {title}] {message}')
 
 
-def cli_askfile(title='请选择文件'):
-    """命令行模式下让用户输入文件路径"""
+def cli_askfile(title='请选择文件', default_path=None, max_retries=3):
+    """
+    命令行模式下让用户输入文件路径。
+
+    Args:
+        title: 提示标题
+        default_path: 默认路径，若提供且有效则直接返回，无需用户输入；
+                      若为 None 则尝试使用全局默认路径（set_cli_default_file 设置）
+        max_retries: 最大重试次数
+
+    Returns:
+        有效的文件绝对路径，或空字符串（用户取消/重试次数耗尽）
+    """
+    if default_path is None:
+        default_path = _cli_default_file
+
+    if default_path:
+        normalized = _normalize_path(default_path)
+        if os.path.isfile(normalized):
+            return normalized
+        else:
+            print(f'\n[提示] 默认路径无效: {default_path}')
+
     print(f'\n{title}')
-    path = input('请输入文件路径: ').strip().strip('"').strip("'")
-    if path and os.path.isfile(path):
-        return path
+    print('（输入 q 取消，支持 ~ 和相对路径）')
+
+    for attempt in range(max_retries):
+        prompt = '请输入文件路径: ' if attempt == 0 else f'请重新输入文件路径（还可重试 {max_retries - attempt} 次）: '
+        raw = input(prompt).strip()
+
+        if raw.lower() == 'q':
+            print('已取消选择。')
+            return ''
+
+        if not raw:
+            print('❌ 路径不能为空，请重新输入。')
+            continue
+
+        normalized = _normalize_path(raw)
+
+        if not os.path.exists(normalized):
+            print(f'❌ 路径不存在: {normalized}')
+            continue
+
+        if not os.path.isfile(normalized):
+            print(f'❌ 路径不是文件: {normalized}')
+            continue
+
+        return normalized
+
+    print(f'❌ 已超过最大重试次数（{max_retries} 次）。')
     return ''
 
 
@@ -6772,8 +6899,28 @@ def parse_args_and_run():
     parser.add_argument('--output-format', type=str, action='append', metavar='FORMAT',
                        help='指定输出格式，可多次指定。可选值: xlsx(默认), csv, split_by_bank。'
                             '例如: --output-format xlsx --output-format csv')
+    parser.add_argument('--input-dir', type=str, metavar='DIR',
+                       help='默认输入文件夹路径，用于交互式菜单的默认值，支持脚本化批处理')
+    parser.add_argument('--input-file', type=str, metavar='FILE',
+                       help='默认输入文件路径，用于交互式菜单的默认值，支持脚本化批处理')
 
     args = parser.parse_args()
+
+    if args.input_dir:
+        set_cli_default_dir(args.input_dir)
+    elif args.watch_dir:
+        set_cli_default_dir(args.watch_dir)
+
+    if args.input_file:
+        set_cli_default_file(args.input_file)
+    elif args.export_total:
+        set_cli_default_file(args.export_total)
+    elif args.summary_total:
+        set_cli_default_file(args.summary_total)
+    elif args.balance_total:
+        set_cli_default_file(args.balance_total)
+    elif args.duplicate_total:
+        set_cli_default_file(args.duplicate_total)
 
     output_formats = DEFAULT_OUTPUT_FORMATS
     if args.output_format:

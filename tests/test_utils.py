@@ -405,3 +405,131 @@ class TestCLIFunctions:
         monkeypatch.setattr('builtins.input', lambda _: '')
         result = bankcheck.cli_askdirectory()
         assert result == ''
+
+    def test_cli_askdirectory_returns_absolute_path(self, tmp_dir, monkeypatch):
+        rel_path = os.path.relpath(tmp_dir, os.getcwd())
+        monkeypatch.setattr('builtins.input', lambda _: rel_path)
+        result = bankcheck.cli_askdirectory()
+        assert os.path.isabs(result)
+        assert os.path.isdir(result)
+
+    def test_cli_askdirectory_with_quotes(self, tmp_dir, monkeypatch):
+        quoted = f'"{tmp_dir}"'
+        monkeypatch.setattr('builtins.input', lambda _: quoted)
+        result = bankcheck.cli_askdirectory()
+        assert result == os.path.abspath(tmp_dir)
+
+    def test_cli_askdirectory_default_path_valid(self, tmp_dir):
+        result = bankcheck.cli_askdirectory(default_path=tmp_dir)
+        assert result == os.path.abspath(tmp_dir)
+
+    def test_cli_askdirectory_default_path_invalid_then_input(self, tmp_dir, monkeypatch):
+        inputs = [tmp_dir]
+        monkeypatch.setattr('builtins.input', lambda _: inputs.pop(0))
+        result = bankcheck.cli_askdirectory(default_path='/nonexistent/path')
+        assert result == os.path.abspath(tmp_dir)
+
+    def test_cli_askdirectory_quit_with_q(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: 'q')
+        result = bankcheck.cli_askdirectory()
+        assert result == ''
+
+    def test_cli_askdirectory_max_retries(self, monkeypatch):
+        call_count = [0]
+        def mock_input(_):
+            call_count[0] += 1
+            return '/nonexistent/path'
+        monkeypatch.setattr('builtins.input', mock_input)
+        result = bankcheck.cli_askdirectory(max_retries=2)
+        assert result == ''
+        assert call_count[0] == 2
+
+    def test_cli_askfile_valid(self, tmp_dir, monkeypatch):
+        test_file = os.path.join(tmp_dir, 'test.txt')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        monkeypatch.setattr('builtins.input', lambda _: test_file)
+        result = bankcheck.cli_askfile()
+        assert result == os.path.abspath(test_file)
+
+    def test_cli_askfile_invalid(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: '/nonexistent/file.txt')
+        result = bankcheck.cli_askfile()
+        assert result == ''
+
+    def test_cli_askfile_default_path_valid(self, tmp_dir):
+        test_file = os.path.join(tmp_dir, 'test.txt')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        result = bankcheck.cli_askfile(default_path=test_file)
+        assert result == os.path.abspath(test_file)
+
+    def test_cli_askfile_quit_with_q(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: 'q')
+        result = bankcheck.cli_askfile()
+        assert result == ''
+
+
+class TestNormalizePath:
+    def test_empty_path(self):
+        assert bankcheck._normalize_path('') == ''
+        assert bankcheck._normalize_path(None) == ''
+
+    def test_strip_quotes(self):
+        assert bankcheck._normalize_path('"/some/path"') == '/some/path'
+        assert bankcheck._normalize_path("'/some/path'") == '/some/path'
+
+    def test_expand_user(self, monkeypatch):
+        monkeypatch.setenv('HOME', '/home/testuser')
+        result = bankcheck._normalize_path('~/docs')
+        assert result == os.path.abspath('/home/testuser/docs')
+
+    def test_relative_to_absolute(self):
+        result = bankcheck._normalize_path('relative/path')
+        assert os.path.isabs(result)
+
+    def test_normpath(self):
+        result = bankcheck._normalize_path('/a/b/../c')
+        assert result == '/a/c'
+
+
+class TestCliDefaults:
+    def test_set_and_get_default_dir(self, tmp_dir):
+        bankcheck.set_cli_default_dir(tmp_dir)
+        assert bankcheck.get_cli_default_dir() == os.path.abspath(tmp_dir)
+        bankcheck.set_cli_default_dir(None)
+        assert bankcheck.get_cli_default_dir() is None
+
+    def test_set_and_get_default_file(self, tmp_dir):
+        test_file = os.path.join(tmp_dir, 'test.txt')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        bankcheck.set_cli_default_file(test_file)
+        assert bankcheck.get_cli_default_file() == os.path.abspath(test_file)
+        bankcheck.set_cli_default_file(None)
+        assert bankcheck.get_cli_default_file() is None
+
+    def test_cli_askdirectory_uses_global_default(self, tmp_dir):
+        bankcheck.set_cli_default_dir(tmp_dir)
+        result = bankcheck.cli_askdirectory()
+        assert result == os.path.abspath(tmp_dir)
+        bankcheck.set_cli_default_dir(None)
+
+    def test_cli_askfile_uses_global_default(self, tmp_dir):
+        test_file = os.path.join(tmp_dir, 'test.txt')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        bankcheck.set_cli_default_file(test_file)
+        result = bankcheck.cli_askfile()
+        assert result == os.path.abspath(test_file)
+        bankcheck.set_cli_default_file(None)
+
+    def test_explicit_default_overrides_global(self, tmp_dir):
+        dir1 = os.path.join(tmp_dir, 'dir1')
+        dir2 = os.path.join(tmp_dir, 'dir2')
+        os.makedirs(dir1)
+        os.makedirs(dir2)
+        bankcheck.set_cli_default_dir(dir1)
+        result = bankcheck.cli_askdirectory(default_path=dir2)
+        assert result == os.path.abspath(dir2)
+        bankcheck.set_cli_default_dir(None)
