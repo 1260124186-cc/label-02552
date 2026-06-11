@@ -592,6 +592,7 @@ class BankRule:
     columns: Dict[str, int]
     payment_sign: str = 'negative'
     enabled: bool = True
+    skip_sheets: List[str] = field(default_factory=list)
 
 
 class BankRuleConfig:
@@ -646,6 +647,7 @@ class BankRuleConfig:
                     columns=bank_config['columns'],
                     payment_sign=bank_config.get('payment_sign', 'negative'),
                     enabled=bank_config.get('enabled', True),
+                    skip_sheets=bank_config.get('skip_sheets', []),
                 )
                 self._rules[rule.bank_name] = rule
 
@@ -678,79 +680,106 @@ class GenericBankParser:
         self.rule = rule
         self.logger = get_logger()
 
+    def _parse_sheet(self, ws, filepath: str, sheet_name: str,
+                     lookup_source) -> List[Dict[str, Any]]:
+        bank_account = ws[self.rule.account_cell].value
+        if bank_account is None:
+            self.logger.warning(
+                '文件「%s」工作表「%s」%s 单元格为空，银行账号缺失',
+                filepath, sheet_name, self.rule.account_cell)
+
+        subject_info = get_subject_info(bank_account, lookup_source)
+        subject = subject_info.get('subject', '')
+        extra_fields = subject_info.get('extra_fields', {})
+
+        rows = []
+        columns = self.rule.columns
+        start_row = self.rule.start_row
+
+        for row_idx in range(start_row, ws.max_row + 1):
+            trade_date = ws.cell(row=row_idx, column=columns['trade_date']).value
+            if trade_date is None:
+                continue
+
+            payment_val = ws.cell(row=row_idx, column=columns['payment']).value
+            if is_numeric(payment_val):
+                payment = to_float(payment_val)
+                if self.rule.payment_sign == 'negative':
+                    payment = -abs(payment)
+            else:
+                payment = None
+
+            receipt_val = ws.cell(row=row_idx, column=columns['receipt']).value
+            receipt = to_float(receipt_val) if is_numeric(receipt_val) else None
+
+            summary = ws.cell(row=row_idx, column=columns['summary']).value
+            counterpart = ws.cell(row=row_idx, column=columns['counterpart']).value
+            balance = ws.cell(row=row_idx, column=columns['balance']).value
+            transaction_id = ws.cell(row=row_idx, column=columns['transaction_id']).value
+
+            record = {
+                '唯一id': generate_unique_id(),
+                '银行': self.rule.bank_name,
+                '银行账号': bank_account,
+                '主体': subject,
+                '交易日期': trade_date,
+                '付款': payment,
+                '收款': receipt,
+                '摘要': summary,
+                '对方户名': counterpart,
+                '余额': balance,
+                '交易流水号': transaction_id,
+            }
+            for key, val in extra_fields.items():
+                record[key] = val
+
+            rows.append(record)
+
+        if rows:
+            self.logger.info(
+                '%s文件工作表「%s」提取 %d 条记录',
+                self.rule.bank_name, sheet_name, len(rows))
+        else:
+            self.logger.info(
+                '%s文件工作表「%s」未提取到记录，跳过',
+                self.rule.bank_name, sheet_name)
+
+        return rows
+
     def parse(self, filepath: str, lookup_source) -> List[Dict[str, Any]]:
         """
-        根据配置规则解析银行流水 Excel 文件
+        根据配置规则解析银行流水 Excel 文件，支持多工作表遍历。
+
+        当流水数据分布在多个 Sheet 时，按同一银行规则分别提取并合并到总表。
 
         Args:
             filepath: Excel 文件路径
             lookup_source: 查找表文件路径(str) 或 load_lookup_table() 返回的预加载 dict
 
         Returns:
-            解析后的记录列表
+            解析后的记录列表（所有工作表合并结果）
         """
         self.logger.info('开始处理%s文件: %s', self.rule.bank_name, filepath)
 
         wb, tmp_path = open_workbook_compat(filepath)
         try:
-            ws = wb.active
+            all_rows = []
+            skip_sheets = self.rule.skip_sheets or []
 
-            bank_account = ws[self.rule.account_cell].value
-            if bank_account is None:
-                self.logger.warning('文件「%s」%s 单元格为空，银行账号缺失',
-                                    filepath, self.rule.account_cell)
-
-            subject_info = get_subject_info(bank_account, lookup_source)
-            subject = subject_info.get('subject', '')
-            extra_fields = subject_info.get('extra_fields', {})
-
-            rows = []
-            columns = self.rule.columns
-            start_row = self.rule.start_row
-
-            for row_idx in range(start_row, ws.max_row + 1):
-                trade_date = ws.cell(row=row_idx, column=columns['trade_date']).value
-                if trade_date is None:
+            for ws in wb.worksheets:
+                if ws.title in skip_sheets:
+                    self.logger.info(
+                        '%s文件工作表「%s」在 skip_sheets 中，跳过',
+                        self.rule.bank_name, ws.title)
                     continue
 
-                payment_val = ws.cell(row=row_idx, column=columns['payment']).value
-                if is_numeric(payment_val):
-                    payment = to_float(payment_val)
-                    if self.rule.payment_sign == 'negative':
-                        payment = -abs(payment)
-                else:
-                    payment = None
-
-                receipt_val = ws.cell(row=row_idx, column=columns['receipt']).value
-                receipt = to_float(receipt_val) if is_numeric(receipt_val) else None
-
-                summary = ws.cell(row=row_idx, column=columns['summary']).value
-                counterpart = ws.cell(row=row_idx, column=columns['counterpart']).value
-                balance = ws.cell(row=row_idx, column=columns['balance']).value
-                transaction_id = ws.cell(row=row_idx, column=columns['transaction_id']).value
-
-                record = {
-                    '唯一id': generate_unique_id(),
-                    '银行': self.rule.bank_name,
-                    '银行账号': bank_account,
-                    '主体': subject,
-                    '交易日期': trade_date,
-                    '付款': payment,
-                    '收款': receipt,
-                    '摘要': summary,
-                    '对方户名': counterpart,
-                    '余额': balance,
-                    '交易流水号': transaction_id,
-                }
-                for key, val in extra_fields.items():
-                    record[key] = val
-
-                rows.append(record)
+                sheet_rows = self._parse_sheet(ws, filepath, ws.title, lookup_source)
+                all_rows.extend(sheet_rows)
 
             wb.close()
-            self.logger.info('%s文件处理完成，提取 %d 条记录',
-                             self.rule.bank_name, len(rows))
-            return rows
+            self.logger.info('%s文件处理完成，共提取 %d 条记录',
+                             self.rule.bank_name, len(all_rows))
+            return all_rows
         finally:
             cleanup_temp_file(tmp_path)
 

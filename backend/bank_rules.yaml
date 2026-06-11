@@ -9,6 +9,7 @@
 #     支持字段：trade_date, payment, receipt, summary, counterpart, balance, transaction_id
 #   payment_sign: 付款金额符号处理（"negative" 表示取负数，"positive" 表示保持正数）
 #   enabled: 是否启用该银行规则
+#   skip_sheets: 需要跳过的工作表名称列表（可选），这些工作表不会被解析
 
 banks:
   - bank_name: "北京银行"
