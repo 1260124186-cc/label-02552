@@ -2017,6 +2017,48 @@ def _sanitize_filename(name):
     return re.sub(r'[\\/:*?"<>|]', '_', name).strip() or '未知'
 
 
+def backup_existing_file(file_path):
+    """
+    如果目标文件已存在，按时间戳重命名进行备份。
+
+    备份命名规则：原文件名_YYYYMMDD_HHMMSS.原扩展名
+    例如：银行流水总表.xlsx -> 银行流水总表_20260611_143052.xlsx
+
+    Args:
+        file_path: 待检查的目标文件路径
+
+    Returns:
+        str or None: 如果执行了备份，返回备份文件路径；否则返回 None
+    """
+    logger = get_logger()
+
+    if not file_path or not os.path.exists(file_path):
+        return None
+
+    try:
+        dir_name = os.path.dirname(file_path)
+        base_name = os.path.basename(file_path)
+        name_part, ext_part = os.path.splitext(base_name)
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_name = f'{name_part}_{timestamp}{ext_part}'
+        backup_path = os.path.join(dir_name, backup_name)
+
+        counter = 1
+        while os.path.exists(backup_path):
+            backup_name = f'{name_part}_{timestamp}_{counter}{ext_part}'
+            backup_path = os.path.join(dir_name, backup_name)
+            counter += 1
+
+        shutil.copy2(file_path, backup_path)
+        logger.info('已备份历史文件: %s -> %s', file_path, backup_path)
+        return backup_path
+
+    except Exception as e:
+        logger.warning('备份历史文件失败，将继续覆盖写入: %s, 错误: %s', file_path, e)
+        return None
+
+
 def export_summary_to_csv(records, output_dir=None, columns=None):
     """
     导出总表为 CSV 格式。
@@ -2046,6 +2088,8 @@ def export_summary_to_csv(records, output_dir=None, columns=None):
 
     base_dir = os.path.dirname(output_path)
     os.makedirs(base_dir, exist_ok=True)
+
+    backup_existing_file(output_path)
 
     df.to_csv(output_path, index=False, encoding='utf-8-sig')
 
@@ -2148,6 +2192,7 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir=None
 
     if OUTPUT_FORMAT_XLSX in output_formats:
         xlsx_path = get_summary_table_path(script_dir, output_dir)
+        backup_existing_file(xlsx_path)
         df.to_excel(xlsx_path, index=False, engine='openpyxl')
         output_paths[OUTPUT_FORMAT_XLSX] = xlsx_path
         logger.info('Excel 总表输出完成: %s', xlsx_path)
@@ -2435,6 +2480,7 @@ def run_pipeline(folder, script_dir=None, incremental=True, batch_id=None,
             _report(5, 68, message='正在导出 Excel 总表...')
             if OUTPUT_FORMAT_XLSX in output_formats:
                 xlsx_path = get_summary_table_path(script_dir)
+                backup_existing_file(xlsx_path)
                 df.to_excel(xlsx_path, index=False, engine='openpyxl')
                 output_paths[OUTPUT_FORMAT_XLSX] = xlsx_path
                 logger.info('Excel 总表输出完成: %s', xlsx_path)
