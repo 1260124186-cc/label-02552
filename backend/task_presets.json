@@ -168,6 +168,18 @@
       "preset_id": "PRESET20260611172702BEB245",
       "created_at": "2026-06-11 17:27:02",
       "updated_at": "2026-06-11 17:27:02"
+    },
+    {
+      "name": "测试输出目录",
+      "output_dir": "/custom/output/path",
+      "enabled_banks": [
+        "北京银行"
+      ],
+      "keep_strategy": "keep_unprocessed",
+      "incremental": true,
+      "preset_id": "PRESET202606111836569D2EB7",
+      "created_at": "2026-06-11 18:36:56",
+      "updated_at": "2026-06-11 18:36:56"
     }
   ],
   "settings": {

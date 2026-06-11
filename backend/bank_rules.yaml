@@ -10,6 +10,12 @@
 #   payment_sign: 付款金额符号处理（"negative" 表示取负数，"positive" 表示保持正数）
 #   enabled: 是否启用该银行规则
 #   skip_sheets: 需要跳过的工作表名称列表（可选），这些工作表不会被解析
+#   expected_headers: 关键列对应的预期表头文本（可选），用于校验银行模板是否变更
+#     每个字段可配置一个字符串或字符串列表（表示可接受的多个表头名称）
+#   header_validation: 表头校验模式（可选）
+#     "strict" - 表头不匹配时抛出异常，中断处理
+#     "warn"   - 表头不匹配时记录警告，继续处理（默认）
+#     "off"    - 跳过表头校验
 
 banks:
   - bank_name: "北京银行"
@@ -17,6 +23,7 @@ banks:
     start_row: 4
     payment_sign: "negative"
     enabled: true
+    header_validation: "warn"
     columns:
       trade_date: 2       # B 列 - 交易日期
       payment: 4          # D 列 - 付款
@@ -25,12 +32,21 @@ banks:
       counterpart: 7      # G 列 - 对方户名
       balance: 6          # F 列 - 余额
       transaction_id: 16  # P 列 - 交易流水号
+    expected_headers:
+      trade_date: "交易日期"
+      payment: "支出金额"
+      receipt: "收入金额"
+      summary: "摘要"
+      counterpart: "对方户名"
+      balance: "余额"
+      transaction_id: "交易流水号"
 
   - bank_name: "东亚银行"
     account_cell: "B1"
     start_row: 5
     payment_sign: "negative"
     enabled: true
+    header_validation: "warn"
     columns:
       trade_date: 1       # A 列 - 交易日期
       payment: 4          # D 列 - 付款
@@ -39,3 +55,15 @@ banks:
       counterpart: 12     # L 列 - 对方户名（同摘要）
       balance: 9          # I 列 - 余额
       transaction_id: 11  # K 列 - 交易流水号
+    expected_headers:
+      trade_date: "交易日期"
+      payment: "支出金额"
+      receipt: "收入金额"
+      summary:
+        - "摘要"
+        - "交易描述/对方"
+      counterpart:
+        - "对方户名"
+        - "交易描述/对方"
+      balance: "余额"
+      transaction_id: "交易流水号"

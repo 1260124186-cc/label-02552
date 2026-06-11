@@ -583,9 +583,12 @@ def scan_excel_files(folder):
 BANK_RULES_CONFIG_FILE = 'bank_rules.yaml'
 
 
+class HeaderValidationError(Exception):
+    pass
+
+
 @dataclass
 class BankRule:
-    """单个银行的解析规则"""
     bank_name: str
     account_cell: str
     start_row: int
@@ -593,6 +596,8 @@ class BankRule:
     payment_sign: str = 'negative'
     enabled: bool = True
     skip_sheets: List[str] = field(default_factory=list)
+    expected_headers: Dict[str, List[str]] = field(default_factory=dict)
+    header_validation: str = 'warn'
 
 
 class BankRuleConfig:
@@ -640,6 +645,13 @@ class BankRuleConfig:
             for bank_config in banks_config:
                 if not bank_config.get('enabled', True):
                     continue
+                raw_headers = bank_config.get('expected_headers', {})
+                normalized_headers = {}
+                for col_key, header_names in raw_headers.items():
+                    if isinstance(header_names, str):
+                        normalized_headers[col_key] = [header_names]
+                    elif isinstance(header_names, list):
+                        normalized_headers[col_key] = header_names
                 rule = BankRule(
                     bank_name=bank_config['bank_name'],
                     account_cell=bank_config['account_cell'],
@@ -648,6 +660,8 @@ class BankRuleConfig:
                     payment_sign=bank_config.get('payment_sign', 'negative'),
                     enabled=bank_config.get('enabled', True),
                     skip_sheets=bank_config.get('skip_sheets', []),
+                    expected_headers=normalized_headers,
+                    header_validation=bank_config.get('header_validation', 'warn'),
                 )
                 self._rules[rule.bank_name] = rule
 
@@ -680,8 +694,77 @@ class GenericBankParser:
         self.rule = rule
         self.logger = get_logger()
 
+    def validate_headers(self, ws, filepath: str, sheet_name: str) -> List[str]:
+        """
+        校验工作表表头与预期是否一致，返回不匹配的字段列表。
+
+        表头行取 start_row - 1，逐列检查 columns 中每个字段对应的单元格文本
+        是否在 expected_headers 指定的候选名称中。
+
+        Args:
+            ws: openpyxl Worksheet 对象
+            filepath: 文件路径（用于日志）
+            sheet_name: 工作表名称（用于日志）
+
+        Returns:
+            不匹配的字段名列表（空列表表示全部匹配或未配置 expected_headers）
+        """
+        expected = self.rule.expected_headers
+        if not expected or self.rule.header_validation == 'off':
+            return []
+
+        header_row = self.rule.start_row - 1
+        if header_row < 1:
+            header_row = 1
+
+        mismatches = []
+        for col_key, acceptable_names in expected.items():
+            col_idx = self.rule.columns.get(col_key)
+            if col_idx is None:
+                continue
+
+            actual_value = ws.cell(row=header_row, column=col_idx).value
+            actual_text = str(actual_value).strip() if actual_value is not None else ''
+
+            if not actual_text:
+                mismatches.append(col_key)
+                self.logger.warning(
+                    '%s文件工作表「%s」表头校验：字段「%s」第 %d 列第 %d 行单元格为空'
+                    '，预期为「%s」',
+                    self.rule.bank_name, sheet_name, col_key,
+                    col_idx, header_row, '」或「'.join(acceptable_names))
+                continue
+
+            if actual_text not in acceptable_names:
+                mismatches.append(col_key)
+                self.logger.warning(
+                    '%s文件工作表「%s」表头校验：字段「%s」第 %d 列实际表头为「%s」'
+                    '，预期为「%s」',
+                    self.rule.bank_name, sheet_name, col_key,
+                    col_idx, actual_text, '」或「'.join(acceptable_names))
+
+        if not mismatches:
+            self.logger.info(
+                '%s文件工作表「%s」表头校验通过，%d 个字段均匹配',
+                self.rule.bank_name, sheet_name, len(expected))
+        else:
+            self.logger.warning(
+                '%s文件工作表「%s」表头校验未通过：%d/%d 个字段不匹配（%s）',
+                self.rule.bank_name, sheet_name,
+                len(mismatches), len(expected), ', '.join(mismatches))
+
+        return mismatches
+
     def _parse_sheet(self, ws, filepath: str, sheet_name: str,
                      lookup_source) -> List[Dict[str, Any]]:
+        mismatches = self.validate_headers(ws, filepath, sheet_name)
+
+        if mismatches and self.rule.header_validation == 'strict':
+            detail = ', '.join(mismatches)
+            raise HeaderValidationError(
+                f'{self.rule.bank_name}文件工作表「{sheet_name}」'
+                f'表头校验失败，不匹配字段: {detail}')
+
         bank_account = ws[self.rule.account_cell].value
         if bank_account is None:
             self.logger.warning(
