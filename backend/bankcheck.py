@@ -601,7 +601,7 @@ class GenericBankParser:
         self.rule = rule
         self.logger = get_logger()
 
-    def parse(self, filepath: str, lookup_file: str) -> List[Dict[str, Any]]:
+    def parse(self, filepath: str, lookup_file: str) -> Tuple[List[Dict[str, Any]], FileProcessDetail]:
         """
         根据配置规则解析银行流水 Excel 文件
 
@@ -610,9 +610,16 @@ class GenericBankParser:
             lookup_file: 主体查找表路径
 
         Returns:
-            解析后的记录列表
+            tuple: (解析后的记录列表, 文件处理详情)
         """
         self.logger.info('开始处理%s文件: %s', self.rule.bank_name, filepath)
+
+        detail = FileProcessDetail(
+            file_path=filepath,
+            file_name=os.path.basename(filepath),
+            bank_name=self.rule.bank_name,
+            process_status='处理中',
+        )
 
         wb, tmp_path = open_workbook_compat(filepath)
         try:
@@ -623,15 +630,34 @@ class GenericBankParser:
                 self.logger.warning('文件「%s」%s 单元格为空，银行账号缺失',
                                     filepath, self.rule.account_cell)
 
+            detail.bank_account = str(bank_account) if bank_account is not None else ''
             subject = get_subject(bank_account, lookup_file)
+            detail.subject = subject
 
             rows = []
             columns = self.rule.columns
             start_row = self.rule.start_row
+            detail.total_rows_in_excel = ws.max_row
 
             for row_idx in range(start_row, ws.max_row + 1):
                 trade_date = ws.cell(row=row_idx, column=columns['trade_date']).value
                 if trade_date is None:
+                    raw_parts = []
+                    for col_name, col_idx in columns.items():
+                        try:
+                            v = ws.cell(row=row_idx, column=col_idx).value
+                            if v is not None:
+                                raw_parts.append(f"{col_name}={v}")
+                        except Exception:
+                            pass
+                    detail.skipped_rows += 1
+                    detail.skipped_details.append(SkippedRowDetail(
+                        file_path=filepath,
+                        file_name=os.path.basename(filepath),
+                        row_number=row_idx,
+                        reason='交易日期为空',
+                        raw_content='; '.join(raw_parts) if raw_parts else '(整行为空)',
+                    ))
                     continue
 
                 payment_val = ws.cell(row=row_idx, column=columns['payment']).value
@@ -664,10 +690,16 @@ class GenericBankParser:
                     '交易流水号': transaction_id,
                 })
 
+            detail.extracted_records = len(rows)
+            detail.process_status = '成功'
             wb.close()
-            self.logger.info('%s文件处理完成，提取 %d 条记录',
-                             self.rule.bank_name, len(rows))
-            return rows
+            self.logger.info('%s文件处理完成，提取 %d 条记录，跳过 %d 行',
+                             self.rule.bank_name, len(rows), detail.skipped_rows)
+            return rows, detail
+        except Exception as e:
+            detail.process_status = '失败'
+            detail.error_message = str(e)
+            raise
         finally:
             cleanup_temp_file(tmp_path)
 
@@ -680,7 +712,13 @@ def _create_bank_processor(bank_name: str):
         if rule is None:
             logger = get_logger()
             logger.error('未找到银行「%s」的解析规则', bank_name)
-            return []
+            return [], FileProcessDetail(
+                file_path=filepath,
+                file_name=os.path.basename(filepath),
+                bank_name=bank_name,
+                process_status='失败',
+                error_message=f'未找到银行「{bank_name}」的解析规则',
+            )
         parser = GenericBankParser(rule)
         return parser.parse(filepath, lookup_file)
     return processor
@@ -933,6 +971,57 @@ class ProcessingResult:
     duplicate_record_count: int = 0
     db_inserted_count: int = 0
     db_duplicate_count: int = 0
+    verification_report_path: Optional[str] = None
+    verification_report_md_path: Optional[str] = None
+
+
+@dataclass
+class SkippedRowDetail:
+    """跳过行明细"""
+    file_path: str = ''
+    file_name: str = ''
+    row_number: int = 0
+    reason: str = ''
+    raw_content: str = ''
+
+
+@dataclass
+class FileProcessDetail:
+    """单文件处理详情"""
+    file_path: str = ''
+    file_name: str = ''
+    bank_name: str = ''
+    bank_account: str = ''
+    subject: str = ''
+    total_rows_in_excel: int = 0
+    extracted_records: int = 0
+    skipped_rows: int = 0
+    skipped_details: List[SkippedRowDetail] = field(default_factory=list)
+    process_status: str = ''
+    error_message: str = ''
+
+
+@dataclass
+class UnmatchedAccount:
+    """主体未匹配账号"""
+    bank_account: str = ''
+    bank_name: str = ''
+    record_count: int = 0
+    total_income: float = 0.0
+    total_expense: float = 0.0
+    file_sources: List[str] = field(default_factory=list)
+
+
+@dataclass
+class VerificationReportData:
+    """检验报告完整数据"""
+    source_info: Dict[str, Any] = field(default_factory=dict)
+    file_details: List[FileProcessDetail] = field(default_factory=list)
+    skipped_rows: List[SkippedRowDetail] = field(default_factory=list)
+    unmatched_accounts: List[UnmatchedAccount] = field(default_factory=list)
+    amount_summary: Dict[str, Any] = field(default_factory=dict)
+    by_subject_summary: List[Dict[str, Any]] = field(default_factory=list)
+    by_bank_summary: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -1150,21 +1239,38 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
     processed_files = []
     unprocessed_files = []
     error_files = []
+    file_process_details: List[FileProcessDetail] = []
 
     for filepath in excel_files:
         bank = identify_bank(filepath)
         if bank and bank in BANK_PROCESSORS:
             try:
                 processor = BANK_PROCESSORS[bank]
-                rows = processor(filepath, lookup_file)
+                rows, detail = processor(filepath, lookup_file)
                 all_rows.extend(rows)
                 processed_files.append(filepath)
-                logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
+                file_process_details.append(detail)
+                logger.info('成功处理文件: %s（%d 条记录，跳过 %d 行）',
+                            filepath, len(rows), detail.skipped_rows)
             except Exception as e:
                 error_files.append((filepath, str(e)))
+                file_process_details.append(FileProcessDetail(
+                    file_path=filepath,
+                    file_name=os.path.basename(filepath),
+                    bank_name=bank or '',
+                    process_status='失败',
+                    error_message=str(e),
+                ))
                 logger.error('处理文件「%s」时发生错误: %s', filepath, e, exc_info=True)
         else:
             unprocessed_files.append(filepath)
+            file_process_details.append(FileProcessDetail(
+                file_path=filepath,
+                file_name=os.path.basename(filepath),
+                bank_name=bank or '未识别',
+                process_status='未处理',
+                error_message='无法识别银行类型' if not bank else f'银行「{bank}」无可用解析规则',
+            ))
 
     error_file_paths = {f for f, _ in error_files}
     delete_processed_files(excel_files, set(unprocessed_files) | error_file_paths)
@@ -1297,6 +1403,32 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
             logger.error('自动生成重复交易检测报告失败: %s', e, exc_info=True)
             duplicate_check_path = None
 
+    verification_report_path = None
+    verification_report_md_path = None
+    try:
+        output_dir = script_dir
+        if output_path:
+            output_dir = os.path.dirname(output_path) or script_dir
+        source_info = {
+            '数据来源': '主流程自动生成',
+            '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+            '输入文件夹': folder,
+            '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            '操作人': get_current_user(),
+        }
+        verification_report_path, verification_report_md_path = generate_verification_report_from_records(
+            final_rows, file_process_details, output_dir, source_info
+        )
+        if verification_report_path:
+            logger.info('流水检验报告(Excel)已自动生成: %s', verification_report_path)
+        if verification_report_md_path:
+            logger.info('流水检验报告(Markdown)已自动生成: %s', verification_report_md_path)
+    except Exception as e:
+        logger.error('自动生成流水检验报告失败: %s', e, exc_info=True)
+        verification_report_path = None
+        verification_report_md_path = None
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -1306,6 +1438,8 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
         duplicate_check_path=duplicate_check_path,
+        verification_report_path=verification_report_path,
+        verification_report_md_path=verification_report_md_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -1357,6 +1491,12 @@ def format_result_message(result):
 
         if result.duplicate_check_path:
             msg += f'\n\n重复交易检测：{result.duplicate_check_path}'
+
+        if result.verification_report_path:
+            msg += f'\n\n检验报告(Excel)：{result.verification_report_path}'
+
+        if result.verification_report_md_path:
+            msg += f'\n检验报告(Markdown)：{result.verification_report_md_path}'
     else:
         if result.incremental_mode and result.existing_record_count > 0:
             msg = (
@@ -1367,6 +1507,12 @@ def format_result_message(result):
             )
         else:
             msg = '未提取到任何银行流水记录。'
+
+        if result.verification_report_path:
+            msg += f'\n\n检验报告(Excel)：{result.verification_report_path}'
+
+        if result.verification_report_md_path:
+            msg += f'\n检验报告(Markdown)：{result.verification_report_md_path}'
 
     if result.unprocessed_files:
         names = '\n  '.join(os.path.basename(f) for f in result.unprocessed_files)
@@ -7406,13 +7552,14 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     unprocessed_files = []
     error_files = []
     filtered_out_count = 0
+    file_process_details: List[FileProcessDetail] = []
 
     for filepath in excel_files:
         bank = identify_bank(filepath)
         if bank and bank in BANK_PROCESSORS and bank in enabled_banks:
             try:
                 processor = BANK_PROCESSORS[bank]
-                rows = processor(filepath, lookup_file)
+                rows, detail = processor(filepath, lookup_file)
 
                 if start_dt or end_dt:
                     original_len = len(rows)
@@ -7421,14 +7568,36 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
 
                 all_rows.extend(rows)
                 processed_files.append(filepath)
-                logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
+                file_process_details.append(detail)
+                logger.info('成功处理文件: %s（%d 条记录，跳过 %d 行）',
+                            filepath, len(rows), detail.skipped_rows)
             except Exception as e:
                 error_files.append((filepath, str(e)))
+                file_process_details.append(FileProcessDetail(
+                    file_path=filepath,
+                    file_name=os.path.basename(filepath),
+                    bank_name=bank or '',
+                    process_status='失败',
+                    error_message=str(e),
+                ))
                 logger.error('处理文件「%s」时发生错误: %s', filepath, e, exc_info=True)
         else:
             unprocessed_files.append(filepath)
+            reason = ''
             if bank and bank not in enabled_banks:
+                reason = f'银行「{bank}」不在启用列表中'
                 logger.info('文件「%s」所属银行「%s」不在启用列表中，跳过', filepath, bank)
+            elif not bank:
+                reason = '无法识别银行类型'
+            else:
+                reason = f'银行「{bank}」无可用解析规则'
+            file_process_details.append(FileProcessDetail(
+                file_path=filepath,
+                file_name=os.path.basename(filepath),
+                bank_name=bank or '未识别',
+                process_status='未处理',
+                error_message=reason,
+            ))
 
     if filtered_out_count > 0:
         logger.info('日期过滤共排除 %d 条记录', filtered_out_count)
@@ -7559,6 +7728,58 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             logger.error('自动生成余额连续性校验报告失败: %s', e, exc_info=True)
             balance_check_path = None
 
+    duplicate_check_path = None
+    if final_rows:
+        try:
+            output_dir_for_check = output_dir or script_dir
+            if output_path:
+                output_dir_for_check = os.path.dirname(output_path) or output_dir_for_check
+            source_info = {
+                '数据来源': '主流程自动生成(预设)',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '启用银行': ', '.join(enabled_banks) if enabled_banks else '全部',
+                '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            duplicate_check_path = generate_duplicate_check_from_records(
+                final_rows, output_dir_for_check, source_info
+            )
+            if duplicate_check_path:
+                logger.info('重复交易检测报告已自动生成: %s', duplicate_check_path)
+        except Exception as e:
+            logger.error('自动生成重复交易检测报告失败: %s', e, exc_info=True)
+            duplicate_check_path = None
+
+    verification_report_path = None
+    verification_report_md_path = None
+    try:
+        output_dir_for_report = output_dir or script_dir
+        if output_path:
+            output_dir_for_report = os.path.dirname(output_path) or output_dir_for_report
+        source_info = {
+            '数据来源': '主流程自动生成(预设)',
+            '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+            '输入文件夹': folder,
+            '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+            '启用银行': ', '.join(enabled_banks) if enabled_banks else '全部',
+            '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            '操作人': get_current_user(),
+        }
+        verification_report_path, verification_report_md_path = generate_verification_report_from_records(
+            final_rows, file_process_details, output_dir_for_report, source_info
+        )
+        if verification_report_path:
+            logger.info('流水检验报告(Excel)已自动生成: %s', verification_report_path)
+        if verification_report_md_path:
+            logger.info('流水检验报告(Markdown)已自动生成: %s', verification_report_md_path)
+    except Exception as e:
+        logger.error('自动生成流水检验报告失败: %s', e, exc_info=True)
+        verification_report_path = None
+        verification_report_md_path = None
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -7567,6 +7788,9 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         output_path=output_path,
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
+        duplicate_check_path=duplicate_check_path,
+        verification_report_path=verification_report_path,
+        verification_report_md_path=verification_report_md_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -9968,6 +10192,655 @@ def run_duplicate_check_flow(script_dir):
         logger.error('重复交易检测报告导出失败: %s', e, exc_info=True)
 
     logger.info('========== 重复交易检测结束 ==========')
+
+
+# ──────────────────────────────────────────────
+# 流水检验报告模块
+# ──────────────────────────────────────────────
+
+def _collect_unmatched_accounts(
+    records: List[Dict[str, Any]],
+    file_details: List[FileProcessDetail],
+) -> List[UnmatchedAccount]:
+    """从交易记录和文件处理详情中收集主体未匹配的账号"""
+    logger = get_logger()
+
+    account_map: Dict[str, UnmatchedAccount] = {}
+
+    for rec in records:
+        subject = str(rec.get('主体') or '').strip()
+        bank_account = str(rec.get('银行账号') or '').strip()
+        bank_name = str(rec.get('银行') or '').strip()
+
+        if not bank_account:
+            continue
+        if subject:
+            continue
+
+        key = f"{bank_name}||{bank_account}"
+        if key not in account_map:
+            account_map[key] = UnmatchedAccount(
+                bank_account=bank_account,
+                bank_name=bank_name,
+            )
+
+        payment = to_float(rec.get('付款'))
+        receipt = to_float(rec.get('收款'))
+
+        if receipt is not None and receipt > 0:
+            account_map[key].total_income += receipt
+        if payment is not None and payment < 0:
+            account_map[key].total_expense += abs(payment)
+
+        account_map[key].record_count += 1
+
+    for detail in file_details:
+        if detail.subject or not detail.bank_account:
+            continue
+        key = f"{detail.bank_name}||{detail.bank_account}"
+        if key not in account_map:
+            account_map[key] = UnmatchedAccount(
+                bank_account=detail.bank_account,
+                bank_name=detail.bank_name,
+            )
+        if detail.file_name and detail.file_name not in account_map[key].file_sources:
+            account_map[key].file_sources.append(detail.file_name)
+
+    result = sorted(
+        account_map.values(),
+        key=lambda x: (x.bank_name, x.bank_account),
+    )
+    logger.info('收集到 %d 个主体未匹配的账号', len(result))
+    return result
+
+
+def _collect_all_skipped_rows(
+    file_details: List[FileProcessDetail],
+) -> List[SkippedRowDetail]:
+    """从所有文件处理详情中收集全部跳过行"""
+    all_skipped: List[SkippedRowDetail] = []
+    for detail in file_details:
+        all_skipped.extend(detail.skipped_details)
+    return all_skipped
+
+
+def _build_amount_summary(
+    records: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """构建金额汇总数据（总体、按主体、按银行）"""
+    logger = get_logger()
+
+    total_income = 0.0
+    total_expense = 0.0
+    total_count = 0
+    income_count = 0
+    expense_count = 0
+
+    by_subject: Dict[str, Dict[str, Any]] = {}
+    by_bank: Dict[str, Dict[str, Any]] = {}
+
+    for rec in records:
+        subject = str(rec.get('主体') or '').strip() or '未指定主体'
+        bank = str(rec.get('银行') or '').strip() or '未知银行'
+
+        payment = to_float(rec.get('付款'))
+        receipt = to_float(rec.get('收款'))
+
+        income = 0.0
+        expense = 0.0
+        is_income = False
+        is_expense = False
+
+        if receipt is not None and receipt > 0:
+            income = receipt
+            is_income = True
+        if payment is not None and payment < 0:
+            expense = abs(payment)
+            is_expense = True
+
+        if not is_income and not is_expense:
+            continue
+
+        total_income += income
+        total_expense += expense
+        total_count += 1
+        if is_income:
+            income_count += 1
+        if is_expense:
+            expense_count += 1
+
+        if subject not in by_subject:
+            by_subject[subject] = {
+                '主体': subject,
+                '收入合计': 0.0,
+                '支出合计': 0.0,
+                '净额': 0.0,
+                '交易笔数': 0,
+                '收入笔数': 0,
+                '支出笔数': 0,
+            }
+        s = by_subject[subject]
+        s['收入合计'] += income
+        s['支出合计'] += expense
+        s['净额'] += income - expense
+        s['交易笔数'] += 1
+        if is_income:
+            s['收入笔数'] += 1
+        if is_expense:
+            s['支出笔数'] += 1
+
+        if bank not in by_bank:
+            by_bank[bank] = {
+                '银行': bank,
+                '收入合计': 0.0,
+                '支出合计': 0.0,
+                '净额': 0.0,
+                '交易笔数': 0,
+                '收入笔数': 0,
+                '支出笔数': 0,
+            }
+        b = by_bank[bank]
+        b['收入合计'] += income
+        b['支出合计'] += expense
+        b['净额'] += income - expense
+        b['交易笔数'] += 1
+        if is_income:
+            b['收入笔数'] += 1
+        if is_expense:
+            b['支出笔数'] += 1
+
+    overall = {
+        '总记录数': len(records),
+        '有效交易笔数': total_count,
+        '收入笔数': income_count,
+        '支出笔数': expense_count,
+        '收入合计': total_income,
+        '支出合计': total_expense,
+        '净额': total_income - total_expense,
+        '主体数': len(by_subject),
+        '银行数': len(by_bank),
+    }
+
+    by_subject_list = sorted(
+        by_subject.values(),
+        key=lambda x: abs(x['净额']),
+        reverse=True,
+    )
+    by_bank_list = sorted(
+        by_bank.values(),
+        key=lambda x: abs(x['净额']),
+        reverse=True,
+    )
+
+    logger.info(
+        '金额汇总完成: %d 条记录, 收入 %.2f, 支出 %.2f, 净额 %.2f',
+        total_count, total_income, total_expense, total_income - total_expense,
+    )
+    return overall, by_subject_list, by_bank_list
+
+
+def _build_verification_report_data(
+    records: List[Dict[str, Any]],
+    file_details: List[FileProcessDetail],
+    source_info: Optional[Dict[str, Any]] = None,
+) -> VerificationReportData:
+    """构建完整的检验报告数据"""
+    logger = get_logger()
+
+    skipped_rows = _collect_all_skipped_rows(file_details)
+    unmatched_accounts = _collect_unmatched_accounts(records, file_details)
+    amount_summary, by_subject_summary, by_bank_summary = _build_amount_summary(records)
+
+    total_files = len(file_details)
+    success_count = sum(1 for d in file_details if d.process_status == '成功')
+    failed_count = sum(1 for d in file_details if d.process_status == '失败')
+    unprocessed_count = sum(1 for d in file_details if d.process_status == '未处理')
+    total_extracted = sum(d.extracted_records for d in file_details)
+    total_skipped = sum(d.skipped_rows for d in file_details)
+
+    source = dict(source_info or {})
+    source.update({
+        '文件总数': total_files,
+        '成功处理': success_count,
+        '处理失败': failed_count,
+        '未处理': unprocessed_count,
+        '提取记录总数': total_extracted,
+        '跳过行总数': total_skipped,
+        '未匹配账号数': len(unmatched_accounts),
+    })
+
+    data = VerificationReportData(
+        source_info=source,
+        file_details=file_details,
+        skipped_rows=skipped_rows,
+        unmatched_accounts=unmatched_accounts,
+        amount_summary=amount_summary,
+        by_subject_summary=by_subject_summary,
+        by_bank_summary=by_bank_summary,
+    )
+    logger.info('检验报告数据构建完成')
+    return data
+
+
+def _fmt_amount(val: float) -> str:
+    """格式化金额"""
+    if val is None:
+        return '-'
+    try:
+        return f"{val:,.2f}"
+    except Exception:
+        return str(val)
+
+
+def export_verification_report_markdown(
+    report_data: VerificationReportData,
+    output_path: str,
+) -> str:
+    """导出检验报告为 Markdown 格式"""
+    logger = get_logger()
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+
+    lines: List[str] = []
+
+    lines.append('# 银行流水检验报告')
+    lines.append('')
+    lines.append(f'**生成时间**: {report_data.source_info.get("生成时间", "-")}')
+    lines.append(f'**操作人**: {report_data.source_info.get("操作人", "-")}')
+    lines.append(f'**数据来源**: {report_data.source_info.get("数据来源", "-")}')
+    lines.append(f'**输入文件夹**: {report_data.source_info.get("输入文件夹", "-")}')
+    lines.append(f'**总表文件**: {report_data.source_info.get("总表文件", "-")}')
+    lines.append(f'**运行模式**: {report_data.source_info.get("运行模式", "-")}')
+    lines.append('')
+
+    lines.append('## 一、处理总览')
+    lines.append('')
+    lines.append('| 指标 | 数值 |')
+    lines.append('|------|------|')
+    lines.append(f'| 文件总数 | {report_data.source_info.get("文件总数", 0)} |')
+    lines.append(f'| 成功处理 | {report_data.source_info.get("成功处理", 0)} |')
+    lines.append(f'| 处理失败 | {report_data.source_info.get("处理失败", 0)} |')
+    lines.append(f'| 未处理 | {report_data.source_info.get("未处理", 0)} |')
+    lines.append(f'| 提取记录总数 | {report_data.source_info.get("提取记录总数", 0):,} |')
+    lines.append(f'| 跳过行总数 | {report_data.source_info.get("跳过行总数", 0):,} |')
+    lines.append(f'| 未匹配账号数 | {report_data.source_info.get("未匹配账号数", 0)} |')
+    lines.append('')
+
+    lines.append('## 二、金额汇总')
+    lines.append('')
+    s = report_data.amount_summary
+    lines.append('| 指标 | 数值 |')
+    lines.append('|------|------|')
+    lines.append(f"| 总记录数 | {s.get('总记录数', 0):,} |")
+    lines.append(f"| 有效交易笔数 | {s.get('有效交易笔数', 0):,} |")
+    lines.append(f"| 收入笔数 | {s.get('收入笔数', 0):,} |")
+    lines.append(f"| 支出笔数 | {s.get('支出笔数', 0):,} |")
+    lines.append(f"| 收入合计 | {_fmt_amount(s.get('收入合计', 0.0))} |")
+    lines.append(f"| 支出合计 | {_fmt_amount(s.get('支出合计', 0.0))} |")
+    lines.append(f"| 净额 | {_fmt_amount(s.get('净额', 0.0))} |")
+    lines.append(f"| 主体数 | {s.get('主体数', 0)} |")
+    lines.append(f"| 银行数 | {s.get('银行数', 0)} |")
+    lines.append('')
+
+    if report_data.by_subject_summary:
+        lines.append('### 按主体汇总')
+        lines.append('')
+        lines.append('| 主体 | 收入合计 | 支出合计 | 净额 | 交易笔数 | 收入笔数 | 支出笔数 |')
+        lines.append('|------|----------|----------|------|----------|----------|----------|')
+        for row in report_data.by_subject_summary:
+            lines.append(
+                f"| {row['主体']} | {_fmt_amount(row['收入合计'])} | "
+                f"{_fmt_amount(row['支出合计'])} | {_fmt_amount(row['净额'])} | "
+                f"{row['交易笔数']:,} | {row['收入笔数']:,} | {row['支出笔数']:,} |"
+            )
+        lines.append('')
+
+    if report_data.by_bank_summary:
+        lines.append('### 按银行汇总')
+        lines.append('')
+        lines.append('| 银行 | 收入合计 | 支出合计 | 净额 | 交易笔数 | 收入笔数 | 支出笔数 |')
+        lines.append('|------|----------|----------|------|----------|----------|----------|')
+        for row in report_data.by_bank_summary:
+            lines.append(
+                f"| {row['银行']} | {_fmt_amount(row['收入合计'])} | "
+                f"{_fmt_amount(row['支出合计'])} | {_fmt_amount(row['净额'])} | "
+                f"{row['交易笔数']:,} | {row['收入笔数']:,} | {row['支出笔数']:,} |"
+            )
+        lines.append('')
+
+    lines.append('## 三、各文件处理状态')
+    lines.append('')
+    lines.append('| 文件名 | 银行 | 银行账号 | 主体 | 处理状态 | 总行数 | 提取记录 | 跳过行 | 错误信息 |')
+    lines.append('|--------|------|----------|------|----------|--------|----------|--------|----------|')
+    for d in report_data.file_details:
+        err = d.error_message.replace('|', '\\|') if d.error_message else ''
+        lines.append(
+            f"| {d.file_name} | {d.bank_name} | {d.bank_account} | {d.subject or '-'} | "
+            f"{d.process_status} | {d.total_rows_in_excel:,} | {d.extracted_records:,} | "
+            f"{d.skipped_rows:,} | {err} |"
+        )
+    lines.append('')
+
+    lines.append('## 四、跳过行明细')
+    lines.append('')
+    if report_data.skipped_rows:
+        lines.append(f'共 **{len(report_data.skipped_rows)}** 行被跳过。')
+        lines.append('')
+        lines.append('| 文件名 | 行号 | 跳过原因 | 行内容摘要 |')
+        lines.append('|--------|------|----------|------------|')
+        for sr in report_data.skipped_rows:
+            content = (sr.raw_content or '').replace('|', '\\|').replace('\n', ' ')
+            if len(content) > 100:
+                content = content[:100] + '...'
+            lines.append(
+                f"| {sr.file_name} | {sr.row_number} | {sr.reason} | {content} |"
+            )
+    else:
+        lines.append('无跳过行。')
+    lines.append('')
+
+    lines.append('## 五、主体未匹配账号列表')
+    lines.append('')
+    if report_data.unmatched_accounts:
+        lines.append(f'共 **{len(report_data.unmatched_accounts)}** 个账号未匹配到主体。')
+        lines.append('')
+        lines.append('| 银行 | 银行账号 | 记录数 | 收入合计 | 支出合计 | 来源文件 |')
+        lines.append('|------|----------|--------|----------|----------|----------|')
+        for ua in report_data.unmatched_accounts:
+            sources = ', '.join(ua.file_sources) if ua.file_sources else '-'
+            lines.append(
+                f"| {ua.bank_name} | {ua.bank_account} | {ua.record_count:,} | "
+                f"{_fmt_amount(ua.total_income)} | {_fmt_amount(ua.total_expense)} | {sources} |"
+            )
+    else:
+        lines.append('所有账号均已成功匹配主体。')
+    lines.append('')
+
+    lines.append('---')
+    lines.append(f'*本报告由 bankcheck 工具自动生成，生成时间 {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}*')
+
+    content = '\n'.join(lines)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    logger.info('检验报告(Markdown)已导出: %s', output_path)
+    return output_path
+
+
+def export_verification_report_excel(
+    report_data: VerificationReportData,
+    output_path: str,
+    source_info: Optional[Dict[str, Any]] = None,
+) -> str:
+    """导出检验报告为 Excel 格式（多 Sheet）"""
+    logger = get_logger()
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+
+    wb = openpyxl.Workbook()
+
+    ws_info = wb.active
+    ws_info.title = '报告信息'
+    info_title = [
+        ('项目', '内容'),
+    ]
+    info_rows = list(info_title)
+    si = report_data.source_info
+    info_rows.extend([
+        ('报告类型', '银行流水检验报告'),
+        ('生成时间', si.get('生成时间', '')),
+        ('操作人', si.get('操作人', '')),
+        ('数据来源', si.get('数据来源', '')),
+        ('输入文件夹', si.get('输入文件夹', '')),
+        ('总表文件', si.get('总表文件', '')),
+        ('运行模式', si.get('运行模式', '')),
+        ('', ''),
+        ('文件总数', si.get('文件总数', 0)),
+        ('成功处理', si.get('成功处理', 0)),
+        ('处理失败', si.get('处理失败', 0)),
+        ('未处理', si.get('未处理', 0)),
+        ('提取记录总数', si.get('提取记录总数', 0)),
+        ('跳过行总数', si.get('跳过行总数', 0)),
+        ('未匹配账号数', si.get('未匹配账号数', 0)),
+    ])
+    for r_idx, row in enumerate(info_rows, 1):
+        for c_idx, val in enumerate(row, 1):
+            cell = ws_info.cell(row=r_idx, column=c_idx, value=val)
+            if r_idx == 1:
+                cell.font = openpyxl.styles.Font(bold=True)
+    for col_idx, width in enumerate([20, 60], 1):
+        ws_info.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
+
+    ws_amount = wb.create_sheet('金额汇总')
+    amount_header = ['指标', '数值']
+    ws_amount.append(amount_header)
+    s = report_data.amount_summary
+    amount_rows = [
+        ('总记录数', s.get('总记录数', 0)),
+        ('有效交易笔数', s.get('有效交易笔数', 0)),
+        ('收入笔数', s.get('收入笔数', 0)),
+        ('支出笔数', s.get('支出笔数', 0)),
+        ('收入合计', s.get('收入合计', 0.0)),
+        ('支出合计', s.get('支出合计', 0.0)),
+        ('净额', s.get('净额', 0.0)),
+        ('主体数', s.get('主体数', 0)),
+        ('银行数', s.get('银行数', 0)),
+    ]
+    for row in amount_rows:
+        ws_amount.append(list(row))
+    for cell in ws_amount[1]:
+        cell.font = openpyxl.styles.Font(bold=True)
+    for row in ws_amount.iter_rows(min_row=2):
+        for cell in row:
+            if isinstance(cell.value, float):
+                cell.number_format = '#,##0.00'
+            elif isinstance(cell.value, int):
+                cell.number_format = '#,##0'
+    ws_amount.column_dimensions['A'].width = 20
+    ws_amount.column_dimensions['B'].width = 20
+
+    if report_data.by_subject_summary:
+        ws_subject = wb.create_sheet('按主体汇总')
+        subject_header = ['主体', '收入合计', '支出合计', '净额', '交易笔数', '收入笔数', '支出笔数']
+        ws_subject.append(subject_header)
+        for row in report_data.by_subject_summary:
+            ws_subject.append([
+                row['主体'], row['收入合计'], row['支出合计'], row['净额'],
+                row['交易笔数'], row['收入笔数'], row['支出笔数'],
+            ])
+        for cell in ws_subject[1]:
+            cell.font = openpyxl.styles.Font(bold=True)
+        for row in ws_subject.iter_rows(min_row=2):
+            for idx, cell in enumerate(row):
+                if idx in (1, 2, 3):
+                    cell.number_format = '#,##0.00'
+                elif idx in (4, 5, 6):
+                    cell.number_format = '#,##0'
+        widths = [25, 18, 18, 18, 12, 12, 12]
+        for i, w in enumerate(widths, 1):
+            ws_subject.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    if report_data.by_bank_summary:
+        ws_bank = wb.create_sheet('按银行汇总')
+        bank_header = ['银行', '收入合计', '支出合计', '净额', '交易笔数', '收入笔数', '支出笔数']
+        ws_bank.append(bank_header)
+        for row in report_data.by_bank_summary:
+            ws_bank.append([
+                row['银行'], row['收入合计'], row['支出合计'], row['净额'],
+                row['交易笔数'], row['收入笔数'], row['支出笔数'],
+            ])
+        for cell in ws_bank[1]:
+            cell.font = openpyxl.styles.Font(bold=True)
+        for row in ws_bank.iter_rows(min_row=2):
+            for idx, cell in enumerate(row):
+                if idx in (1, 2, 3):
+                    cell.number_format = '#,##0.00'
+                elif idx in (4, 5, 6):
+                    cell.number_format = '#,##0'
+        widths = [20, 18, 18, 18, 12, 12, 12]
+        for i, w in enumerate(widths, 1):
+            ws_bank.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    ws_files = wb.create_sheet('文件处理状态')
+    file_header = ['文件名', '银行', '银行账号', '主体', '处理状态',
+                   '总行数', '提取记录', '跳过行', '错误信息']
+    ws_files.append(file_header)
+    for d in report_data.file_details:
+        ws_files.append([
+            d.file_name, d.bank_name, d.bank_account, d.subject or '',
+            d.process_status, d.total_rows_in_excel, d.extracted_records,
+            d.skipped_rows, d.error_message or '',
+        ])
+    for cell in ws_files[1]:
+        cell.font = openpyxl.styles.Font(bold=True)
+    for row in ws_files.iter_rows(min_row=2):
+        for idx, cell in enumerate(row):
+            if idx in (5, 6, 7):
+                cell.number_format = '#,##0'
+    widths = [40, 15, 25, 20, 10, 10, 12, 10, 40]
+    for i, w in enumerate(widths, 1):
+        ws_files.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    ws_skip = wb.create_sheet('跳过行明细')
+    skip_header = ['文件名', '行号', '跳过原因', '行内容摘要']
+    ws_skip.append(skip_header)
+    for sr in report_data.skipped_rows:
+        ws_skip.append([sr.file_name, sr.row_number, sr.reason, sr.raw_content or ''])
+    for cell in ws_skip[1]:
+        cell.font = openpyxl.styles.Font(bold=True)
+    widths = [40, 10, 15, 80]
+    for i, w in enumerate(widths, 1):
+        ws_skip.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    ws_unmatched = wb.create_sheet('未匹配账号')
+    unmatched_header = ['银行', '银行账号', '记录数', '收入合计', '支出合计', '来源文件']
+    ws_unmatched.append(unmatched_header)
+    for ua in report_data.unmatched_accounts:
+        ws_unmatched.append([
+            ua.bank_name, ua.bank_account, ua.record_count,
+            ua.total_income, ua.total_expense,
+            ', '.join(ua.file_sources) if ua.file_sources else '',
+        ])
+    for cell in ws_unmatched[1]:
+        cell.font = openpyxl.styles.Font(bold=True)
+    for row in ws_unmatched.iter_rows(min_row=2):
+        for idx, cell in enumerate(row):
+            if idx == 2:
+                cell.number_format = '#,##0'
+            elif idx in (3, 4):
+                cell.number_format = '#,##0.00'
+    widths = [15, 25, 12, 18, 18, 50]
+    for i, w in enumerate(widths, 1):
+        ws_unmatched.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    wb.save(output_path)
+    logger.info('检验报告(Excel)已导出: %s', output_path)
+    return output_path
+
+
+def generate_verification_report_from_records(
+    records: List[Dict[str, Any]],
+    file_details: List[FileProcessDetail],
+    output_dir: Optional[str] = None,
+    source_info: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    从交易记录和文件处理详情生成流水检验报告（Excel + Markdown）。
+
+    Args:
+        records: 交易记录列表
+        file_details: 各文件处理详情列表
+        output_dir: 输出目录
+        source_info: 数据源信息
+
+    Returns:
+        tuple: (Excel报告路径, Markdown报告路径)
+    """
+    logger = get_logger()
+
+    if output_dir is None:
+        output_dir = get_script_dir()
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    excel_path = os.path.join(output_dir, f'流水检验报告_{timestamp}.xlsx')
+    md_path = os.path.join(output_dir, f'流水检验报告_{timestamp}.md')
+
+    try:
+        report_data = _build_verification_report_data(records, file_details, source_info)
+
+        excel_result = export_verification_report_excel(report_data, excel_path, source_info)
+        md_result = export_verification_report_markdown(report_data, md_path)
+
+        return excel_result, md_result
+    except Exception as e:
+        logger.error('生成检验报告失败: %s', e, exc_info=True)
+        return None, None
+
+
+def generate_verification_report_from_total(
+    total_path: str,
+    output_dir: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    从银行流水总表文件生成检验报告（无文件级详情时退化为汇总模式）。
+
+    Args:
+        total_path: 银行流水总表 Excel 文件路径
+        output_dir: 输出目录
+
+    Returns:
+        tuple: (Excel报告路径, Markdown报告路径)
+    """
+    logger = get_logger()
+
+    records = load_total_table(total_path)
+    if not records:
+        logger.warning('总表无数据: %s', total_path)
+        return None, None
+
+    if output_dir is None:
+        output_dir = os.path.dirname(total_path) or get_script_dir()
+
+    source_info = {
+        '数据来源文件': os.path.basename(total_path),
+        '总表记录数': len(records),
+        '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    file_details: List[FileProcessDetail] = []
+    account_file_map: Dict[Tuple[str, str], set] = {}
+    for rec in records:
+        bank = str(rec.get('银行') or '').strip() or '未知'
+        account = str(rec.get('银行账号') or '').strip()
+        if not account:
+            continue
+        key = (bank, account)
+        if key not in account_file_map:
+            account_file_map[key] = set()
+        account_file_map[key].add(bank)
+
+    for (bank, account), _ in account_file_map.items():
+        subject = ''
+        for rec in records:
+            if str(rec.get('银行账号') or '').strip() == account:
+                subject = str(rec.get('主体') or '').strip()
+                break
+        rec_count = sum(
+            1 for r in records
+            if str(r.get('银行账号') or '').strip() == account
+        )
+        file_details.append(FileProcessDetail(
+            file_name=os.path.basename(total_path),
+            file_path=total_path,
+            bank_name=bank,
+            bank_account=account,
+            subject=subject,
+            total_rows_in_excel=rec_count,
+            extracted_records=rec_count,
+            process_status='汇总',
+        ))
+
+    return generate_verification_report_from_records(records, file_details, output_dir, source_info)
 
 
 if __name__ == '__main__':
