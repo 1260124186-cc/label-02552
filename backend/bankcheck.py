@@ -601,13 +601,13 @@ class GenericBankParser:
         self.rule = rule
         self.logger = get_logger()
 
-    def parse(self, filepath: str, lookup_file: str) -> List[Dict[str, Any]]:
+    def parse(self, filepath: str, lookup_source) -> List[Dict[str, Any]]:
         """
         根据配置规则解析银行流水 Excel 文件
 
         Args:
             filepath: Excel 文件路径
-            lookup_file: 主体查找表路径
+            lookup_source: 查找表文件路径(str) 或 load_lookup_table() 返回的预加载 dict
 
         Returns:
             解析后的记录列表
@@ -623,7 +623,7 @@ class GenericBankParser:
                 self.logger.warning('文件「%s」%s 单元格为空，银行账号缺失',
                                     filepath, self.rule.account_cell)
 
-            subject_info = get_subject_info(bank_account, lookup_file)
+            subject_info = get_subject_info(bank_account, lookup_source)
             subject = subject_info.get('subject', '')
             extra_fields = subject_info.get('extra_fields', {})
 
@@ -680,7 +680,7 @@ class GenericBankParser:
 
 def _create_bank_processor(bank_name: str):
     """创建基于配置的银行处理器函数"""
-    def processor(filepath, lookup_file):
+    def processor(filepath, lookup_source):
         config = BankRuleConfig()
         rule = config.get_rule(bank_name)
         if rule is None:
@@ -688,7 +688,7 @@ def _create_bank_processor(bank_name: str):
             logger.error('未找到银行「%s」的解析规则', bank_name)
             return []
         parser = GenericBankParser(rule)
-        return parser.parse(filepath, lookup_file)
+        return parser.parse(filepath, lookup_source)
     return processor
 
 
@@ -807,22 +807,156 @@ def _account_key(value):
     return normalized.lstrip('0') or '0'
 
 
-def get_subject(bank_account, lookup_file):
+def load_lookup_table(lookup_file):
+    """
+    一次性加载主体查找表到内存字典，避免每条记录重复打开 Excel。
+
+    Args:
+        lookup_file: 查找表文件路径
+
+    Returns:
+        dict，包含以下键：
+            - by_account: {normalized_account_key: [entry, ...]}，每个账号对应条目列表（按优先级降序）
+            - all_entries: [entry, ...]，所有条目列表，用于模糊匹配
+            - extra_field_names: [str, ...]，扩展字段名列表（已排序）
+            - _source_file: 原始文件路径，用于调试
+        如果 lookup_file 为空或不存在，返回空结构（by_account 为空 dict 等）
+    """
+    logger = get_logger()
+
+    empty_result = {
+        'by_account': {},
+        'all_entries': [],
+        'extra_field_names': [],
+        '_source_file': lookup_file,
+    }
+
+    if not lookup_file or not os.path.exists(lookup_file):
+        logger.warning('主体查找表不存在或未指定，返回空查找表结构')
+        return empty_result
+
+    tmp_path = None
+    try:
+        wb, tmp_path = open_workbook_compat(lookup_file)
+        ws = wb.active
+
+        header_map = _detect_lookup_header_columns(ws)
+
+        subject_col = _get_lookup_col_index(header_map, ['主体名称', '主体', 'subject', 'Subject'])
+        account_col = _get_lookup_col_index(header_map, ['银行账号', '账号', 'account', 'Account'])
+        priority_col = _get_lookup_col_index(header_map, ['优先级', 'priority', 'Priority'])
+
+        if subject_col is None:
+            subject_col = 1
+        if account_col is None:
+            account_col = 2
+
+        extra_col_names = sorted([
+            name for name in header_map
+            if name not in {'主体名称', '主体', 'subject', 'Subject',
+                           '银行账号', '账号', 'account', 'Account',
+                           '优先级', 'priority', 'Priority'}
+        ])
+
+        all_entries = []
+        for row_idx in range(2, ws.max_row + 1):
+            account_val = ws.cell(row=row_idx, column=account_col).value
+            if account_val is None:
+                continue
+
+            subject = ws.cell(row=row_idx, column=subject_col).value or ''
+
+            priority = 0
+            if priority_col is not None:
+                priority_val = ws.cell(row=row_idx, column=priority_col).value
+                if priority_val is not None:
+                    try:
+                        priority = int(priority_val)
+                    except (ValueError, TypeError):
+                        priority = 0
+
+            extra_fields = {}
+            for col_name in extra_col_names:
+                col_idx = header_map[col_name]
+                val = ws.cell(row=row_idx, column=col_idx).value
+                extra_fields[col_name] = str(val).strip() if val is not None else ''
+
+            all_entries.append({
+                'subject': str(subject).strip() if subject else '',
+                'account_raw': account_val,
+                'account_norm': _normalize_account_str(account_val),
+                'account_key': _account_key(account_val),
+                'priority': priority,
+                'extra_fields': extra_fields,
+            })
+
+        wb.close()
+        cleanup_temp_file(tmp_path)
+        tmp_path = None
+
+        by_account = {}
+        for entry in all_entries:
+            key = entry['account_key']
+            if key not in by_account:
+                by_account[key] = []
+            by_account[key].append(entry)
+
+        for key in by_account:
+            by_account[key].sort(key=lambda x: x['priority'], reverse=True)
+
+        logger.info('查找表加载完成：共 %d 条条目，%d 个唯一账号，%d 个扩展字段',
+                    len(all_entries), len(by_account), len(extra_col_names))
+
+        return {
+            'by_account': by_account,
+            'all_entries': all_entries,
+            'extra_field_names': extra_col_names,
+            '_source_file': lookup_file,
+        }
+
+    except Exception as e:
+        logger.error('加载主体查找表「%s」时发生错误: %s', lookup_file, e, exc_info=True)
+        return empty_result
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+def _resolve_lookup(lookup_source):
+    """
+    内部工具：将 lookup_source 统一解析为 load_lookup_table 的结果结构。
+    支持传入文件路径（str）或已加载的查找表 dict。
+
+    Args:
+        lookup_source: 文件路径(str) 或 load_lookup_table 返回的 dict
+
+    Returns:
+        dict: load_lookup_table 返回的结构
+    """
+    if isinstance(lookup_source, dict) and 'by_account' in lookup_source:
+        return lookup_source
+    return load_lookup_table(lookup_source)
+
+
+def get_subject(bank_account, lookup_source):
     """
     根据银行账号在查找表中找到对应的主体。
     同一账号对应多个主体时，返回优先级最高的。
+
+    Args:
+        bank_account: 银行账号
+        lookup_source: 查找表文件路径(str) 或 load_lookup_table() 返回的预加载 dict
     """
-    info = get_subject_info(bank_account, lookup_file)
+    info = get_subject_info(bank_account, lookup_source)
     return info.get('subject', '')
 
 
-def get_subject_info(bank_account, lookup_file, use_fuzzy=False, fuzzy_threshold=0.6):
+def get_subject_info(bank_account, lookup_source, use_fuzzy=False, fuzzy_threshold=0.6):
     """
     根据银行账号获取主体信息（包含扩展字段、优先级等）。
 
     Args:
         bank_account: 银行账号
-        lookup_file: 查找表文件路径
+        lookup_source: 查找表文件路径(str) 或 load_lookup_table() 返回的预加载 dict
         use_fuzzy: 是否启用模糊匹配
         fuzzy_threshold: 模糊匹配相似度阈值
 
@@ -841,139 +975,64 @@ def get_subject_info(bank_account, lookup_file, use_fuzzy=False, fuzzy_threshold
         'similarity': 0.0,
     }
 
-    if not lookup_file or not os.path.exists(lookup_file):
-        logger.warning('主体查找表不存在或未指定，银行账号「%s」的主体将为空', bank_account)
-        return result
     if bank_account is None:
         logger.warning('银行账号为空，无法查找主体')
         return result
 
+    lookup = _resolve_lookup(lookup_source)
+    if not lookup.get('by_account'):
+        source_file = lookup.get('_source_file', '')
+        if source_file:
+            logger.warning('主体查找表「%s」为空或不存在，银行账号「%s」的主体将为空',
+                           source_file, bank_account)
+        else:
+            logger.warning('主体查找表不存在或未指定，银行账号「%s」的主体将为空', bank_account)
+        return result
+
     target_key = _account_key(bank_account)
-    tmp_path = None
-    try:
-        wb, tmp_path = open_workbook_compat(lookup_file)
-        ws = wb.active
 
-        header_map = _detect_lookup_header_columns(ws)
+    exact_entries = lookup['by_account'].get(target_key, [])
+    if exact_entries:
+        best = exact_entries[0]
+        result['subject'] = best['subject']
+        result['priority'] = best['priority']
+        result['extra_fields'] = dict(best['extra_fields'])
+        result['matched'] = True
+        result['similarity'] = 1.0
+        logger.debug('银行账号「%s」匹配到主体: %s（优先级: %d）',
+                     bank_account, best['subject'], best['priority'])
+        return result
 
-        subject_col = _get_lookup_col_index(header_map, ['主体名称', '主体', 'subject', 'Subject'])
-        account_col = _get_lookup_col_index(header_map, ['银行账号', '账号', 'account', 'Account'])
-        priority_col = _get_lookup_col_index(header_map, ['优先级', 'priority', 'Priority'])
-
-        if subject_col is None:
-            subject_col = 1
-        if account_col is None:
-            account_col = 2
-
-        extra_col_names = [
-            name for name in header_map
-            if name not in {'主体名称', '主体', 'subject', 'Subject',
-                           '银行账号', '账号', 'account', 'Account',
-                           '优先级', 'priority', 'Priority'}
-        ]
-
-        exact_matches = []
-        for row_idx in range(2, ws.max_row + 1):
-            account_val = ws.cell(row=row_idx, column=account_col).value
-            if account_val is None:
+    if use_fuzzy:
+        target_norm = _normalize_account_str(bank_account)
+        fuzzy_matches = []
+        for entry in lookup['all_entries']:
+            entry_norm = entry['account_norm']
+            if not entry_norm:
                 continue
-            if _account_key(account_val) == target_key:
-                subject = ws.cell(row=row_idx, column=subject_col).value or ''
-
-                priority = 0
-                if priority_col is not None:
-                    priority_val = ws.cell(row=row_idx, column=priority_col).value
-                    if priority_val is not None:
-                        try:
-                            priority = int(priority_val)
-                        except (ValueError, TypeError):
-                            priority = 0
-
-                extra_fields = {}
-                for col_name in extra_col_names:
-                    col_idx = header_map[col_name]
-                    val = ws.cell(row=row_idx, column=col_idx).value
-                    extra_fields[col_name] = str(val).strip() if val is not None else ''
-
-                exact_matches.append({
-                    'subject': str(subject).strip() if subject else '',
-                    'priority': priority,
-                    'extra_fields': extra_fields,
-                    'row': row_idx,
+            sim = _calculate_string_similarity(target_norm, entry_norm)
+            if sim >= fuzzy_threshold:
+                fuzzy_matches.append({
+                    'subject': entry['subject'],
+                    'priority': entry['priority'],
+                    'extra_fields': dict(entry['extra_fields']),
+                    'similarity': sim,
                 })
 
-        if exact_matches:
-            exact_matches.sort(key=lambda x: x['priority'], reverse=True)
-            best = exact_matches[0]
+        if fuzzy_matches:
+            fuzzy_matches.sort(key=lambda x: (x['similarity'], x['priority']), reverse=True)
+            best = fuzzy_matches[0]
             result['subject'] = best['subject']
             result['priority'] = best['priority']
             result['extra_fields'] = best['extra_fields']
             result['matched'] = True
-            result['similarity'] = 1.0
-            wb.close()
-            cleanup_temp_file(tmp_path)
-            logger.debug('银行账号「%s」匹配到主体: %s（优先级: %d）',
-                         bank_account, best['subject'], best['priority'])
+            result['fuzzy_matched'] = True
+            result['similarity'] = best['similarity']
+            logger.debug('银行账号「%s」模糊匹配到主体: %s（相似度: %.2f）',
+                         bank_account, best['subject'], best['similarity'])
             return result
 
-        if use_fuzzy:
-            target_norm = _normalize_account_str(bank_account)
-            fuzzy_matches = []
-            for row_idx in range(2, ws.max_row + 1):
-                account_val = ws.cell(row=row_idx, column=account_col).value
-                if account_val is None:
-                    continue
-                entry_norm = _normalize_account_str(account_val)
-                if not entry_norm:
-                    continue
-                sim = _calculate_string_similarity(target_norm, entry_norm)
-                if sim >= fuzzy_threshold:
-                    subject = ws.cell(row=row_idx, column=subject_col).value or ''
-
-                    priority = 0
-                    if priority_col is not None:
-                        priority_val = ws.cell(row=row_idx, column=priority_col).value
-                        if priority_val is not None:
-                            try:
-                                priority = int(priority_val)
-                            except (ValueError, TypeError):
-                                priority = 0
-
-                    extra_fields = {}
-                    for col_name in extra_col_names:
-                        col_idx = header_map[col_name]
-                        val = ws.cell(row=row_idx, column=col_idx).value
-                        extra_fields[col_name] = str(val).strip() if val is not None else ''
-
-                    fuzzy_matches.append({
-                        'subject': str(subject).strip() if subject else '',
-                        'priority': priority,
-                        'extra_fields': extra_fields,
-                        'similarity': sim,
-                        'row': row_idx,
-                    })
-
-            if fuzzy_matches:
-                fuzzy_matches.sort(key=lambda x: (x['similarity'], x['priority']), reverse=True)
-                best = fuzzy_matches[0]
-                result['subject'] = best['subject']
-                result['priority'] = best['priority']
-                result['extra_fields'] = best['extra_fields']
-                result['matched'] = True
-                result['fuzzy_matched'] = True
-                result['similarity'] = best['similarity']
-                wb.close()
-                cleanup_temp_file(tmp_path)
-                logger.debug('银行账号「%s」模糊匹配到主体: %s（相似度: %.2f）',
-                             bank_account, best['subject'], best['similarity'])
-                return result
-
-        wb.close()
-        logger.warning('银行账号「%s」在查找表中未找到对应主体', bank_account)
-    except Exception as e:
-        logger.error('读取主体查找表「%s」时发生错误: %s', lookup_file, e, exc_info=True)
-    finally:
-        cleanup_temp_file(tmp_path)
+    logger.warning('银行账号「%s」在查找表中未找到对应主体', bank_account)
     return result
 
 
@@ -1030,37 +1089,27 @@ def _calculate_string_similarity(s1: str, s2: str) -> float:
     return 1.0 - dp[len1][len2] / max_len
 
 
-def get_lookup_extra_fields(lookup_file) -> List[str]:
+def get_lookup_extra_fields(lookup_source) -> List[str]:
     """
     获取查找表中的扩展字段名称列表。
 
     Args:
-        lookup_file: 查找表文件路径
+        lookup_source: 查找表文件路径(str) 或 load_lookup_table() 返回的预加载 dict
 
     Returns:
         扩展字段名称列表
     """
-    if not lookup_file or not os.path.exists(lookup_file):
+    if isinstance(lookup_source, dict) and 'extra_field_names' in lookup_source:
+        return list(lookup_source['extra_field_names'])
+
+    if not lookup_source or not isinstance(lookup_source, str):
         return []
 
-    tmp_path = None
-    try:
-        wb, tmp_path = open_workbook_compat(lookup_file)
-        ws = wb.active
-        header_map = _detect_lookup_header_columns(ws)
-        wb.close()
-
-        extra_col_names = [
-            name for name in header_map
-            if name not in {'主体名称', '主体', 'subject', 'Subject',
-                           '银行账号', '账号', 'account', 'Account',
-                           '优先级', 'priority', 'Priority'}
-        ]
-        return sorted(extra_col_names)
-    except Exception:
+    if not os.path.exists(lookup_source):
         return []
-    finally:
-        cleanup_temp_file(tmp_path)
+
+    lookup = load_lookup_table(lookup_source)
+    return list(lookup['extra_field_names'])
 
 
 # ──────────────────────────────────────────────
@@ -1180,13 +1229,13 @@ STANDARD_COLUMNS = [
 ]
 
 
-def get_summary_columns(records=None, lookup_file=None):
+def get_summary_columns(records=None, lookup_source=None):
     """
     获取总表列名列表，包含标准列和扩展字段列。
 
     Args:
         records: 记录列表，用于从中提取扩展字段（可选）
-        lookup_file: 查找表文件路径，用于获取扩展字段（可选）
+        lookup_source: 查找表文件路径(str) 或 load_lookup_table() 返回的预加载 dict（可选）
 
     Returns:
         列名列表
@@ -1195,8 +1244,8 @@ def get_summary_columns(records=None, lookup_file=None):
 
     extra_fields = set()
 
-    if lookup_file:
-        lookup_extra = get_lookup_extra_fields(lookup_file)
+    if lookup_source:
+        lookup_extra = get_lookup_extra_fields(lookup_source)
         extra_fields.update(lookup_extra)
 
     if records:
@@ -1297,7 +1346,7 @@ def filter_incremental_records(new_rows, existing_keys):
     return incremental_rows, duplicate_count
 
 
-def merge_and_export_summary(existing_records, incremental_rows, script_dir, output_dir=None, lookup_file=None):
+def merge_and_export_summary(existing_records, incremental_rows, script_dir, output_dir=None, lookup_source=None):
     """
     合并历史记录与增量记录，并输出到总表。
 
@@ -1306,7 +1355,7 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir, out
         incremental_rows: 新增记录列表
         script_dir: 脚本目录
         output_dir: 输出目录，默认为script_dir
-        lookup_file: 查找表文件路径，用于获取扩展字段
+        lookup_source: 查找表文件路径(str) 或 load_lookup_table() 返回的预加载 dict
 
     Returns:
         str: 输出文件路径
@@ -1319,7 +1368,7 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir, out
         logger.warning('无任何记录可输出')
         return None
 
-    columns = get_summary_columns(merged_records, lookup_file)
+    columns = get_summary_columns(merged_records, lookup_source)
     df = pd.DataFrame(merged_records, columns=columns)
     output_path = get_summary_table_path(script_dir, output_dir)
 
@@ -1371,6 +1420,11 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
     lookup_missing = lookup_file is None
     if lookup_missing:
         logger.warning('未找到主体查找表，"主体"列将为空')
+        lookup_data = load_lookup_table(None)
+    else:
+        logger.info('正在预加载主体查找表...')
+        lookup_data = load_lookup_table(lookup_file)
+        logger.info('主体查找表预加载完成')
 
     existing_keys = set()
     existing_records = []
@@ -1417,7 +1471,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         if bank and bank in BANK_PROCESSORS:
             try:
                 processor = BANK_PROCESSORS[bank]
-                rows = processor(filepath, lookup_file)
+                rows = processor(filepath, lookup_data)
                 all_rows.extend(rows)
                 processed_files.append(filepath)
                 logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
@@ -1438,11 +1492,11 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
             incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
             new_record_count = len(incremental_rows)
             output_path = merge_and_export_summary(
-                existing_records, incremental_rows, script_dir, lookup_file=lookup_file
+                existing_records, incremental_rows, script_dir, lookup_source=lookup_data
             )
             final_rows = existing_records + incremental_rows
         else:
-            columns = get_summary_columns(all_rows, lookup_file)
+            columns = get_summary_columns(all_rows, lookup_data)
             df = pd.DataFrame(all_rows, columns=columns)
             output_path = get_summary_table_path(script_dir)
             df.to_excel(output_path, index=False, engine='openpyxl')
@@ -1453,7 +1507,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         logger.warning('未提取到任何银行流水记录')
         if existing_records:
             output_path = merge_and_export_summary(
-                existing_records, [], script_dir, lookup_file=lookup_file
+                existing_records, [], script_dir, lookup_source=lookup_data
             )
             final_rows = existing_records
 
@@ -1466,7 +1520,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
                         _cp_tag_summary.get('blacklist_hits', 0),
                         _cp_tag_summary.get('whitelist_hits', 0))
             if output_path:
-                base_columns = get_summary_columns(final_rows, lookup_file)
+                base_columns = get_summary_columns(final_rows, lookup_data)
                 cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
                 _cp_columns = base_columns + [
                     col for col in cp_extra_cols if col not in base_columns
@@ -7591,6 +7645,11 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     lookup_missing = lookup_file is None
     if lookup_missing:
         logger.warning('未找到主体查找表，"主体"列将为空')
+        lookup_data = load_lookup_table(None)
+    else:
+        logger.info('正在预加载主体查找表...')
+        lookup_data = load_lookup_table(lookup_file)
+        logger.info('主体查找表预加载完成')
 
     existing_keys = set()
     existing_records = []
@@ -7674,7 +7733,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         if bank and bank in BANK_PROCESSORS and bank in enabled_banks:
             try:
                 processor = BANK_PROCESSORS[bank]
-                rows = processor(filepath, lookup_file)
+                rows = processor(filepath, lookup_data)
 
                 if start_dt or end_dt:
                     original_len = len(rows)
@@ -7717,11 +7776,11 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
             new_record_count = len(incremental_rows)
             output_path = merge_and_export_summary(
-                existing_records, incremental_rows, script_dir, output_dir, lookup_file=lookup_file
+                existing_records, incremental_rows, script_dir, output_dir, lookup_source=lookup_data
             )
             final_rows = existing_records + incremental_rows
         else:
-            columns = get_summary_columns(all_rows, lookup_file)
+            columns = get_summary_columns(all_rows, lookup_data)
             df = pd.DataFrame(all_rows, columns=columns)
             output_path = get_summary_table_path(script_dir, output_dir)
             if output_dir:
@@ -7734,7 +7793,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         logger.warning('未提取到任何银行流水记录')
         if existing_records:
             output_path = merge_and_export_summary(
-                existing_records, [], script_dir, output_dir, lookup_file=lookup_file
+                existing_records, [], script_dir, output_dir, lookup_source=lookup_data
             )
             final_rows = existing_records
 
@@ -7747,7 +7806,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                         _cp_tag_summary.get('blacklist_hits', 0),
                         _cp_tag_summary.get('whitelist_hits', 0))
             if output_path:
-                base_columns = get_summary_columns(final_rows, lookup_file)
+                base_columns = get_summary_columns(final_rows, lookup_data)
                 cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
                 _cp_columns = base_columns + [
                     col for col in cp_extra_cols if col not in base_columns

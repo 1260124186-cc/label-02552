@@ -7,6 +7,7 @@ from conftest import _create_lookup_table
 from bankcheck import (
     find_lookup_file, get_subject, _normalize_account_str, _account_key,
     get_subject_info, get_lookup_extra_fields, get_summary_columns,
+    load_lookup_table, _resolve_lookup,
 )
 
 
@@ -562,7 +563,7 @@ class TestGetSummaryColumns:
             {'subject': '测试公司', 'account': '12345',
              'priority': 0, 'extra_fields': {'部门': '技术部'}},
         ])
-        columns = get_summary_columns(lookup_file=path)
+        columns = get_summary_columns(lookup_source=path)
         assert '部门' in columns
 
     def test_with_records_extra_fields(self):
@@ -589,7 +590,348 @@ class TestGetSummaryColumns:
              '摘要': '', '对方户名': '', '余额': 100, '交易流水号': 'T1',
              '记录字段': '值'},
         ]
-        columns = get_summary_columns(records=records, lookup_file=path)
+        columns = get_summary_columns(records=records, lookup_source=path)
         assert '部门' in columns
         assert '记录字段' in columns
+
+
+class TestLoadLookupTable:
+    """测试 load_lookup_table 函数"""
+
+    def test_load_basic(self, tmp_dir):
+        """基本加载测试"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        assert 'by_account' in lookup
+        assert 'all_entries' in lookup
+        assert 'extra_field_names' in lookup
+        assert len(lookup['all_entries']) == 2
+        assert len(lookup['by_account']) == 2
+
+    def test_load_none_file(self):
+        """None 文件路径返回空结构"""
+        lookup = load_lookup_table(None)
+        assert lookup['by_account'] == {}
+        assert lookup['all_entries'] == []
+        assert lookup['extra_field_names'] == []
+
+    def test_load_empty_string(self):
+        """空字符串路径返回空结构"""
+        lookup = load_lookup_table('')
+        assert lookup['by_account'] == {}
+        assert lookup['all_entries'] == []
+
+    def test_load_nonexistent_file(self):
+        """不存在的文件返回空结构"""
+        lookup = load_lookup_table('/nonexistent/path.xlsx')
+        assert lookup['by_account'] == {}
+        assert lookup['all_entries'] == []
+
+    def test_load_priority_sorted(self, tmp_dir):
+        """加载后同账号条目按优先级降序排列"""
+        path = os.path.join(tmp_dir, 'lookup.xlsx')
+        _create_lookup_table_with_extra(path, [
+            {'subject': '低优先级主体', 'account': '12345', 'priority': 1},
+            {'subject': '高优先级主体', 'account': '12345', 'priority': 10},
+            {'subject': '中优先级主体', 'account': '12345', 'priority': 5},
+        ])
+        lookup = load_lookup_table(path)
+        key = _account_key('12345')
+        entries = lookup['by_account'][key]
+        assert entries[0]['subject'] == '高优先级主体'
+        assert entries[0]['priority'] == 10
+        assert entries[1]['subject'] == '中优先级主体'
+        assert entries[1]['priority'] == 5
+        assert entries[2]['subject'] == '低优先级主体'
+        assert entries[2]['priority'] == 1
+
+    def test_load_extra_field_names(self, tmp_dir):
+        """加载扩展字段名称"""
+        path = os.path.join(tmp_dir, 'lookup.xlsx')
+        _create_lookup_table_with_extra(path, [
+            {'subject': '测试公司', 'account': '12345',
+             'priority': 0, 'extra_fields': {'部门': '技术部', '项目编号': 'PRJ001'}},
+        ])
+        lookup = load_lookup_table(path)
+        assert '部门' in lookup['extra_field_names']
+        assert '项目编号' in lookup['extra_field_names']
+        assert len(lookup['extra_field_names']) == 2
+
+    def test_load_extra_field_names_sorted(self, tmp_dir):
+        """扩展字段名称按字母排序"""
+        path = os.path.join(tmp_dir, 'lookup.xlsx')
+        _create_lookup_table_with_extra(path, [
+            {'subject': '测试公司', 'account': '12345',
+             'priority': 0, 'extra_fields': {'Z部门': '测试', 'A项目': '测试'}},
+        ])
+        lookup = load_lookup_table(path)
+        assert lookup['extra_field_names'][0] == 'A项目'
+        assert lookup['extra_field_names'][1] == 'Z部门'
+
+    def test_load_account_normalization(self, tmp_dir):
+        """账号在加载时被规范化处理"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'), [
+            ('测试公司', '01090312345678901'),
+        ])
+        lookup = load_lookup_table(path)
+        key = _account_key('01090312345678901')
+        assert key in lookup['by_account']
+        key2 = _account_key(1090312345678901)
+        assert key2 in lookup['by_account']
+        assert key == key2
+
+    def test_load_no_extra_fields(self, tmp_dir):
+        """没有扩展字段时 extra_field_names 为空列表"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        assert lookup['extra_field_names'] == []
+
+    def test_load_skip_none_account(self, tmp_dir):
+        """跳过账号为空的行"""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws['A1'] = '主体名称'
+        ws['B1'] = '银行账号'
+        ws['A2'] = '公司A'
+        ws['B2'] = '12345'
+        ws['A3'] = '公司B'
+        ws['B3'] = None
+        ws['A4'] = '公司C'
+        ws['B4'] = '67890'
+        path = os.path.join(tmp_dir, 'lookup.xlsx')
+        wb.save(path)
+        wb.close()
+
+        lookup = load_lookup_table(path)
+        assert len(lookup['all_entries']) == 2
+
+    def test_source_file_preserved(self, tmp_dir):
+        """_source_file 字段保留原始路径"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        assert lookup['_source_file'] == path
+
+
+class TestResolveLookup:
+    """测试 _resolve_lookup 辅助函数"""
+
+    def test_resolve_dict(self, tmp_dir):
+        """传入预加载字典时直接返回"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        resolved = _resolve_lookup(lookup)
+        assert resolved is lookup
+
+    def test_resolve_file_path(self, tmp_dir):
+        """传入文件路径时加载并返回"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        resolved = _resolve_lookup(path)
+        assert 'by_account' in resolved
+        assert len(resolved['all_entries']) == 2
+
+    def test_resolve_none(self):
+        """传入 None 返回空结构"""
+        resolved = _resolve_lookup(None)
+        assert resolved['by_account'] == {}
+
+
+class TestGetSubjectWithPreloadedLookup:
+    """测试 get_subject 使用预加载查找表"""
+
+    def test_found_with_preloaded(self, tmp_dir):
+        """使用预加载字典精确匹配"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        result = get_subject('01090312345678901', lookup)
+        assert result == '北京XX科技有限公司'
+
+    def test_not_found_with_preloaded(self, tmp_dir):
+        """使用预加载字典未匹配到"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        result = get_subject('99999999999', lookup)
+        assert result == ''
+
+    def test_none_account_with_preloaded(self, tmp_dir):
+        """使用预加载字典但账号为 None"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        result = get_subject(None, lookup)
+        assert result == ''
+
+    def test_empty_lookup_dict(self):
+        """使用空预加载字典"""
+        empty_lookup = load_lookup_table(None)
+        result = get_subject('12345', empty_lookup)
+        assert result == ''
+
+
+class TestGetSubjectInfoWithPreloadedLookup:
+    """测试 get_subject_info 使用预加载查找表"""
+
+    def test_basic_info_preloaded(self, tmp_dir):
+        """使用预加载字典获取基本信息"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        info = get_subject_info('01090312345678901', lookup)
+        assert info['subject'] == '北京XX科技有限公司'
+        assert info['matched'] is True
+        assert info['fuzzy_matched'] is False
+        assert info['similarity'] == 1.0
+
+    def test_priority_with_preloaded(self, tmp_dir):
+        """使用预加载字典按优先级返回最高的"""
+        path = os.path.join(tmp_dir, 'lookup.xlsx')
+        _create_lookup_table_with_extra(path, [
+            {'subject': '低优先级主体', 'account': '12345', 'priority': 1},
+            {'subject': '高优先级主体', 'account': '12345', 'priority': 10},
+        ])
+        lookup = load_lookup_table(path)
+        info = get_subject_info('12345', lookup)
+        assert info['subject'] == '高优先级主体'
+        assert info['priority'] == 10
+
+    def test_extra_fields_with_preloaded(self, tmp_dir):
+        """使用预加载字典获取扩展字段"""
+        path = os.path.join(tmp_dir, 'lookup.xlsx')
+        _create_lookup_table_with_extra(path, [
+            {'subject': '测试公司', 'account': '12345',
+             'priority': 0, 'extra_fields': {'部门': '技术部', '项目编号': 'PRJ001'}},
+        ])
+        lookup = load_lookup_table(path)
+        info = get_subject_info('12345', lookup)
+        assert info['extra_fields']['部门'] == '技术部'
+        assert info['extra_fields']['项目编号'] == 'PRJ001'
+
+    def test_fuzzy_match_with_preloaded(self, tmp_dir):
+        """使用预加载字典进行模糊匹配"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'), [
+            ('测试公司', '1234567890'),
+        ])
+        lookup = load_lookup_table(path)
+        info = get_subject_info('123456789', lookup, use_fuzzy=True)
+        assert info['matched'] is True
+        assert info['fuzzy_matched'] is True
+        assert info['subject'] == '测试公司'
+
+    def test_not_found_info_preloaded(self, tmp_dir):
+        """使用预加载字典未找到"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        info = get_subject_info('99999', lookup)
+        assert info['matched'] is False
+        assert info['subject'] == ''
+
+    def test_empty_lookup_preloaded(self):
+        """使用空预加载字典"""
+        empty_lookup = load_lookup_table(None)
+        info = get_subject_info('12345', empty_lookup)
+        assert info['matched'] is False
+
+
+class TestGetLookupExtraFieldsWithPreloadedLookup:
+    """测试 get_lookup_extra_fields 使用预加载查找表"""
+
+    def test_with_preloaded_dict(self, tmp_dir):
+        """使用预加载字典获取扩展字段"""
+        path = os.path.join(tmp_dir, 'lookup.xlsx')
+        _create_lookup_table_with_extra(path, [
+            {'subject': '测试公司', 'account': '12345',
+             'priority': 0, 'extra_fields': {'部门': '技术部', '项目编号': 'PRJ001'}},
+        ])
+        lookup = load_lookup_table(path)
+        fields = get_lookup_extra_fields(lookup)
+        assert '部门' in fields
+        assert '项目编号' in fields
+
+    def test_no_extra_preloaded(self, tmp_dir):
+        """使用无扩展字段的预加载字典"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        fields = get_lookup_extra_fields(lookup)
+        assert fields == []
+
+    def test_empty_dict_preloaded(self):
+        """使用空预加载字典"""
+        empty_lookup = load_lookup_table(None)
+        fields = get_lookup_extra_fields(empty_lookup)
+        assert fields == []
+
+
+class TestBackwardCompatibility:
+    """测试向后兼容性 - 传入文件路径仍然有效"""
+
+    def test_get_subject_with_file_path(self, tmp_dir):
+        """get_subject 传入文件路径仍然可用"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        result = get_subject('01090312345678901', path)
+        assert result == '北京XX科技有限公司'
+
+    def test_get_subject_info_with_file_path(self, tmp_dir):
+        """get_subject_info 传入文件路径仍然可用"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        info = get_subject_info('01090312345678901', path)
+        assert info['matched'] is True
+        assert info['subject'] == '北京XX科技有限公司'
+
+    def test_get_lookup_extra_fields_with_file_path(self, tmp_dir):
+        """get_lookup_extra_fields 传入文件路径仍然可用"""
+        path = os.path.join(tmp_dir, 'lookup.xlsx')
+        _create_lookup_table_with_extra(path, [
+            {'subject': '测试公司', 'account': '12345',
+             'priority': 0, 'extra_fields': {'部门': '技术部'}},
+        ])
+        fields = get_lookup_extra_fields(path)
+        assert '部门' in fields
+
+    def test_get_summary_columns_with_file_path(self, tmp_dir):
+        """get_summary_columns 传入文件路径仍然可用"""
+        path = os.path.join(tmp_dir, 'lookup.xlsx')
+        _create_lookup_table_with_extra(path, [
+            {'subject': '测试公司', 'account': '12345',
+             'priority': 0, 'extra_fields': {'部门': '技术部'}},
+        ])
+        columns = get_summary_columns(lookup_source=path)
+        assert '部门' in columns
+
+
+class TestPerformancePreloadVsFilePath:
+    """测试预加载性能优于每次打开文件"""
+
+    def test_repeated_queries_preloaded(self, tmp_dir):
+        """预加载字典上的重复查询应该快速且一致"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+
+        for _ in range(100):
+            result = get_subject('01090312345678901', lookup)
+            assert result == '北京XX科技有限公司'
+
+    def test_preloaded_dict_not_modified(self, tmp_dir):
+        """查询不应修改预加载字典的内容"""
+        path = _create_lookup_table(os.path.join(tmp_dir, 'lookup.xlsx'))
+        lookup = load_lookup_table(path)
+        original_entries = len(lookup['all_entries'])
+        original_by_account_keys = set(lookup['by_account'].keys())
+
+        get_subject('01090312345678901', lookup)
+        get_subject_info('38812345678', lookup)
+
+        assert len(lookup['all_entries']) == original_entries
+        assert set(lookup['by_account'].keys()) == original_by_account_keys
+
+    def test_extra_fields_copy_independent(self, tmp_dir):
+        """返回的 extra_fields 应该是副本，不影响预加载字典"""
+        path = os.path.join(tmp_dir, 'lookup.xlsx')
+        _create_lookup_table_with_extra(path, [
+            {'subject': '测试公司', 'account': '12345',
+             'priority': 0, 'extra_fields': {'部门': '技术部'}},
+        ])
+        lookup = load_lookup_table(path)
+
+        info = get_subject_info('12345', lookup)
+        info['extra_fields']['部门'] = '修改后的部门'
+
+        key = _account_key('12345')
+        assert lookup['by_account'][key][0]['extra_fields']['部门'] == '技术部'
 
