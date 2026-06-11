@@ -535,9 +535,8 @@ def convert_xls_to_xlsx(xls_path):
                 ws.cell(row=row_idx + 1, column=col_idx + 1, value=cell_value)
 
     # 保存为临时 .xlsx 文件
-    tmp_dir = tempfile.gettempdir()
-    base_name = os.path.splitext(os.path.basename(xls_path))[0]
-    tmp_path = os.path.join(tmp_dir, f'{base_name}_converted.xlsx')
+    fd, tmp_path = tempfile.mkstemp(suffix='.xlsx', prefix='bankcheck_')
+    os.close(fd)
     wb.save(tmp_path)
     wb.close()
     xls_book.release_resources()
