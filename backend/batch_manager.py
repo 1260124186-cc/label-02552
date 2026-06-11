@@ -21,6 +21,18 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 
+try:
+    from i18n import t, set_language, get_language
+    HAS_I18N = True
+except ImportError:
+    HAS_I18N = False
+    def t(key, **kwargs):
+        return key
+    def set_language(lang):
+        return False
+    def get_language():
+        return 'zh_CN'
+
 
 BATCH_DB_FILENAME = 'batch_history.db'
 HISTORY_DIR_NAME = 'history'
@@ -307,7 +319,8 @@ class BatchManager:
             return ''
 
         report_content = self._build_report_content(batch_info, result_data)
-        report_path = os.path.join(batch_info.batch_dir, f"{batch_id}_检验报告.md")
+        report_filename = t('report.inspection_report_filename', batch_id=batch_id)
+        report_path = os.path.join(batch_info.batch_dir, report_filename)
 
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write(report_content)
@@ -316,41 +329,44 @@ class BatchManager:
         self._update_batch(batch_info)
 
         logger = get_logger()
-        logger.info('检验报告已生成: %s', report_path)
+        logger.info(t('info.report_generated', path=report_path))
         return report_path
 
     def _build_report_content(self, batch_info: BatchInfo, result_data: Dict[str, Any]) -> str:
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         status_icon = '✅' if batch_info.status == 'success' else '⚠️' if batch_info.status == 'warning' else '❌'
 
-        content = f"""# 银行流水检验报告
+        mode_text = t('report.mode_incremental') if batch_info.incremental_mode else t('report.mode_full')
+        operator_text = batch_info.operator or t('report.not_specified')
 
-**批次号**: {batch_info.batch_id}
-**状态**: {status_icon} {batch_info.status}
-**开始时间**: {batch_info.start_time}
-**结束时间**: {batch_info.end_time or now}
-**操作员**: {batch_info.operator or '未指定'}
-**输入文件夹**: {batch_info.input_folder}
+        content = f"""# {t('report.title')}
 
----
-
-## 一、处理统计
-
-| 指标 | 数值 |
-|------|------|
-| 处理文件数 | {batch_info.processed_files} |
-| 未识别文件数 | {batch_info.unprocessed_files} |
-| 处理出错文件数 | {batch_info.error_files} |
-| 运行模式 | {'增量合并' if batch_info.incremental_mode else '全量覆盖'} |
-| 总记录数 | {batch_info.total_records} |
-| 新增记录数 | {batch_info.new_records} |
-| 重复记录数 | {batch_info.duplicate_records} |
+**{t('report.batch_id')}**: {batch_info.batch_id}
+**{t('report.status')}**: {status_icon} {batch_info.status}
+**{t('report.start_time')}**: {batch_info.start_time}
+**{t('report.end_time')}**: {batch_info.end_time or now}
+**{t('report.operator')}**: {operator_text}
+**{t('report.input_folder')}**: {batch_info.input_folder}
 
 ---
 
-## 二、文件清单
+## {t('report.section_processing_stats')}
 
-### 已处理文件
+| {t('report.metric')} | {t('report.value')} |
+|----------------------|--------------------|
+| {t('report.processed_files')} | {batch_info.processed_files} |
+| {t('report.unprocessed_files')} | {batch_info.unprocessed_files} |
+| {t('report.error_files')} | {batch_info.error_files} |
+| {t('report.run_mode')} | {mode_text} |
+| {t('report.total_records')} | {batch_info.total_records} |
+| {t('report.new_records')} | {batch_info.new_records} |
+| {t('report.duplicate_records')} | {batch_info.duplicate_records} |
+
+---
+
+## {t('report.section_file_list')}
+
+### {t('report.subsection_processed')}
 """
 
         processed_files = result_data.get('processed_files', [])
@@ -358,28 +374,28 @@ class BatchManager:
             for f in processed_files:
                 content += f"- {os.path.basename(f)}\n"
         else:
-            content += "无\n"
+            content += f"{t('report.none')}\n"
 
         unprocessed_files = result_data.get('unprocessed_files', [])
         if unprocessed_files:
-            content += "\n### 未识别文件\n"
+            content += f"\n### {t('report.subsection_unrecognized')}\n"
             for f in unprocessed_files:
                 content += f"- {os.path.basename(f)}\n"
 
         error_files = result_data.get('error_files', [])
         if error_files:
-            content += "\n### 处理出错文件\n"
+            content += f"\n### {t('report.subsection_errors')}\n"
             for f, err in error_files:
                 content += f"- {os.path.basename(f)}: {err}\n"
 
         content += f"""
 ---
 
-## 三、归档文件
+## {t('report.section_archived')}
 
-- **总表**: [{os.path.basename(batch_info.summary_table_path)}]({batch_info.summary_table_path})
-- **日志**: [{os.path.basename(batch_info.log_file_path)}]({batch_info.log_file_path})
-- **归档目录**: {batch_info.batch_dir}
+- **{t('report.summary_table')}**: [{os.path.basename(batch_info.summary_table_path)}]({batch_info.summary_table_path})
+- **{t('report.log_file')}**: [{os.path.basename(batch_info.log_file_path)}]({batch_info.log_file_path})
+- **{t('report.archive_dir')}**: {batch_info.batch_dir}
 
 """
 
@@ -387,7 +403,7 @@ class BatchManager:
             content += f"""
 ---
 
-## 四、错误信息
+## {t('report.section_errors')}
 
 ```
 {batch_info.error_message}
@@ -398,12 +414,12 @@ class BatchManager:
             content += f"""
 ---
 
-## 五、备注
+## {t('report.section_remarks')}
 
 {batch_info.remark}
 """
 
-        content += f"\n---\n*报告生成时间: {now}*\n"
+        content += f"\n---\n*{t('report.generated_at', time=now)}*\n"
         return content
 
     def finish_batch(self, batch_id: str, result_data: Dict[str, Any],

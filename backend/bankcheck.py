@@ -34,6 +34,22 @@ import pandas as pd
 import yaml
 
 try:
+    from i18n import t, set_language, get_language, get_available_languages, init_i18n
+    HAS_I18N = True
+except ImportError:
+    HAS_I18N = False
+    def t(key, **kwargs):
+        return key
+    def set_language(lang):
+        return False
+    def get_language():
+        return 'zh_CN'
+    def get_available_languages():
+        return {'zh_CN': '简体中文'}
+    def init_i18n(lang=None):
+        return None
+
+try:
     import database as db_module
     HAS_DATABASE = True
 except ImportError:
@@ -76,10 +92,12 @@ except (ImportError, ModuleNotFoundError):
     tk = None
 
 
-def cli_askdirectory(title='请选择文件夹'):
+def cli_askdirectory(title=None):
     """命令行模式下让用户输入文件夹路径"""
+    if title is None:
+        title = t('gui.select_folder')
     print(f'\n{title}')
-    path = input('请输入文件夹路径: ').strip().strip('"').strip("'")
+    path = input(t('cli.enter_folder_path')).strip().strip('"').strip("'")
     if path and os.path.isdir(path):
         return path
     return ''
@@ -92,25 +110,29 @@ def cli_showinfo(title, message):
 
 def cli_showwarning(title, message):
     """命令行模式下打印警告"""
-    print(f'\n[警告 - {title}] {message}')
+    print(f'\n[{t("gui.warning")} - {title}] {message}')
 
 
-def cli_askfile(title='请选择文件'):
+def cli_askfile(title=None):
     """命令行模式下让用户输入文件路径"""
+    if title is None:
+        title = t('gui.select_file')
     print(f'\n{title}')
-    path = input('请输入文件路径: ').strip().strip('"').strip("'")
+    path = input(t('cli.enter_file_path')).strip().strip('"').strip("'")
     if path and os.path.isfile(path):
         return path
     return ''
 
 
-def gui_askdirectory(title='请选择银行流水文件夹'):
+def gui_askdirectory(title=None):
     """GUI 模式选择文件夹"""
+    if title is None:
+        title = t('gui.select_folder')
     root = tk.Tk()
     root.withdraw()
     folder = filedialog.askdirectory(title=title)
     if not folder:
-        messagebox.showinfo('提示', '未选择文件夹，程序退出。')
+        messagebox.showinfo(t('gui.info'), t('gui.no_folder_selected'))
     root.destroy()
     return folder
 
@@ -131,36 +153,38 @@ def gui_showwarning(title, message):
     root.destroy()
 
 
-def gui_askfile(title='请选择总表文件'):
+def gui_askfile(title=None):
     """GUI 模式选择文件"""
+    if title is None:
+        title = t('gui.select_summary_file')
     root = tk.Tk()
     root.withdraw()
     filepath = filedialog.askopenfilename(
         title=title,
-        filetypes=[('Excel 文件', '*.xlsx *.xls'), ('所有文件', '*.*')],
+        filetypes=[(t('gui.excel_files'), '*.xlsx *.xls'), (t('gui.all_files'), '*.*')],
     )
     if not filepath:
-        messagebox.showinfo('提示', '未选择文件，程序退出。')
+        messagebox.showinfo(t('gui.info'), t('gui.no_file_selected'))
     root.destroy()
     return filepath
 
 
 def cli_askmode():
     """命令行模式下让用户选择运行模式"""
-    print('\n请选择运行模式：')
-    print('  1) 主流程：处理银行流水文件夹，输出总表')
-    print('  2) 变更对比：对比两次总表的差异（新增/删除/变更）')
-    print('  3) 监控面板：运行监控与告警管理')
-    print('  4) 定时调度：定时批处理调度管理')
-    print('  5) 财务导出：按用友/金蝶等模板导出凭证或日记账')
-    print('  6) 数据库查询：按主体/账号/时间范围查询流水记录')
-    print('  7) 数据库统计：查看数据汇总统计信息')
-    print('  8) 批次管理：查看历史批次与版本回溯')
-    print('  9) 预设管理：管理任务配置预设，一键加载常用方案')
-    print('  10)主体汇总分析：按主体/银行/月份统计收支净额与笔数')
-    print('  11)余额连续性校验：逐笔核对余额连续性，识别断裂或跳变')
-    print('  12)重复交易检测：跨文件去重与疑似重复标记')
-    choice = input('请输入选项（1-12，直接回车默认为 1）: ').strip()
+    print('\n' + t('cli.select_mode'))
+    print(t('cli.option_pipeline'))
+    print(t('cli.option_diff'))
+    print(t('cli.option_monitor'))
+    print(t('cli.option_scheduler'))
+    print(t('cli.option_export'))
+    print(t('cli.option_db_query'))
+    print(t('cli.option_db_stats'))
+    print(t('cli.option_batch_history'))
+    print(t('cli.option_preset'))
+    print(t('cli.option_subject_summary'))
+    print(t('cli.option_balance_check'))
+    print(t('cli.option_duplicate_check'))
+    choice = input(t('cli.enter_choice')).strip()
     if choice == '2':
         return 'diff'
     elif choice == '3':
@@ -202,8 +226,8 @@ def gui_askmode():
         root = tk.Tk()
         root.withdraw()
         choice = messagebox.askyesnocancel(
-            '选择运行模式',
-            '是 = 主流程：处理流水文件夹，输出总表\n\n否 = 变更对比：对比两次总表的差异\n\n取消 = 财务导出：按用友/金蝶等模板导出\n\n提示：\n- 使用命令行参数 --scheduler-menu 可进入定时调度管理\n- 使用命令行参数 --export 可直接进入财务导出\n- 使用命令行参数 --monitor 可进入监控面板\n- 使用命令行参数 --preset-menu 可进入预设管理',
+            t('gui.select_mode'),
+            t('gui.mode_selection_hint'),
         )
         root.destroy()
         if choice is None:
@@ -223,7 +247,7 @@ def _gui_askmode_full():
         root.destroy()
         raise RuntimeError('Mock Tk detected')
 
-    root.title('银行流水检验工具 - 选择功能')
+    root.title(t('gui.mode_window_title'))
     root.geometry('480x680')
     root.resizable(False, False)
 
@@ -233,24 +257,24 @@ def _gui_askmode_full():
         result['mode'] = mode
         root.destroy()
 
-    tk.Label(root, text='请选择运行模式', font=('Arial', 16, 'bold')).pack(pady=20)
+    tk.Label(root, text=t('gui.select_mode'), font=('Arial', 16, 'bold')).pack(pady=20)
 
     button_frame = tk.Frame(root)
     button_frame.pack(pady=10)
 
     modes = [
-        ('主流程', 'pipeline', '处理银行流水文件夹，输出总表', '#4CAF50'),
-        ('变更对比', 'diff', '对比两次总表的差异', '#2196F3'),
-        ('监控面板', 'monitor', '运行监控与告警管理', '#FF9800'),
-        ('定时调度', 'scheduler', '定时批处理调度管理', '#9C27B0'),
-        ('财务导出', 'export', '按用友/金蝶等模板导出', '#607D8B'),
-        ('主体汇总', 'subject_summary', '按主体/银行/月份统计', '#3F51B5'),
-        ('余额校验', 'balance_check', '逐笔核对余额连续性', '#8BC34A'),
-        ('重复检测', 'duplicate_check', '跨文件去重与疑似重复标记', '#F44336'),
-        ('数据库查询', 'db_query', '按条件查询流水记录', '#00BCD4'),
-        ('数据库统计', 'db_stats', '查看数据汇总统计', '#795548'),
-        ('批次管理', 'batch_history', '历史批次与版本回溯', '#E91E63'),
-        ('预设管理', 'preset', '管理任务配置预设', '#FF5722'),
+        (t('modes.pipeline_name'), 'pipeline', t('modes.pipeline_desc'), '#4CAF50'),
+        (t('modes.diff_name'), 'diff', t('modes.diff_desc'), '#2196F3'),
+        (t('modes.monitor_name'), 'monitor', t('modes.monitor_desc'), '#FF9800'),
+        (t('modes.scheduler_name'), 'scheduler', t('modes.scheduler_desc'), '#9C27B0'),
+        (t('modes.export_name'), 'export', t('modes.export_desc'), '#607D8B'),
+        (t('modes.subject_summary_name'), 'subject_summary', t('modes.subject_summary_desc'), '#3F51B5'),
+        (t('modes.balance_check_name'), 'balance_check', t('modes.balance_check_desc'), '#8BC34A'),
+        (t('modes.duplicate_check_name'), 'duplicate_check', t('modes.duplicate_check_desc'), '#F44336'),
+        (t('modes.db_query_name'), 'db_query', t('modes.db_query_desc'), '#00BCD4'),
+        (t('modes.db_stats_name'), 'db_stats', t('modes.db_stats_desc'), '#795548'),
+        (t('modes.batch_history_name'), 'batch_history', t('modes.batch_history_desc'), '#E91E63'),
+        (t('modes.preset_name'), 'preset', t('modes.preset_desc'), '#FF5722'),
     ]
 
     for i, (name, mode, desc, color) in enumerate(modes):
@@ -273,7 +297,7 @@ def _gui_askmode_full():
 
     tk.Button(
         root,
-        text='退出',
+        text=t('gui.exit'),
         width=12,
         command=lambda: select_mode(None),
         bg='#f44336',

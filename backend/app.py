@@ -15,6 +15,25 @@ from flask import (Flask, render_template, request, jsonify,
 
 import lookup_manager as lm
 
+try:
+    from i18n import t, set_language, get_language, get_available_languages, init_i18n
+    HAS_I18N = True
+except ImportError:
+    HAS_I18N = False
+    def t(key, **kwargs):
+        return key
+    def set_language(lang):
+        return False
+    def get_language():
+        return 'zh_CN'
+    def get_available_languages():
+        return {'zh_CN': '简体中文'}
+    def init_i18n(lang=None):
+        return None
+
+if HAS_I18N:
+    init_i18n()
+
 
 def setup_logging():
     log_dir = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +68,16 @@ app = Flask(__name__,
             template_folder=os.path.join(os.path.dirname(__file__), 'templates'),
             static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.secret_key = 'bankcheck_lookup_manager_secret_key_2024'
+
+
+@app.context_processor
+def inject_i18n():
+    """注入多语言函数到模板上下文"""
+    return {
+        't': t,
+        'current_language': get_language(),
+        'available_languages': get_available_languages(),
+    }
 
 
 @app.route('/')
@@ -96,7 +125,7 @@ def api_get_entry(account):
         })
     return jsonify({
         'success': False,
-        'message': '未找到该账号对应的条目'
+        'message': t('api.entry_not_found')
     }), 404
 
 
@@ -176,7 +205,7 @@ def api_export():
         logger.error('导出失败: %s', e, exc_info=True)
         return jsonify({
             'success': False,
-            'message': f'导出失败: {str(e)}'
+            'message': t('api.export_failed', error=str(e))
         }), 500
 
 
@@ -187,14 +216,14 @@ def api_import():
         if 'file' not in request.files:
             return jsonify({
                 'success': False,
-                'message': '请选择要导入的文件'
+                'message': t('api.please_select_file')
             }), 400
 
         file = request.files['file']
         if file.filename == '':
             return jsonify({
                 'success': False,
-                'message': '请选择要导入的文件'
+                'message': t('api.please_select_file')
             }), 400
 
         overwrite = request.form.get('overwrite', 'false').lower() == 'true'
@@ -227,7 +256,7 @@ def api_import():
         logger.error('导入失败: %s', e, exc_info=True)
         return jsonify({
             'success': False,
-            'message': f'导入失败: {str(e)}'
+            'message': t('api.import_failed', error=str(e))
         }), 500
 
 
@@ -311,11 +340,37 @@ def web_import():
         return redirect(url_for('index'))
 
 
+@app.route('/api/language', methods=['GET'])
+def api_get_language():
+    """获取当前语言和可用语言"""
+    return jsonify({
+        'success': True,
+        'current_language': get_language(),
+        'available_languages': get_available_languages()
+    })
+
+
+@app.route('/api/language/<lang>', methods=['POST'])
+def api_set_language(lang):
+    """设置语言"""
+    success = set_language(lang)
+    if success:
+        return jsonify({
+            'success': True,
+            'message': t('api.language_changed'),
+            'language': lang
+        })
+    return jsonify({
+        'success': False,
+        'message': t('api.unsupported_language')
+    }), 400
+
+
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({
         'success': False,
-        'message': '接口不存在'
+        'message': t('api.endpoint_not_found')
     }), 404
 
 
@@ -324,7 +379,7 @@ def internal_error(error):
     logger.error('服务器内部错误: %s', error, exc_info=True)
     return jsonify({
         'success': False,
-        'message': '服务器内部错误'
+        'message': t('api.internal_error')
     }), 500
 
 
@@ -334,9 +389,9 @@ def main():
     debug = True
 
     logger.info('=' * 60)
-    logger.info('主体查找表 Web 管理系统启动')
-    logger.info('访问地址: http://%s:%d', host, port)
-    logger.info('查找表路径: %s', lm.get_lookup_file_path())
+    logger.info(t('web_ui.app_started'))
+    logger.info(t('web_ui.access_url', host=host, port=port))
+    logger.info(t('web_ui.lookup_file_path', path=lm.get_lookup_file_path()))
     logger.info('=' * 60)
 
     app.run(host=host, port=port, debug=debug)
