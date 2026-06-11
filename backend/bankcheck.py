@@ -57,6 +57,12 @@ except ImportError:
     db_module = None
 
 try:
+    import perf_profiler
+    HAS_PERF_PROFILER = True
+except ImportError:
+    HAS_PERF_PROFILER = False
+
+try:
     import batch_manager as batch_module
     HAS_BATCH_MANAGER = True
 except ImportError:
@@ -561,15 +567,27 @@ def open_workbook_compat(filepath):
             filepath, ext_format, magic_format, actual_format,
         )
 
-    if actual_format == 'xls':
-        tmp_path = convert_xls_to_xlsx(filepath)
-        wb = openpyxl.load_workbook(tmp_path, data_only=True)
-    else:
-        if ext_format == 'xlsx' or ext_format == 'unknown':
-            wb = openpyxl.load_workbook(filepath, data_only=True)
+    _profiler_ctx = None
+    if HAS_PERF_PROFILER:
+        _profiler_ctx = perf_profiler.get_profiler().measure_file_open(
+            filepath, is_xls_convert=(actual_format == 'xls')
+        )
+        _profiler_ctx.__enter__()
+
+    try:
+        if actual_format == 'xls':
+            tmp_path = convert_xls_to_xlsx(filepath)
+            wb = openpyxl.load_workbook(tmp_path, data_only=True)
         else:
-            with open(filepath, 'rb') as f:
-                wb = openpyxl.load_workbook(f, data_only=True)
+            if ext_format == 'xlsx' or ext_format == 'unknown':
+                wb = openpyxl.load_workbook(filepath, data_only=True)
+            else:
+                with open(filepath, 'rb') as f:
+                    wb = openpyxl.load_workbook(f, data_only=True)
+    finally:
+        if _profiler_ctx is not None:
+            _profiler_ctx.__exit__(None, None, None)
+
     return wb, tmp_path
 
 
@@ -801,6 +819,11 @@ class GenericBankParser:
         subject = subject_info.get('subject', '')
         extra_fields = subject_info.get('extra_fields', {})
 
+        _traversal_start = None
+        if HAS_PERF_PROFILER:
+            import time as _time
+            _traversal_start = _time.perf_counter()
+
         rows = []
         columns = self.rule.columns
         start_row = self.rule.start_row
@@ -843,6 +866,15 @@ class GenericBankParser:
                 record[key] = val
 
             rows.append(record)
+
+        if _traversal_start is not None:
+            import time as _time
+            _duration_ms = (_time.perf_counter() - _traversal_start) * 1000
+            perf_profiler.get_profiler().record_row_traversal(
+                filepath, sheet_name,
+                ws.max_row - start_row + 1, _duration_ms,
+                self.rule.bank_name, len(rows),
+            )
 
         if rows:
             self.logger.info(
@@ -1309,6 +1341,11 @@ def get_subject_info(bank_account, lookup_source, use_fuzzy=False, fuzzy_thresho
     """
     logger = get_logger()
 
+    _lookup_start = None
+    if HAS_PERF_PROFILER:
+        import time as _time
+        _lookup_start = _time.perf_counter()
+
     result = {
         'subject': '',
         'account': bank_account,
@@ -1321,6 +1358,12 @@ def get_subject_info(bank_account, lookup_source, use_fuzzy=False, fuzzy_thresho
 
     if bank_account is None:
         logger.warning('银行账号为空，无法查找主体')
+        if _lookup_start is not None:
+            import time as _time
+            _duration_ms = (_time.perf_counter() - _lookup_start) * 1000
+            perf_profiler.get_profiler().record_lookup_hit(
+                str(bank_account), _duration_ms, hit=False
+            )
         return result
 
     lookup = _resolve_lookup(lookup_source)
@@ -1331,6 +1374,12 @@ def get_subject_info(bank_account, lookup_source, use_fuzzy=False, fuzzy_thresho
                            source_file, bank_account)
         else:
             logger.warning('主体查找表不存在或未指定，银行账号「%s」的主体将为空', bank_account)
+        if _lookup_start is not None:
+            import time as _time
+            _duration_ms = (_time.perf_counter() - _lookup_start) * 1000
+            perf_profiler.get_profiler().record_lookup_hit(
+                str(bank_account), _duration_ms, hit=False
+            )
         return result
 
     target_key = _account_key(bank_account)
@@ -1345,6 +1394,12 @@ def get_subject_info(bank_account, lookup_source, use_fuzzy=False, fuzzy_thresho
         result['similarity'] = 1.0
         logger.debug('银行账号「%s」匹配到主体: %s（优先级: %d）',
                      bank_account, best['subject'], best['priority'])
+        if _lookup_start is not None:
+            import time as _time
+            _duration_ms = (_time.perf_counter() - _lookup_start) * 1000
+            perf_profiler.get_profiler().record_lookup_hit(
+                str(bank_account), _duration_ms, hit=True
+            )
         return result
 
     if use_fuzzy:
@@ -1374,9 +1429,22 @@ def get_subject_info(bank_account, lookup_source, use_fuzzy=False, fuzzy_thresho
             result['similarity'] = best['similarity']
             logger.debug('银行账号「%s」模糊匹配到主体: %s（相似度: %.2f）',
                          bank_account, best['subject'], best['similarity'])
+            if _lookup_start is not None:
+                import time as _time
+                _duration_ms = (_time.perf_counter() - _lookup_start) * 1000
+                perf_profiler.get_profiler().record_lookup_hit(
+                    str(bank_account), _duration_ms,
+                    hit=True, fuzzy=True, similarity=best['similarity']
+                )
             return result
 
     logger.warning('银行账号「%s」在查找表中未找到对应主体', bank_account)
+    if _lookup_start is not None:
+        import time as _time
+        _duration_ms = (_time.perf_counter() - _lookup_start) * 1000
+        perf_profiler.get_profiler().record_lookup_hit(
+            str(bank_account), _duration_ms, hit=False
+        )
     return result
 
 
@@ -1551,6 +1619,7 @@ class ProcessingResult:
     balance_check_path: Optional[str] = None
     duplicate_check_path: Optional[str] = None
     accounting_period_path: Optional[str] = None
+    perf_report_path: Optional[str] = None
     lookup_missing: bool = False
     folder_empty: bool = False
     incremental_mode: bool = False
@@ -1767,6 +1836,16 @@ else:
 def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
     logger = get_logger()
 
+    _profiler = None
+    if HAS_PERF_PROFILER:
+        perf_profiler.reset_profiler()
+        _profiler = perf_profiler.get_profiler()
+        _profiler.start()
+
+    _phase_lookup_start = None
+    if _profiler is not None:
+        _phase_lookup_start = __import__('time').perf_counter()
+
     lookup_file = find_lookup_file(script_dir)
     lookup_missing = lookup_file is None
     if lookup_missing:
@@ -1776,6 +1855,10 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         logger.info('正在预加载主体查找表...')
         lookup_data = load_lookup_table(lookup_file)
         logger.info('主体查找表预加载完成')
+
+    if _profiler is not None and _phase_lookup_start is not None:
+        _lookup_dur = (__import__('time').perf_counter() - _phase_lookup_start) * 1000
+        _profiler.record_phase('lookup_preload', _lookup_dur, '查找表预加载')
 
     existing_keys = set()
     existing_records = []
@@ -1792,6 +1875,10 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         else:
             logger.info('无历史数据，将以全量模式运行')
 
+    _phase_copy_start = None
+    if _profiler is not None:
+        _phase_copy_start = __import__('time').perf_counter()
+
     folder_name = os.path.basename(folder.rstrip('/\\'))
     parent_dir = os.path.dirname(folder.rstrip('/\\'))
     new_folder = os.path.join(parent_dir, f"{folder_name}＋检验版")
@@ -1802,15 +1889,25 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
     shutil.copytree(folder, new_folder)
     logger.info('已复制文件夹为＋检验版: %s', new_folder)
 
+    if _profiler is not None and _phase_copy_start is not None:
+        _copy_dur = (__import__('time').perf_counter() - _phase_copy_start) * 1000
+        _profiler.record_phase('folder_copy', _copy_dur, '复制文件夹')
+
     excel_files = scan_excel_files(new_folder)
     if not excel_files:
         logger.warning('检验版文件夹中未发现任何 Excel 文件')
+        if _profiler is not None:
+            _profiler.stop()
         return ProcessingResult(
             lookup_missing=lookup_missing,
             folder_empty=True,
             incremental_mode=actual_incremental,
             existing_record_count=len(existing_records),
         )
+
+    _phase_process_start = None
+    if _profiler is not None:
+        _phase_process_start = __import__('time').perf_counter()
 
     all_rows = []
     processed_files = []
@@ -1831,6 +1928,11 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
                 logger.error('处理文件「%s」时发生错误: %s', filepath, e, exc_info=True)
         else:
             unprocessed_files.append(filepath)
+
+    if _profiler is not None and _phase_process_start is not None:
+        _process_dur = (__import__('time').perf_counter() - _phase_process_start) * 1000
+        _profiler.record_phase('file_processing', _process_dur,
+                               f'处理 {len(excel_files)} 个文件')
 
     error_file_paths = {f for f, _ in error_files}
     delete_processed_files(excel_files, set(unprocessed_files) | error_file_paths)
@@ -1986,6 +2088,18 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
             logger.error('自动生成会计期间总表失败: %s', e, exc_info=True)
             accounting_period_path = None
 
+    perf_report_path = None
+    if _profiler is not None:
+        _profiler.stop()
+        try:
+            output_dir = script_dir
+            if output_path:
+                output_dir = os.path.dirname(output_path) or script_dir
+            perf_report_path = _profiler.save_report(output_dir)
+            logger.info('性能剖析报告已生成: %s', perf_report_path)
+        except Exception as e:
+            logger.error('生成性能剖析报告失败: %s', e, exc_info=True)
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -1996,6 +2110,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         balance_check_path=balance_check_path,
         duplicate_check_path=duplicate_check_path,
         accounting_period_path=accounting_period_path,
+        perf_report_path=perf_report_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -2050,6 +2165,9 @@ def format_result_message(result):
 
         if result.accounting_period_path:
             msg += f'\n\n会计期间总表：{result.accounting_period_path}'
+
+        if result.perf_report_path:
+            msg += f'\n\n性能剖析报告：{result.perf_report_path}'
     else:
         if result.incremental_mode and result.existing_record_count > 0:
             msg = (
