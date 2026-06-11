@@ -69,6 +69,13 @@ except ImportError:
     HAS_BATCH_MANAGER = False
     batch_module = None
 
+try:
+    import onboarding
+    HAS_ONBOARDING = True
+except ImportError:
+    HAS_ONBOARDING = False
+    onboarding = None
+
 # ──────────────────────────────────────────────
 # tkinter 兼容：尝试导入并安全测试，失败则回退命令行模式
 # ──────────────────────────────────────────────
@@ -7625,6 +7632,12 @@ def main():
     logger.info('========== 银行流水检验工具启动 ==========')
 
     script_dir = get_script_dir()
+
+    if HAS_ONBOARDING and onboarding is not None:
+        onboarding_result = onboarding.run_onboarding_flow(script_dir)
+        if onboarding_result == 'exit':
+            logger.info('用户在引导流程中选择退出程序')
+            return
 
     init_audit_db(get_audit_db_path(script_dir))
     init_default_alert_rules(script_dir)
