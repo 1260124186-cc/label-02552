@@ -212,6 +212,7 @@ class WebTask:
     finished_at: Optional[str] = None
     upload_folder: str = ''
     output_path: Optional[str] = None
+    masked_output_path: Optional[str] = None
     incremental: bool = True
     operator: str = ''
     total_files: int = 0
@@ -395,6 +396,13 @@ def _run_pipeline_async(task: WebTask, cancel_event: threading.Event):
             shutil.copy2(result.output_path, dest)
             task.output_path = dest
             logger.info('总表已复制到: %s', dest)
+
+        if result.masked_output_path and os.path.exists(result.masked_output_path):
+            masked_filename = f'银行流水总表_脱敏版_{timestamp}.xlsx'
+            masked_dest = os.path.join(task_output_dir, masked_filename)
+            shutil.copy2(result.masked_output_path, masked_dest)
+            task.masked_output_path = masked_dest
+            logger.info('脱敏版总表已复制到: %s', masked_dest)
 
         task.total_files = len(result.processed_files)
         task.processed_files = len(result.processed_files)
@@ -972,6 +980,25 @@ def api_download(task_id):
 
     download_name = os.path.basename(task.output_path)
     return send_file(task.output_path,
+                     as_attachment=True,
+                     download_name=download_name,
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+@app.route('/api/download/<task_id>/masked', methods=['GET'])
+def api_download_masked(task_id):
+    task = _get_task(task_id)
+    if task is None:
+        return jsonify({'success': False, 'message': '任务不存在'}), 404
+
+    if task.status != 'completed':
+        return jsonify({'success': False, 'message': f'任务状态为 {task.status}，无法下载'}), 400
+
+    if not task.masked_output_path or not os.path.exists(task.masked_output_path):
+        return jsonify({'success': False, 'message': '脱敏版总表文件不存在'}), 404
+
+    download_name = os.path.basename(task.masked_output_path)
+    return send_file(task.masked_output_path,
                      as_attachment=True,
                      download_name=download_name,
                      mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')

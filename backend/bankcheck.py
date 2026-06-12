@@ -50,10 +50,16 @@ except ImportError:
         return None
 
 try:
-    from pii_classifier import setup_pii_aware_logging, PIILogFilter, build_safe_log_context
+    from pii_classifier import (
+        setup_pii_aware_logging, PIILogFilter, build_safe_log_context,
+        mask_value, _mask_bank_account, _mask_subject_name,
+    )
     HAS_PII_CLASSIFIER = True
 except ImportError:
     HAS_PII_CLASSIFIER = False
+    mask_value = None
+    _mask_bank_account = None
+    _mask_subject_name = None
 
 try:
     from file_encryption import (
@@ -1672,6 +1678,7 @@ class ProcessingResult:
     unprocessed_files: List[str] = field(default_factory=list)
     error_files: List[Tuple[str, str]] = field(default_factory=list)
     output_path: Optional[str] = None
+    masked_output_path: Optional[str] = None
     subject_summary_path: Optional[str] = None
     balance_check_path: Optional[str] = None
     duplicate_check_path: Optional[str] = None
@@ -1698,12 +1705,106 @@ class ProcessingResult:
 # ──────────────────────────────────────────────
 
 SUMMARY_TABLE_FILENAME = '银行流水总表.xlsx'
+SUMMARY_TABLE_MASKED_FILENAME = '银行流水总表_脱敏版.xlsx'
+
+MASKED_FIELDS = ['银行账号', '对方户名', '对方账号']
 
 
 def get_summary_table_path(script_dir, output_dir=None):
     """获取历史总表文件路径"""
     base_dir = output_dir or script_dir
     return os.path.join(base_dir, SUMMARY_TABLE_FILENAME)
+
+
+def get_masked_summary_table_path(script_dir, output_dir=None):
+    """获取脱敏版总表文件路径"""
+    base_dir = output_dir or script_dir
+    return os.path.join(base_dir, SUMMARY_TABLE_MASKED_FILENAME)
+
+
+def mask_record(record, fields=None):
+    """
+    对单条记录进行敏感信息脱敏。
+
+    Args:
+        record: 记录字典
+        fields: 需要脱敏的字段列表，默认为 MASKED_FIELDS
+
+    Returns:
+        dict: 脱敏后的记录
+    """
+    if fields is None:
+        fields = MASKED_FIELDS
+
+    masked = dict(record)
+
+    if not HAS_PII_CLASSIFIER:
+        return masked
+
+    for field in fields:
+        if field in masked and masked[field] is not None:
+            value = str(masked[field])
+            if field in ('银行账号', '对方账号', 'account'):
+                masked[field] = _mask_bank_account(value)
+            elif field in ('对方户名', '主体', '主体名称', 'counterparty', 'subject'):
+                masked[field] = _mask_subject_name(value)
+            else:
+                masked[field] = mask_value(field, value)
+
+    return masked
+
+
+def mask_records(records, fields=None):
+    """
+    对记录列表进行批量脱敏。
+
+    Args:
+        records: 记录列表
+        fields: 需要脱敏的字段列表
+
+    Returns:
+        list: 脱敏后的记录列表
+    """
+    if not records:
+        return []
+    return [mask_record(r, fields) for r in records]
+
+
+def export_masked_summary(records, script_dir, output_dir=None, lookup_source=None, columns=None):
+    """
+    导出脱敏版总表。
+
+    Args:
+        records: 记录列表
+        script_dir: 脚本目录
+        output_dir: 输出目录
+        lookup_source: 查找表来源
+        columns: 列名列表，如为 None 则自动获取
+
+    Returns:
+        str: 脱敏版总表文件路径，无记录时返回 None
+    """
+    logger = get_logger()
+
+    if not records:
+        logger.warning('无记录可导出脱敏版')
+        return None
+
+    if columns is None:
+        columns = get_summary_columns(records, lookup_source)
+
+    masked_records = mask_records(records)
+    df = pd.DataFrame(masked_records, columns=columns)
+
+    output_path = get_masked_summary_table_path(script_dir, output_dir)
+
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    df.to_excel(output_path, index=False, engine='openpyxl')
+
+    logger.info('脱敏版总表输出完成: %s（共 %d 条记录）', output_path, len(records))
+    return output_path
 
 
 STANDARD_COLUMNS = [
@@ -2047,6 +2148,27 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                     output_path, index=False, engine='openpyxl')
                 logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
 
+    masked_output_path = None
+    if final_rows and output_path:
+        try:
+            output_dir = os.path.dirname(output_path) or script_dir
+            _masked_columns = get_summary_columns(final_rows, lookup_data)
+            if _cp_tag_summary and _cp_tag_summary.get('tagged_count', 0) > 0:
+                cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
+                _masked_columns = _masked_columns + [
+                    col for col in cp_extra_cols if col not in _masked_columns
+                ]
+            else:
+                cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
+                _masked_columns = [col for col in _masked_columns if col not in cp_extra_cols]
+            masked_output_path = export_masked_summary(
+                final_rows, script_dir, output_dir=output_dir,
+                lookup_source=lookup_data, columns=_masked_columns
+            )
+        except Exception as e:
+            logger.error('生成脱敏版总表失败: %s', e, exc_info=True)
+            masked_output_path = None
+
     db_inserted = 0
     db_duplicates = 0
     if HAS_DATABASE and final_rows:
@@ -2261,6 +2383,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
         output_path=output_path,
+        masked_output_path=masked_output_path,
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
         duplicate_check_path=duplicate_check_path,
@@ -2307,6 +2430,10 @@ def format_result_message(result):
                 f'提取记录数：{len(result.all_rows)}\n'
                 f'总表路径：{result.output_path}'
             )
+
+        if result.masked_output_path:
+            msg += f'\n脱敏版总表：{result.masked_output_path}'
+            msg += '（银行账号、对方户名已脱敏，可用于对外分享）'
 
         if HAS_DATABASE and (result.db_inserted_count > 0 or result.db_duplicate_count > 0):
             msg += (
@@ -9545,6 +9672,27 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                     output_path, index=False, engine='openpyxl')
                 logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
 
+    masked_output_path = None
+    if final_rows and output_path:
+        try:
+            output_dir = os.path.dirname(output_path) or script_dir
+            _masked_columns = get_summary_columns(final_rows, lookup_data)
+            if _cp_tag_summary and _cp_tag_summary.get('tagged_count', 0) > 0:
+                cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
+                _masked_columns = _masked_columns + [
+                    col for col in cp_extra_cols if col not in _masked_columns
+                ]
+            else:
+                cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
+                _masked_columns = [col for col in _masked_columns if col not in cp_extra_cols]
+            masked_output_path = export_masked_summary(
+                final_rows, script_dir, output_dir=output_dir,
+                lookup_source=lookup_data, columns=_masked_columns
+            )
+        except Exception as e:
+            logger.error('生成脱敏版总表失败: %s', e, exc_info=True)
+            masked_output_path = None
+
     db_inserted = 0
     db_duplicates = 0
     if HAS_DATABASE and final_rows:
@@ -9651,6 +9799,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
         output_path=output_path,
+        masked_output_path=masked_output_path,
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
         lookup_missing=lookup_missing,
