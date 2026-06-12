@@ -12111,5 +12111,216 @@ def merge_collab_edits_to_summary(
     }
 
 
+# ──────────────────────────────────────────────
+# 银企直连/网银导出目录对接集成
+# ──────────────────────────────────────────────
+
+try:
+    from bank_directory_connector import (
+        BankDirectoryConnector,
+        ProcessingResult as DirectoryProcessingResult,
+    )
+    HAS_DIRECTORY_CONNECTOR = True
+except ImportError as e:
+    HAS_DIRECTORY_CONNECTOR = False
+    logger = get_logger()
+    logger.warning('目录对接模块不可用: %s', e)
+
+
+@dataclass
+class DirectoryPipelineResult:
+    """目录流水线处理结果"""
+    success: bool
+    message: str = ''
+    processed_files: List[str] = field(default_factory=list)
+    error_files: List[Tuple[str, str]] = field(default_factory=list)
+    output_path: Optional[str] = None
+    archive_dir: Optional[str] = None
+    pipeline_result: Optional[ProcessingResult] = None
+    start_time: datetime = field(default_factory=datetime.now)
+    end_time: Optional[datetime] = None
+
+
+def run_directory_pipeline(
+    script_dir: Optional[str] = None,
+    config_path: Optional[str] = None,
+    incremental: Optional[bool] = None,
+    keep_strategy: Optional[str] = None,
+) -> DirectoryPipelineResult:
+    """
+    运行目录对接流水线：自动处理 inbox 目录中的银行流水文件
+
+    这是一个便捷函数，封装了 BankDirectoryConnector 的调用，
+    与现有的 run_pipeline 函数保持一致的调用风格。
+
+    处理流程：
+    1. 扫描 inbox 目录中的银行流水文件
+    2. 验证文件稳定性和锁定状态
+    3. 移动到 processing 目录并调用 run_pipeline 处理
+    4. 处理成功则归档到 outbox，失败则移动到 error
+
+    Args:
+        script_dir: 脚本目录，用于查找主体查找表等资源
+        config_path: 目录对接配置文件路径
+        incremental: 是否增量模式，None 则使用配置文件中的设置
+        keep_strategy: 文件保留策略，None 则使用配置文件中的设置
+
+    Returns:
+        DirectoryPipelineResult 处理结果
+
+    Example:
+        >>> result = run_directory_pipeline('./backend')
+        >>> print(result.message)
+        >>> if result.success:
+        ...     print(f'归档目录: {result.archive_dir}')
+    """
+    logger = get_logger()
+    result = DirectoryPipelineResult(success=False)
+
+    if not HAS_DIRECTORY_CONNECTOR:
+        result.message = '目录对接模块不可用，请确保 bank_directory_connector.py 存在'
+        logger.error(result.message)
+        return result
+
+    if script_dir is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    try:
+        logger.info('========== 开始目录对接流水线 ==========')
+
+        connector = BankDirectoryConnector(
+            config_path=config_path,
+            script_dir=script_dir,
+        )
+
+        if incremental is not None:
+            connector._processing_config.incremental = incremental
+
+        if keep_strategy is not None:
+            connector._processing_config.keep_strategy = keep_strategy
+
+        dir_result = connector.run_once()
+
+        result.success = dir_result.success
+        result.message = dir_result.message
+        result.processed_files = dir_result.processed_files
+        result.error_files = dir_result.error_files
+        result.output_path = dir_result.output_path
+        result.archive_dir = dir_result.archive_dir
+        result.end_time = dir_result.end_time
+
+        logger.info('目录对接流水线完成: %s', result.message)
+        logger.info('========== 目录对接流水线结束 ==========')
+
+        return result
+
+    except Exception as e:
+        logger.exception('目录对接流水线发生异常')
+        result.message = f'处理异常: {e}'
+        result.success = False
+        result.end_time = datetime.now()
+        return result
+
+
+def run_directory_watch(
+    script_dir: Optional[str] = None,
+    config_path: Optional[str] = None,
+    stop_on_empty: bool = False,
+) -> None:
+    """
+    启动目录监控模式，持续监控 inbox 目录，自动处理新文件
+
+    Args:
+        script_dir: 脚本目录
+        config_path: 配置文件路径
+        stop_on_empty: 连续无文件时是否自动退出
+    """
+    logger = get_logger()
+
+    if not HAS_DIRECTORY_CONNECTOR:
+        logger.error('目录对接模块不可用')
+        return
+
+    if script_dir is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    try:
+        connector = BankDirectoryConnector(
+            config_path=config_path,
+            script_dir=script_dir,
+        )
+        connector.watch(stop_on_first_empty=stop_on_empty)
+    except KeyboardInterrupt:
+        logger.info('目录监控已停止')
+    except Exception as e:
+        logger.exception('目录监控发生异常')
+
+
+def get_directory_status(
+    script_dir: Optional[str] = None,
+    config_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    获取目录对接的当前状态
+
+    Args:
+        script_dir: 脚本目录
+        config_path: 配置文件路径
+
+    Returns:
+        状态字典，包含各目录的文件数、待处理文件列表等
+    """
+    if not HAS_DIRECTORY_CONNECTOR:
+        return None
+
+    if script_dir is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    try:
+        connector = BankDirectoryConnector(
+            config_path=config_path,
+            script_dir=script_dir,
+        )
+        return connector.get_status()
+    except Exception as e:
+        logger = get_logger()
+        logger.error('获取目录状态失败: %s', e)
+        return None
+
+
+def trigger_bank_download(
+    bank_name: str,
+    script_dir: Optional[str] = None,
+    config_path: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """
+    触发指定银行的下载脚本
+
+    Args:
+        bank_name: 银行名称
+        script_dir: 脚本目录
+        config_path: 配置文件路径
+
+    Returns:
+        (success: bool, message: str)
+    """
+    if not HAS_DIRECTORY_CONNECTOR:
+        return False, '目录对接模块不可用'
+
+    if script_dir is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    try:
+        connector = BankDirectoryConnector(
+            config_path=config_path,
+            script_dir=script_dir,
+        )
+        return connector.trigger_download(bank_name)
+    except Exception as e:
+        logger = get_logger()
+        logger.error('触发银行下载失败: %s', e)
+        return False, f'触发失败: {e}'
+
+
 if __name__ == '__main__':
     main()

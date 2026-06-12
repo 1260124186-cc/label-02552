@@ -1,9 +1,94 @@
 {
-  "jobs": [],
+  "jobs": [
+    {
+      "id": "directory_polling",
+      "name": "目录轮询处理",
+      "description": "定期检查 inbox 目录，处理新的银行流水文件",
+      "type": "directory_run_once",
+      "schedule": "*/30 * * * *",
+      "enabled": true,
+      "params": {
+        "incremental": true,
+        "keep_strategy": "move_to_archive"
+      }
+    },
+    {
+      "id": "beijing_bank_download",
+      "name": "北京银行流水下载",
+      "description": "每天早上9点自动下载北京银行流水",
+      "type": "bank_download",
+      "schedule": "0 9 * * 1-5",
+      "enabled": true,
+      "params": {
+        "bank_name": "北京银行",
+        "date_range": "yesterday"
+      }
+    },
+    {
+      "id": "east_asia_bank_download",
+      "name": "东亚银行流水下载",
+      "description": "每天早上9点10分自动下载东亚银行流水",
+      "type": "bank_download",
+      "schedule": "10 9 * * 1-5",
+      "enabled": true,
+      "params": {
+        "bank_name": "东亚银行",
+        "date_range": "yesterday"
+      }
+    },
+    {
+      "id": "icbc_bank_download",
+      "name": "工商银行流水下载",
+      "description": "每天早上9点20分自动下载工商银行流水",
+      "type": "bank_download",
+      "schedule": "20 9 * * 1-5",
+      "enabled": false,
+      "params": {
+        "bank_name": "工商银行",
+        "date_range": "yesterday"
+      }
+    },
+    {
+      "id": "ccb_bank_download",
+      "name": "建设银行流水下载",
+      "description": "每天早上9点30分自动下载建设银行流水",
+      "type": "bank_download",
+      "schedule": "30 9 * * 1-5",
+      "enabled": false,
+      "params": {
+        "bank_name": "建设银行",
+        "date_range": "yesterday"
+      }
+    },
+    {
+      "id": "cmb_bank_download",
+      "name": "招商银行流水下载",
+      "description": "每天早上9点40分自动下载招商银行流水",
+      "type": "bank_download",
+      "schedule": "40 9 * * 1-5",
+      "enabled": false,
+      "params": {
+        "bank_name": "招商银行",
+        "date_range": "yesterday"
+      }
+    },
+    {
+      "id": "archive_cleanup",
+      "name": "归档清理",
+      "description": "每周日凌晨2点清理超过90天的归档文件",
+      "type": "cleanup_archives",
+      "schedule": "0 2 * * 0",
+      "enabled": true,
+      "params": {
+        "retention_days": 90
+      }
+    }
+  ],
   "settings": {
     "max_concurrent_jobs": 1,
     "check_interval_seconds": 30,
     "enable_alerts": true,
-    "log_level": "INFO"
+    "log_level": "INFO",
+    "timezone": "Asia/Shanghai"
   }
 }

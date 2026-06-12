@@ -1,0 +1,135 @@
+# 银企直连/网银导出目录对接配置
+#
+# 目录约定标准：
+# ├── {bank_root}/              # 根目录（可配置）
+# │   ├── inbox/                # 待处理目录（银行自动下载脚本输出到此）
+# │   │   ├── {bank_name}_*.xlsx   # 流水文件，文件名需包含银行名称前缀
+# │   │   └── .lock/            # 锁定文件目录（防止处理未完成下载的文件）
+# │   ├── outbox/               # 已完成目录（处理成功后的文件归档）
+# │   │   ├── {timestamp}/      # 按时间戳归档
+# │   │   │   ├── 银行流水总表.xlsx
+# │   │   │   ├── 流水检验报告.md
+# │   │   │   └── original/     # 原始文件备份
+# │   ├── error/                # 错误目录（处理失败的文件）
+# │   └── processing/           # 处理中目录（临时）
+#
+# 文件命名约定：
+# - 流水文件：{银行名称}_{YYYYMMDD}_{HHMMSS}.xlsx
+# - 示例：北京银行_20260612_093000.xlsx
+# - 锁定文件：{文件名}.lock（下载完成后自动删除）
+
+# 全局配置
+global:
+  # 根目录（可通过环境变量 BANK_ROOT 覆盖）
+  root_dir: "${BANK_ROOT:-./bank_data}"
+  # 轮询间隔（秒）
+  poll_interval: 30
+  # 文件稳定检测时间（秒）- 文件大小不变后才开始处理
+  file_stable_seconds: 5
+  # 是否启用文件锁定检测
+  enable_lock_detection: true
+  # 锁定文件超时时间（秒）
+  lock_timeout_seconds: 3600
+  # 归档保留天数（0 表示永久保留）
+  archive_retention_days: 90
+  # 处理超时时间（秒）
+  processing_timeout_seconds: 1800
+
+# 银行目录配置
+banks:
+  # 北京银行
+  - bank_name: "北京银行"
+    enabled: true
+    # 目录配置（可选，不配置则使用全局默认结构）
+    directories:
+      inbox: "inbox"
+      outbox: "outbox"
+      error: "error"
+      processing: "processing"
+    # 文件匹配模式
+    file_pattern: "^北京银行_.*\\.xlsx$"
+    # 下载脚本配置（可选，用于自动触发）
+    download_script:
+      type: "template"
+      template: "beijing_bank"
+      schedule: "0 9 * * 1-5"  # 工作日早上9点
+      # 脚本参数
+      params:
+        account: "bank_account_beijing"
+        date_range: "yesterday"
+
+  # 东亚银行
+  - bank_name: "东亚银行"
+    enabled: true
+    file_pattern: "^东亚银行_.*\\.xlsx$"
+    download_script:
+      type: "template"
+      template: "east_asia_bank"
+      schedule: "0 9 * * 1-5"
+      params:
+        account: "bank_account_east_asia"
+        date_range: "yesterday"
+
+  # 工商银行
+  - bank_name: "工商银行"
+    enabled: true
+    file_pattern: "^工商银行_.*\\.xlsx$"
+    download_script:
+      type: "template"
+      template: "icbc_bank"
+      schedule: "0 9 * * 1-5"
+      params:
+        account: "bank_account_icbc"
+        date_range: "yesterday"
+
+  # 建设银行
+  - bank_name: "建设银行"
+    enabled: true
+    file_pattern: "^建设银行_.*\\.xlsx$"
+    download_script:
+      type: "template"
+      template: "ccb_bank"
+      schedule: "0 9 * * 1-5"
+      params:
+        account: "bank_account_ccb"
+        date_range: "yesterday"
+
+  # 招商银行
+  - bank_name: "招商银行"
+    enabled: true
+    file_pattern: "^招商银行_.*\\.xlsx$"
+    download_script:
+      type: "template"
+      template: "cmb_bank"
+      schedule: "0 9 * * 1-5"
+      params:
+        account: "bank_account_cmb"
+        date_range: "yesterday"
+
+# 处理策略配置
+processing:
+  # 增量模式
+  incremental: true
+  # 文件处理后策略：keep_unprocessed | keep_all | delete_all | move_to_archive
+  keep_strategy: "move_to_archive"
+  # 归档目录名
+  archive_dir_name: "original"
+  # 是否生成检验报告
+  generate_report: true
+  # 是否发送通知
+  send_notification: false
+  # 通知方式（可选：email, webhook, console）
+  notification_channels: ["console"]
+
+# 通知配置（可选）
+notifications:
+  email:
+    smtp_server: "smtp.example.com"
+    smtp_port: 587
+    username: "${EMAIL_USER}"
+    password: "${EMAIL_PASSWORD}"
+    recipients: ["admin@example.com"]
+  webhook:
+    url: "${WEBHOOK_URL}"
+    headers:
+      Content-Type: "application/json"

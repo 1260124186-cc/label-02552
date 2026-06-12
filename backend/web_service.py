@@ -1600,6 +1600,299 @@ def api_dashboard_subject_breakdown():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+# ──────────────────────────────────────────────
+# 银企直连目录对接 API
+# ──────────────────────────────────────────────
+
+try:
+    from bank_directory_connector import BankDirectoryConnector
+    HAS_DIRECTORY_CONNECTOR_WS = True
+except ImportError as e:
+    HAS_DIRECTORY_CONNECTOR_WS = False
+    logger.warning('目录对接模块不可用: %s', e)
+
+
+def _get_directory_connector():
+    """获取目录连接器实例"""
+    if not HAS_DIRECTORY_CONNECTOR_WS:
+        return None
+    try:
+        return BankDirectoryConnector(script_dir=BACKEND_DIR)
+    except Exception as e:
+        logger.error('创建目录连接器失败: %s', e)
+        return None
+
+
+@app.route('/api/directory/status', methods=['GET'])
+def api_directory_status():
+    """获取目录对接状态"""
+    try:
+        connector = _get_directory_connector()
+        if connector is None:
+            return jsonify({
+                'success': False,
+                'message': '目录对接模块不可用'
+            }), 503
+
+        status = connector.get_status()
+        return jsonify({
+            'success': True,
+            'data': status
+        })
+    except Exception as e:
+        logger.error('获取目录状态失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/directory/run', methods=['POST'])
+def api_directory_run():
+    """触发一次目录处理"""
+    try:
+        connector = _get_directory_connector()
+        if connector is None:
+            return jsonify({
+                'success': False,
+                'message': '目录对接模块不可用'
+            }), 503
+
+        data = request.get_json(silent=True) or {}
+        incremental = data.get('incremental', None)
+        keep_strategy = data.get('keep_strategy', None)
+
+        if incremental is not None:
+            connector._processing_config.incremental = incremental
+        if keep_strategy is not None:
+            connector._processing_config.keep_strategy = keep_strategy
+
+        task_id = f'dir_{datetime.now().strftime("%Y%m%d%H%M%S")}'
+
+        def _run_directory_pipeline():
+            try:
+                result = connector.run_once()
+                _sse_push(task_id, {
+                    'type': 'completed',
+                    'status': 'completed' if result.success else 'failed',
+                    'task_id': task_id,
+                    'data': {
+                        'success': result.success,
+                        'message': result.message,
+                        'processed_files': result.processed_files,
+                        'error_files': result.error_files,
+                        'output_path': result.output_path,
+                        'archive_dir': result.archive_dir,
+                    }
+                })
+            except Exception as e:
+                logger.exception('目录处理任务失败')
+                _sse_push(task_id, {
+                    'type': 'error',
+                    'message': str(e),
+                    'status': 'failed',
+                    'task_id': task_id,
+                })
+
+        thread = threading.Thread(target=_run_directory_pipeline, daemon=True)
+        thread.start()
+
+        return jsonify({
+            'success': True,
+            'message': '目录处理任务已启动',
+            'task_id': task_id,
+        })
+
+    except Exception as e:
+        logger.error('触发目录处理失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/directory/download', methods=['POST'])
+def api_directory_download():
+    """触发银行流水下载"""
+    try:
+        connector = _get_directory_connector()
+        if connector is None:
+            return jsonify({
+                'success': False,
+                'message': '目录对接模块不可用'
+            }), 503
+
+        data = request.get_json(silent=True) or {}
+        bank_name = data.get('bank_name')
+
+        if not bank_name:
+            return jsonify({
+                'success': False,
+                'message': '请指定银行名称'
+            }), 400
+
+        success, message = connector.trigger_download(bank_name)
+
+        return jsonify({
+            'success': success,
+            'message': message,
+            'bank_name': bank_name,
+        })
+
+    except Exception as e:
+        logger.error('触发银行下载失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/directory/config', methods=['GET'])
+def api_directory_config():
+    """获取目录对接配置"""
+    try:
+        connector = _get_directory_connector()
+        if connector is None:
+            return jsonify({
+                'success': False,
+                'message': '目录对接模块不可用'
+            }), 503
+
+        config = {
+            'root_dir': connector._directory_config.root_dir,
+            'poll_interval': connector._directory_config.poll_interval,
+            'file_stable_seconds': connector._directory_config.file_stable_seconds,
+            'enable_lock_detection': connector._directory_config.enable_lock_detection,
+            'archive_retention_days': connector._directory_config.archive_retention_days,
+            'processing': {
+                'incremental': connector._processing_config.incremental,
+                'keep_strategy': connector._processing_config.keep_strategy,
+                'generate_report': connector._processing_config.generate_report,
+            },
+            'banks': [
+                {
+                    'name': name,
+                    'enabled': cfg.enabled,
+                    'file_pattern': cfg.file_pattern,
+                    'has_download_script': cfg.download_script is not None,
+                    'download_schedule': cfg.download_script.get('schedule') if cfg.download_script else None,
+                }
+                for name, cfg in connector._bank_configs.items()
+            ],
+        }
+
+        return jsonify({
+            'success': True,
+            'data': config
+        })
+
+    except Exception as e:
+        logger.error('获取目录配置失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/directory/archives', methods=['GET'])
+def api_directory_archives():
+    """获取归档列表"""
+    try:
+        connector = _get_directory_connector()
+        if connector is None:
+            return jsonify({
+                'success': False,
+                'message': '目录对接模块不可用'
+            }), 503
+
+        outbox_dir = os.path.join(connector._directory_config.root_dir, 'outbox')
+        archives = []
+
+        if os.path.isdir(outbox_dir):
+            for entry in sorted(os.listdir(outbox_dir), reverse=True):
+                entry_path = os.path.join(outbox_dir, entry)
+                if os.path.isdir(entry_path):
+                    try:
+                        stat = os.stat(entry_path)
+                        manifest_path = os.path.join(entry_path, 'manifest.json')
+                        manifest = {}
+                        if os.path.exists(manifest_path):
+                            import json
+                            with open(manifest_path, 'r', encoding='utf-8') as f:
+                                manifest = json.load(f)
+
+                        archives.append({
+                            'timestamp': entry,
+                            'path': entry_path,
+                            'created_at': datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                            'total_records': manifest.get('total_records', 0),
+                            'processed_files': len(manifest.get('processed_files', [])),
+                            'error_files': len(manifest.get('error_files', [])),
+                            'has_output': os.path.exists(os.path.join(entry_path, '银行流水总表.xlsx')),
+                        })
+                    except (OSError, ValueError):
+                        continue
+
+        return jsonify({
+            'success': True,
+            'data': archives
+        })
+
+    except Exception as e:
+        logger.error('获取归档列表失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/directory/archive/<timestamp>/download', methods=['GET'])
+def api_directory_archive_download(timestamp):
+    """下载指定归档的结果文件"""
+    try:
+        connector = _get_directory_connector()
+        if connector is None:
+            return jsonify({
+                'success': False,
+                'message': '目录对接模块不可用'
+            }), 503
+
+        import re
+        if not re.match(r'^\d{8}_\d{6}$', timestamp):
+            return jsonify({
+                'success': False,
+                'message': '无效的时间戳格式'
+            }), 400
+
+        outbox_dir = os.path.join(connector._directory_config.root_dir, 'outbox')
+        archive_dir = os.path.join(outbox_dir, timestamp)
+
+        if not os.path.isdir(archive_dir):
+            return jsonify({
+                'success': False,
+                'message': '归档不存在'
+            }), 404
+
+        file_type = request.args.get('type', 'summary')
+        if file_type == 'summary':
+            output_file = os.path.join(archive_dir, '银行流水总表.xlsx')
+        elif file_type == 'report':
+            output_file = os.path.join(archive_dir, '流水检验报告.md')
+        else:
+            return jsonify({
+                'success': False,
+                'message': '不支持的文件类型'
+            }), 400
+
+        if not os.path.exists(output_file):
+            return jsonify({
+                'success': False,
+                'message': '文件不存在'
+            }), 404
+
+        return send_file(
+            output_file,
+            as_attachment=True,
+            download_name=f'{timestamp}_{os.path.basename(output_file)}'
+        )
+
+    except Exception as e:
+        logger.error('下载归档文件失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/directory')
+def directory_page():
+    """目录对接管理页面"""
+    return render_template('directory.html',
+                           has_directory_connector=HAS_DIRECTORY_CONNECTOR_WS)
+
+
 def main():
     host = os.environ.get('BANKCHECK_HOST', '0.0.0.0')
     port = int(os.environ.get('BANKCHECK_PORT', '5001'))
