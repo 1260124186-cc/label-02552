@@ -1627,6 +1627,7 @@ class ProcessingResult:
     duplicate_check_path: Optional[str] = None
     accounting_period_path: Optional[str] = None
     perf_report_path: Optional[str] = None
+    collab_template_path: Optional[str] = None
     lookup_missing: bool = False
     folder_empty: bool = False
     incremental_mode: bool = False
@@ -2107,6 +2108,21 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         except Exception as e:
             logger.error('生成性能剖析报告失败: %s', e, exc_info=True)
 
+    collab_template_path = None
+    if output_path and final_rows:
+        try:
+            collab_output_dir = os.path.dirname(output_path) or script_dir
+            collab_template_path = generate_collab_template(
+                output_path,
+                output_dir=collab_output_dir,
+                lookup_source=lookup_data,
+            )
+            if collab_template_path:
+                logger.info('财务协同编辑模板已自动生成: %s', collab_template_path)
+        except Exception as e:
+            logger.error('自动生成协同编辑模板失败: %s', e, exc_info=True)
+            collab_template_path = None
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -2118,6 +2134,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         duplicate_check_path=duplicate_check_path,
         accounting_period_path=accounting_period_path,
         perf_report_path=perf_report_path,
+        collab_template_path=collab_template_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -2175,6 +2192,10 @@ def format_result_message(result):
 
         if result.perf_report_path:
             msg += f'\n\n性能剖析报告：{result.perf_report_path}'
+
+        if result.collab_template_path:
+            msg += f'\n\n财务协同编辑模板：{result.collab_template_path}'
+            msg += '\n（黄色列为可编辑区，灰色列为只读区，编辑后请运行"回写合并"功能）'
     else:
         if result.incremental_mode and result.existing_record_count > 0:
             msg = (
@@ -11365,6 +11386,729 @@ def run_duplicate_check_flow(script_dir):
         logger.error('重复交易检测报告导出失败: %s', e, exc_info=True)
 
     logger.info('========== 重复交易检测结束 ==========')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 电子表格协同编辑模块
+# 功能：
+#   1. 总表输出后自动生成带数据验证与下拉选项的 Excel 协同编辑模板
+#   2. 财务在模板上补充凭证号、备注、会计科目等字段
+#   3. 将补充后的 Excel 数据回写合并到总表/数据库
+# ══════════════════════════════════════════════════════════════════════════════
+
+COLLAB_TEMPLATE_SUFFIX = '_财务协同编辑版'
+
+COLLAB_EDITABLE_COLUMNS = [
+    '凭证号',
+    '凭证日期',
+    '会计科目编码',
+    '会计科目名称',
+    '备注',
+    '制单人',
+]
+
+DEFAULT_SUBJECT_OPTIONS = [
+    ('1001', '库存现金'),
+    ('1002', '银行存款'),
+    ('1012', '其他货币资金'),
+    ('1122', '应收账款'),
+    ('1123', '预付账款'),
+    ('1221', '其他应收款'),
+    ('1403', '原材料'),
+    ('1405', '库存商品'),
+    ('1511', '长期股权投资'),
+    ('1601', '固定资产'),
+    ('1602', '累计折旧'),
+    ('2202', '应付账款'),
+    ('2203', '预收账款'),
+    ('2211', '应付职工薪酬'),
+    ('2221', '应交税费'),
+    ('2241', '其他应付款'),
+    ('4001', '实收资本'),
+    ('4002', '资本公积'),
+    ('4101', '盈余公积'),
+    ('4103', '本年利润'),
+    ('4104', '利润分配'),
+    ('5001', '生产成本'),
+    ('5101', '制造费用'),
+    ('6001', '主营业务收入'),
+    ('6051', '其他业务收入'),
+    ('6301', '营业外收入'),
+    ('6401', '主营业务成本'),
+    ('6402', '其他业务成本'),
+    ('6403', '税金及附加'),
+    ('6601', '销售费用'),
+    ('6602', '管理费用'),
+    ('6603', '财务费用'),
+    ('6711', '营业外支出'),
+    ('6801', '所得税费用'),
+]
+
+TAG_OPTIONS = ['黑名单', '白名单', '关注', '正常']
+
+READONLY_COLUMN_FILL = openpyxl.styles.PatternFill(
+    start_color='F2F2F2', end_color='F2F2F2', fill_type='solid'
+)
+EDITABLE_COLUMN_FILL = openpyxl.styles.PatternFill(
+    start_color='FFF2CC', end_color='FFF2CC', fill_type='solid'
+)
+HEADER_FILL = openpyxl.styles.PatternFill(
+    start_color='4472C4', end_color='4472C4', fill_type='solid'
+)
+HEADER_FONT = openpyxl.styles.Font(color='FFFFFF', bold=True)
+BORDER_THIN = openpyxl.styles.Border(
+    left=openpyxl.styles.Side(style='thin'),
+    right=openpyxl.styles.Side(style='thin'),
+    top=openpyxl.styles.Side(style='thin'),
+    bottom=openpyxl.styles.Side(style='thin'),
+)
+
+
+def _collect_unique_values(records: List[Dict[str, Any]], field: str) -> List[str]:
+    values = set()
+    for rec in records:
+        val = rec.get(field)
+        if val is not None and str(val).strip():
+            values.add(str(val).strip())
+    return sorted(values)
+
+
+def generate_collab_template(
+    summary_path: str,
+    output_dir: Optional[str] = None,
+    lookup_source: Any = None,
+    custom_subject_options: Optional[List[Tuple[str, str]]] = None,
+) -> Optional[str]:
+    """
+    基于银行流水总表生成带数据验证和下拉选项的财务协同编辑模板。
+
+    Args:
+        summary_path: 原始银行流水总表 Excel 文件路径
+        output_dir: 输出目录，默认与总表同目录
+        lookup_source: 查找表源，用于获取主体列表
+        custom_subject_options: 自定义会计科目选项 [(编码, 名称), ...]
+
+    Returns:
+        str: 生成的协同编辑模板文件路径，失败则返回 None
+    """
+    logger = get_logger()
+
+    if not summary_path or not os.path.exists(summary_path):
+        logger.error('总表文件不存在，无法生成协同编辑模板: %s', summary_path)
+        return None
+
+    try:
+        df = pd.read_excel(summary_path, engine='openpyxl')
+    except Exception as e:
+        logger.error('读取总表失败: %s', e, exc_info=True)
+        return None
+
+    if df.empty:
+        logger.warning('总表为空，跳过生成协同编辑模板')
+        return None
+
+    if output_dir is None:
+        output_dir = os.path.dirname(summary_path) or get_script_dir()
+    os.makedirs(output_dir, exist_ok=True)
+
+    base_name = os.path.splitext(os.path.basename(summary_path))[0]
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_filename = f'{base_name}{COLLAB_TEMPLATE_SUFFIX}_{timestamp}.xlsx'
+    output_path = os.path.join(output_dir, output_filename)
+
+    records = df.to_dict('records')
+
+    for col in COLLAB_EDITABLE_COLUMNS:
+        if col not in df.columns:
+            df[col] = ''
+
+    base_columns = list(df.columns)
+
+    try:
+        wb = openpyxl.load_workbook(summary_path)
+    except Exception as e:
+        logger.error('openpyxl 加载总表失败: %s', e, exc_info=True)
+        df.to_excel(output_path, index=False, engine='openpyxl')
+        wb = openpyxl.load_workbook(output_path)
+
+    ws = wb.active
+    ws.title = '流水总表(协同编辑)'
+
+    header_row_idx = 1
+    col_count = ws.max_column
+
+    editable_col_indices: Dict[str, int] = {}
+    all_col_indices: Dict[str, int] = {}
+    for col_idx in range(1, col_count + 1):
+        header_val = ws.cell(row=header_row_idx, column=col_idx).value
+        header_name = str(header_val).strip() if header_val is not None else ''
+        all_col_indices[header_name] = col_idx
+        if header_name in COLLAB_EDITABLE_COLUMNS:
+            editable_col_indices[header_name] = col_idx
+
+    for col_name in COLLAB_EDITABLE_COLUMNS:
+        if col_name not in all_col_indices:
+            new_col_idx = col_count + 1
+            ws.cell(row=header_row_idx, column=new_col_idx, value=col_name)
+            editable_col_indices[col_name] = new_col_idx
+            all_col_indices[col_name] = new_col_idx
+            col_count = new_col_idx
+
+    for col_idx in range(1, col_count + 1):
+        cell = ws.cell(row=header_row_idx, column=col_idx)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = openpyxl.styles.Alignment(horizontal='center', vertical='center')
+        cell.border = BORDER_THIN
+
+    max_row = ws.max_row
+
+    editable_col_set = set(editable_col_indices.values())
+    for row_idx in range(2, max_row + 1):
+        for col_idx in range(1, col_count + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.border = BORDER_THIN
+            if col_idx in editable_col_set:
+                cell.fill = EDITABLE_COLUMN_FILL
+                cell.protection = openpyxl.styles.Protection(locked=False)
+            else:
+                cell.fill = READONLY_COLUMN_FILL
+                cell.protection = openpyxl.styles.Protection(locked=True)
+
+    bank_options = _collect_unique_values(records, '银行')
+    if '银行' in all_col_indices and bank_options:
+        dv_bank = openpyxl.worksheet.datavalidation.DataValidation(
+            type='list',
+            formula1=f'"{",".join(bank_options)}"',
+            allow_blank=True,
+            showErrorMessage=True,
+            errorTitle='银行名称无效',
+            error='请从下拉列表中选择银行名称',
+            showInputMessage=True,
+            promptTitle='选择银行',
+            prompt='从银行列表中选择',
+        )
+        ws.add_data_validation(dv_bank)
+        dv_bank.add(f'{openpyxl.utils.get_column_letter(all_col_indices["银行"])}2:'
+                     f'{openpyxl.utils.get_column_letter(all_col_indices["银行"])}{max_row}')
+
+    subject_options_from_lookup = []
+    if lookup_source is not None:
+        try:
+            lookup = _resolve_lookup(lookup_source) if not isinstance(lookup_source, dict) else lookup_source
+            if 'all_entries' in lookup:
+                for entry in lookup['all_entries']:
+                    subj = entry.get('subject', '')
+                    if subj and subj not in subject_options_from_lookup:
+                        subject_options_from_lookup.append(subj)
+        except Exception:
+            pass
+
+    subject_value_options = _collect_unique_values(records, '主体')
+    for s in subject_options_from_lookup:
+        if s not in subject_value_options:
+            subject_value_options.append(s)
+    if '主体' in all_col_indices and subject_value_options:
+        dv_subject = openpyxl.worksheet.datavalidation.DataValidation(
+            type='list',
+            formula1=f'"{",".join(subject_value_options)}"',
+            allow_blank=True,
+            showErrorMessage=True,
+            errorTitle='主体名称无效',
+            error='请从下拉列表中选择主体名称',
+            showInputMessage=True,
+            promptTitle='选择主体',
+            prompt='从主体列表中选择',
+        )
+        ws.add_data_validation(dv_subject)
+        dv_subject.add(f'{openpyxl.utils.get_column_letter(all_col_indices["主体"])}2:'
+                        f'{openpyxl.utils.get_column_letter(all_col_indices["主体"])}{max_row}')
+
+    if '凭证日期' in editable_col_indices:
+        col_letter = openpyxl.utils.get_column_letter(editable_col_indices['凭证日期'])
+        dv_date = openpyxl.worksheet.datavalidation.DataValidation(
+            type='date',
+            operator='between',
+            formula1='1900-01-01',
+            formula2='2100-12-31',
+            allow_blank=True,
+            showErrorMessage=True,
+            errorTitle='日期格式错误',
+            error='请输入有效的日期，格式如: 2024-01-15',
+            showInputMessage=True,
+            promptTitle='录入凭证日期',
+            prompt='请输入日期，格式如 2024-01-15',
+        )
+        ws.add_data_validation(dv_date)
+        dv_date.add(f'{col_letter}2:{col_letter}{max_row}')
+        for row_idx in range(2, max_row + 1):
+            ws.cell(row=row_idx, column=editable_col_indices['凭证日期']).number_format = 'yyyy-mm-dd'
+
+    subject_opts = custom_subject_options if custom_subject_options is not None else DEFAULT_SUBJECT_OPTIONS
+    subject_code_opts = [code for code, _ in subject_opts]
+    subject_name_opts = [name for _, name in subject_opts]
+
+    if '会计科目编码' in editable_col_indices and subject_code_opts:
+        col_letter = openpyxl.utils.get_column_letter(editable_col_indices['会计科目编码'])
+        dv_code = openpyxl.worksheet.datavalidation.DataValidation(
+            type='list',
+            formula1=f'"{",".join(subject_code_opts)}"',
+            allow_blank=True,
+            showErrorMessage=True,
+            errorTitle='科目编码无效',
+            error='请从下拉列表中选择标准会计科目编码',
+            showInputMessage=True,
+            promptTitle='选择会计科目编码',
+            prompt='请选择标准会计科目编码，或自行输入',
+        )
+        ws.add_data_validation(dv_code)
+        dv_code.add(f'{col_letter}2:{col_letter}{max_row}')
+
+    if '会计科目名称' in editable_col_indices and subject_name_opts:
+        col_letter = openpyxl.utils.get_column_letter(editable_col_indices['会计科目名称'])
+        dv_name = openpyxl.worksheet.datavalidation.DataValidation(
+            type='list',
+            formula1=f'"{",".join(subject_name_opts)}"',
+            allow_blank=True,
+            showErrorMessage=True,
+            errorTitle='科目名称无效',
+            error='请从下拉列表中选择标准会计科目名称',
+            showInputMessage=True,
+            promptTitle='选择会计科目名称',
+            prompt='请选择标准会计科目名称，或自行输入',
+        )
+        ws.add_data_validation(dv_name)
+        dv_name.add(f'{col_letter}2:{col_letter}{max_row}')
+
+    if '黑白名单标签' in all_col_indices:
+        col_letter = openpyxl.utils.get_column_letter(all_col_indices['黑白名单标签'])
+        dv_tag = openpyxl.worksheet.datavalidation.DataValidation(
+            type='list',
+            formula1=f'"{",".join(TAG_OPTIONS)}"',
+            allow_blank=True,
+            showErrorMessage=False,
+            showInputMessage=True,
+            promptTitle='标签标记',
+            prompt='可选择标签: 黑名单/白名单/关注/正常',
+        )
+        ws.add_data_validation(dv_tag)
+        dv_tag.add(f'{col_letter}2:{col_letter}{max_row}')
+
+    if '付款' in all_col_indices:
+        col_letter = openpyxl.utils.get_column_letter(all_col_indices['付款'])
+        dv_amt_pay = openpyxl.worksheet.datavalidation.DataValidation(
+            type='decimal',
+            operator='lessThanOrEqual',
+            formula1='0',
+            allow_blank=True,
+            showInputMessage=True,
+            promptTitle='付款金额',
+            prompt='付款金额应为负数或0',
+        )
+        ws.add_data_validation(dv_amt_pay)
+        dv_amt_pay.add(f'{col_letter}2:{col_letter}{max_row}')
+
+    if '收款' in all_col_indices:
+        col_letter = openpyxl.utils.get_column_letter(all_col_indices['收款'])
+        dv_amt_recv = openpyxl.worksheet.datavalidation.DataValidation(
+            type='decimal',
+            operator='greaterThanOrEqual',
+            formula1='0',
+            allow_blank=True,
+            showInputMessage=True,
+            promptTitle='收款金额',
+            prompt='收款金额应为正数或0',
+        )
+        ws.add_data_validation(dv_amt_recv)
+        dv_amt_recv.add(f'{col_letter}2:{col_letter}{max_row}')
+
+    sheet_opts = wb.create_sheet('下拉选项源')
+    for i, (code, name) in enumerate(subject_opts, start=1):
+        sheet_opts.cell(row=i, column=1, value=code)
+        sheet_opts.cell(row=i, column=2, value=name)
+    sheet_opts.cell(row=1, column=1, value='科目编码')
+    sheet_opts.cell(row=1, column=2, value='科目名称')
+    sheet_opts.cell(row=1, column=1).fill = HEADER_FILL
+    sheet_opts.cell(row=1, column=1).font = HEADER_FONT
+    sheet_opts.cell(row=1, column=2).fill = HEADER_FILL
+    sheet_opts.cell(row=1, column=2).font = HEADER_FONT
+    sheet_opts.sheet_state = 'hidden'
+
+    ws.freeze_panes = 'A2'
+
+    for col_idx in range(1, col_count + 1):
+        max_len = 12
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        for row_idx in range(1, min(max_row + 1, 101)):
+            val = ws.cell(row=row_idx, column=col_idx).value
+            if val is not None:
+                val_len = len(str(val))
+                if val_len > max_len:
+                    max_len = min(val_len, 40)
+        ws.column_dimensions[col_letter].width = max_len + 2
+
+    ws.protection.sheet = True
+
+    readme_ws = wb.create_sheet('使用说明', 0)
+    readme_content = [
+        ('A1', '银行流水总表 - 财务协同编辑模板'),
+        ('A2', ''),
+        ('A3', '使用说明'),
+        ('A4', '1. 黄色背景列：可编辑（凭证号、凭证日期、会计科目、备注等）'),
+        ('A5', '2. 灰色背景列：只读（原始流水数据，请勿修改）'),
+        ('A6', '3. 下拉箭头：点击单元格右侧箭头从标准选项中选择'),
+        ('A7', '4. 编辑完成后保存文件，然后在主程序中运行"回写合并"功能'),
+        ('A8', ''),
+        ('A9', '可编辑字段说明'),
+        ('A10', '凭证号:     财务记账凭证编号，如 记-202401-0001'),
+        ('A11', '凭证日期:   记账日期，格式 YYYY-MM-DD'),
+        ('A12', '会计科目编码: 标准会计科目编码，如 1002（银行存款）'),
+        ('A13', '会计科目名称: 标准会计科目名称，如 银行存款'),
+        ('A14', '备注:       其他需补充的说明信息'),
+        ('A15', '制单人:     录入人员姓名或编号'),
+        ('A16', ''),
+        ('A17', '数据验证规则'),
+        ('A18', '银行/主体:  标准下拉选项，限定可选范围'),
+        ('A19', '凭证日期:  合法日期校验'),
+        ('A20', '付款金额:  小于等于0（负数表示支出）'),
+        ('A21', '收款金额:  大于等于0（正数表示收入）'),
+        ('A22', '会计科目:  标准科目下拉选项'),
+        ('A23', ''),
+        ('A24', '警告: 请勿修改唯一id、交易流水号等只读列，否则将无法回写合并！'),
+    ]
+    readme_ws['A1'].font = openpyxl.styles.Font(size=16, bold=True, color='1F4E79')
+    readme_ws['A3'].font = openpyxl.styles.Font(size=13, bold=True)
+    readme_ws['A9'].font = openpyxl.styles.Font(size=13, bold=True)
+    readme_ws['A17'].font = openpyxl.styles.Font(size=13, bold=True)
+    readme_ws['A24'].font = openpyxl.styles.Font(color='FF0000', bold=True)
+    for cell_ref, content in readme_content:
+        readme_ws[cell_ref] = content
+    readme_ws.column_dimensions['A'].width = 80
+
+    try:
+        wb.save(output_path)
+        wb.close()
+    except Exception as e:
+        logger.error('保存协同编辑模板失败: %s', e, exc_info=True)
+        return None
+
+    logger.info('财务协同编辑模板生成完成: %s（可编辑列: %s）',
+                output_path, ', '.join(editable_col_indices.keys()))
+    return output_path
+
+
+def read_collab_edits(
+    edited_path: str,
+    match_by: str = '唯一id',
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    读取财务在协同编辑模板中补充的数据，返回待回写的修改字典列表。
+
+    Args:
+        edited_path: 已编辑的 Excel 文件路径
+        match_by: 用于匹配记录的键列名（默认 '唯一id'）
+
+    Returns:
+        tuple: (edits_list, summary)
+            - edits_list: 每个元素为 {match_key: value, 修改字段1: 值1, 修改字段2: 值2, ...}
+            - summary: 统计信息字典
+    """
+    logger = get_logger()
+
+    if not edited_path or not os.path.exists(edited_path):
+        logger.error('协同编辑文件不存在: %s', edited_path)
+        return [], {'error': '文件不存在'}
+
+    try:
+        wb = openpyxl.load_workbook(edited_path, data_only=True)
+        ws = None
+        for sheet_name in wb.sheetnames:
+            if '协同' in sheet_name or '流水' in sheet_name or sheet_name == 'Sheet':
+                ws = wb[sheet_name]
+                break
+        if ws is None:
+            ws = wb.active
+    except Exception as e:
+        logger.error('读取协同编辑文件失败: %s', e, exc_info=True)
+        return [], {'error': f'读取失败: {e}'}
+
+    header_map: Dict[str, int] = {}
+    for col_idx in range(1, ws.max_column + 1):
+        val = ws.cell(row=1, column=col_idx).value
+        if val is not None:
+            header_map[str(val).strip()] = col_idx
+
+    if match_by not in header_map:
+        logger.error('协同编辑文件缺少匹配键列「%s」，无法回写', match_by)
+        wb.close()
+        return [], {'error': f'缺少匹配键列 {match_by}'}
+
+    match_col_idx = header_map[match_by]
+
+    editable_header_indices = {
+        name: idx for name, idx in header_map.items()
+        if name in COLLAB_EDITABLE_COLUMNS
+    }
+
+    edits: List[Dict[str, Any]] = []
+    total_rows = 0
+    edited_rows = 0
+    unchanged_rows = 0
+    empty_key_rows = 0
+
+    for row_idx in range(2, ws.max_row + 1):
+        total_rows += 1
+        key_val = ws.cell(row=row_idx, column=match_col_idx).value
+        if key_val is None or str(key_val).strip() == '':
+            empty_key_rows += 1
+            continue
+
+        row_edit = {match_by: str(key_val).strip()}
+        has_edit = False
+
+        for field_name, col_idx in editable_header_indices.items():
+            cell_val = ws.cell(row=row_idx, column=col_idx).value
+            if cell_val is not None and str(cell_val).strip() != '':
+                row_edit[field_name] = cell_val
+                has_edit = True
+            else:
+                row_edit[field_name] = None
+
+        if has_edit:
+            edits.append(row_edit)
+            edited_rows += 1
+        else:
+            unchanged_rows += 1
+
+    wb.close()
+
+    summary = {
+        'total_rows': total_rows,
+        'edited_rows': edited_rows,
+        'unchanged_rows': unchanged_rows,
+        'empty_key_rows': empty_key_rows,
+        'edited_fields': list(editable_header_indices.keys()),
+        'match_by': match_by,
+    }
+    logger.info('读取协同编辑完成: %d 行数据，其中 %d 行有修改，%d 行无修改，%d 行无匹配键',
+                total_rows, edited_rows, unchanged_rows, empty_key_rows)
+    return edits, summary
+
+
+def apply_collab_edits_to_records(
+    records: List[Dict[str, Any]],
+    edits: List[Dict[str, Any]],
+    match_by: str = '唯一id',
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    将协同编辑的修改应用到内存中的记录列表。
+
+    Args:
+        records: 原始记录列表（来自总表或数据库）
+        edits: read_collab_edits() 返回的修改列表
+        match_by: 匹配键列名
+
+    Returns:
+        tuple: (updated_records, stats)
+    """
+    logger = get_logger()
+
+    if not records:
+        logger.warning('无原始记录，跳过回写应用')
+        return records, {'matched': 0, 'unmatched': len(edits)}
+
+    key_to_records: Dict[str, List[int]] = {}
+    for i, rec in enumerate(records):
+        key = rec.get(match_by)
+        key_str = str(key).strip() if key is not None else ''
+        if key_str:
+            if key_str not in key_to_records:
+                key_to_records[key_str] = []
+            key_to_records[key_str].append(i)
+
+    matched = 0
+    unmatched = 0
+    fields_updated = {f: 0 for f in COLLAB_EDITABLE_COLUMNS}
+
+    for edit in edits:
+        edit_key = str(edit.get(match_by, '')).strip()
+        if not edit_key:
+            unmatched += 1
+            continue
+
+        rec_indices = key_to_records.get(edit_key)
+        if not rec_indices:
+            unmatched += 1
+            logger.debug('未找到匹配记录，匹配键: %s', edit_key)
+            continue
+
+        for rec_idx in rec_indices:
+            rec = records[rec_idx]
+            for field in COLLAB_EDITABLE_COLUMNS:
+                new_val = edit.get(field)
+                if new_val is not None:
+                    rec[field] = new_val
+                    fields_updated[field] = fields_updated.get(field, 0) + 1
+            matched += 1
+
+    stats = {
+        'matched_records': matched,
+        'unmatched_edits': unmatched,
+        'fields_updated_count': fields_updated,
+    }
+    logger.info('协同编辑回写应用完成: 匹配 %d 条记录，未匹配 %d 条修改',
+                matched, unmatched)
+    return records, stats
+
+
+def merge_collab_edits_to_summary(
+    edited_path: str,
+    summary_path: Optional[str] = None,
+    output_path: Optional[str] = None,
+    script_dir: Optional[str] = None,
+    lookup_source: Any = None,
+) -> Dict[str, Any]:
+    """
+    完整流程：读取财务协同编辑后的 Excel → 合并回原始总表 → 输出新总表。
+
+    Args:
+        edited_path: 财务已编辑的 Excel 文件路径
+        summary_path: 原始总表路径（可选，若 None 则从已编辑文件同目录查找）
+        output_path: 合并后输出路径（可选，自动生成时间戳文件）
+        script_dir: 脚本目录
+        lookup_source: 查找表源
+
+    Returns:
+        dict: 包含 success, output_path, stats, error 等信息
+    """
+    logger = get_logger()
+
+    if summary_path is None:
+        if script_dir:
+            candidate = get_summary_table_path(script_dir)
+            if os.path.exists(candidate):
+                summary_path = candidate
+
+    if summary_path is None or not os.path.exists(summary_path):
+        edited_dir = os.path.dirname(edited_path)
+        candidate = os.path.join(edited_dir, SUMMARY_TABLE_FILENAME)
+        if os.path.exists(candidate):
+            summary_path = candidate
+        else:
+            for f in os.listdir(edited_dir):
+                if f.startswith('银行流水总表') and f.endswith('.xlsx') \
+                        and COLLAB_TEMPLATE_SUFFIX not in f:
+                    summary_path = os.path.join(edited_dir, f)
+                    break
+
+    if summary_path is None or not os.path.exists(summary_path):
+        msg = '找不到原始总表文件用于合并，请指定 summary_path'
+        logger.error(msg)
+        return {'success': False, 'error': msg, 'output_path': None}
+
+    edits, read_stats = read_collab_edits(edited_path)
+    if read_stats.get('error'):
+        return {'success': False, 'error': read_stats['error'], 'output_path': None}
+
+    if not edits:
+        logger.warning('协同编辑文件中未读取到任何修改数据')
+        return {
+            'success': True,
+            'warning': '协同编辑文件中无修改内容，未执行合并',
+            'output_path': summary_path,
+            'stats': read_stats,
+            'applied_stats': None,
+        }
+
+    try:
+        df = pd.read_excel(summary_path, engine='openpyxl')
+    except Exception as e:
+        msg = f'读取原始总表失败: {e}'
+        logger.error(msg, exc_info=True)
+        return {'success': False, 'error': msg, 'output_path': None}
+
+    records = df.to_dict('records')
+
+    updated_records, apply_stats = apply_collab_edits_to_records(records, edits)
+
+    columns = get_summary_columns(updated_records, lookup_source)
+    for col in COLLAB_EDITABLE_COLUMNS:
+        if col not in columns:
+            columns.append(col)
+
+    if output_path is None:
+        base_dir = os.path.dirname(summary_path) or (script_dir or get_script_dir())
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_path = os.path.join(base_dir, f'银行流水总表_合并财务编辑_{timestamp}.xlsx')
+
+    try:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = '流水总表'
+        for col_idx, col_name in enumerate(columns, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=col_name)
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = openpyxl.styles.Alignment(horizontal='center', vertical='center')
+            cell.border = BORDER_THIN
+
+        for row_idx, rec in enumerate(updated_records, start=2):
+            for col_idx, col_name in enumerate(columns, start=1):
+                val = rec.get(col_name)
+                cell = ws.cell(row=row_idx, column=col_idx, value=val)
+                cell.border = BORDER_THIN
+                if col_name in COLLAB_EDITABLE_COLUMNS:
+                    cell.fill = EDITABLE_COLUMN_FILL
+
+        ws.freeze_panes = 'A2'
+        for col_idx in range(1, len(columns) + 1):
+            max_len = 12
+            col_letter = openpyxl.utils.get_column_letter(col_idx)
+            for r in range(1, min(len(updated_records) + 2, 101)):
+                v = ws.cell(row=r, column=col_idx).value
+                if v is not None:
+                    max_len = max(max_len, min(len(str(v)), 40))
+            ws.column_dimensions[col_letter].width = max_len + 2
+
+        wb.save(output_path)
+        wb.close()
+    except Exception as e:
+        msg = f'保存合并后总表失败: {e}'
+        logger.error(msg, exc_info=True)
+        return {'success': False, 'error': msg, 'output_path': None}
+
+    db_stats = None
+    if HAS_DATABASE and updated_records:
+        try:
+            batch_id = f"COLLAB{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            db_inserted, db_duplicates = db_module.persist_transactions(
+                updated_records,
+                batch_id=batch_id,
+                deduplicate=True,
+                script_dir=script_dir,
+            )
+            db_stats = {
+                'batch_id': batch_id,
+                'inserted': db_inserted,
+                'duplicates': db_duplicates,
+            }
+            logger.info('协同编辑结果已同步到数据库: 批次 %s, 插入 %d, 跳过 %d',
+                        batch_id, db_inserted, db_duplicates)
+        except Exception as e:
+            logger.warning('协同编辑结果同步数据库失败: %s', e, exc_info=True)
+
+    logger.info('协同编辑合并完成: 输出文件 %s，匹配 %d 条，未匹配 %d 条',
+                output_path,
+                apply_stats.get('matched_records', 0),
+                apply_stats.get('unmatched_edits', 0))
+
+    return {
+        'success': True,
+        'output_path': output_path,
+        'read_stats': read_stats,
+        'applied_stats': apply_stats,
+        'db_stats': db_stats,
+    }
 
 
 if __name__ == '__main__':
