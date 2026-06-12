@@ -56,6 +56,29 @@ except ImportError:
     HAS_PII_CLASSIFIER = False
 
 try:
+    from file_encryption import (
+        encrypt_output_files as _encrypt_output_files,
+        validate_password_strength as _validate_password_strength,
+        BatchEncryptionResult as _BatchEncryptionResult,
+        EncryptionResult as _EncryptionResult,
+        save_encryption_record as _save_encryption_record,
+        is_encrypted_file as _is_encrypted_file,
+        get_encryption_info as _get_encryption_info,
+        HAS_MSOFFCRYPTO as _HAS_MSOFFCRYPTO,
+    )
+    HAS_FILE_ENCRYPTION = True
+except ImportError:
+    HAS_FILE_ENCRYPTION = False
+    _encrypt_output_files = None
+    _validate_password_strength = None
+    _BatchEncryptionResult = None
+    _EncryptionResult = None
+    _save_encryption_record = None
+    _is_encrypted_file = None
+    _get_encryption_info = None
+    _HAS_MSOFFCRYPTO = False
+
+try:
     import database as db_module
     HAS_DATABASE = True
 except ImportError:
@@ -1666,6 +1689,8 @@ class ProcessingResult:
     output_hash: Optional[str] = None
     signature_id: Optional[str] = None
     signature_info: Optional[Dict[str, Any]] = None
+    encryption_result: Optional[Any] = None
+    encrypted_files: List[str] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -1872,7 +1897,8 @@ else:
 
 
 def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
-                 enable_signature=False, signature_password=None, auto_generate_key=True):
+                 enable_signature=False, signature_password=None, auto_generate_key=True,
+                 enable_encryption=False, encryption_password=None, encryption_mode='excel_password'):
     logger = get_logger()
 
     _profiler = None
@@ -2190,6 +2216,45 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
             logger.error('数字签名失败: %s', e, exc_info=True)
             signature_info = None
 
+    encryption_result = None
+    encrypted_files = []
+
+    if enable_encryption and encryption_password and HAS_FILE_ENCRYPTION:
+        try:
+            output_dir = script_dir
+            if output_path:
+                output_dir = os.path.dirname(output_path) or script_dir
+
+            files_to_encrypt = []
+            for fp in [output_path, subject_summary_path, balance_check_path,
+                       duplicate_check_path, accounting_period_path]:
+                if fp and os.path.isfile(fp):
+                    files_to_encrypt.append(fp)
+
+            if files_to_encrypt:
+                encryption_result = _encrypt_output_files(
+                    files_to_encrypt,
+                    password=encryption_password,
+                    mode=encryption_mode,
+                    output_dir=output_dir,
+                )
+                encrypted_files = [
+                    r.encrypted_path for r in encryption_result.results
+                    if r.success and r.encrypted_path
+                ]
+                _save_encryption_record(encryption_result, script_dir=script_dir)
+                logger.info('输出文件加密完成: 模式=%s, 成功=%d, 失败=%d',
+                            encryption_mode,
+                            encryption_result.success_count,
+                            encryption_result.failure_count)
+        except Exception as e:
+            logger.error('输出文件加密失败: %s', e, exc_info=True)
+            encryption_result = None
+    elif enable_encryption and not HAS_FILE_ENCRYPTION:
+        logger.warning('file_encryption 模块不可用，无法加密输出文件')
+    elif enable_encryption and not encryption_password:
+        logger.warning('已启用加密但未提供加密密码，跳过加密')
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -2212,6 +2277,8 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         output_hash=output_hash,
         signature_id=signature_id,
         signature_info=signature_info,
+        encryption_result=encryption_result,
+        encrypted_files=encrypted_files,
     )
 
 
@@ -2266,6 +2333,12 @@ def format_result_message(result):
         if result.collab_template_path:
             msg += f'\n\n财务协同编辑模板：{result.collab_template_path}'
             msg += '\n（黄色列为可编辑区，灰色列为只读区，编辑后请运行"回写合并"功能）'
+
+        if result.encrypted_files:
+            mode_label = 'Excel密码保护' if result.encryption_result and result.encryption_result.mode == 'excel_password' else 'AES-256加密'
+            msg += f'\n\n文件加密（{mode_label}）：{len(result.encrypted_files)} 个文件'
+            for ef in result.encrypted_files:
+                msg += f'\n  └─ {os.path.basename(ef)}'
     else:
         if result.incremental_mode and result.existing_record_count > 0:
             msg = (
@@ -9291,7 +9364,8 @@ def apply_preset_to_pipeline(preset, folder, script_dir):
 
 def run_pipeline_with_options(folder, script_dir, incremental=True,
                               enabled_banks=None, keep_strategy='keep_unprocessed',
-                              start_date='', end_date='', batch_id=None, output_dir=None):
+                              start_date='', end_date='', batch_id=None, output_dir=None,
+                              enable_encryption=False, encryption_password=None, encryption_mode='excel_password'):
     logger = get_logger()
 
     if enabled_banks is None:
@@ -9537,6 +9611,40 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             logger.error('自动生成余额连续性校验报告失败: %s', e, exc_info=True)
             balance_check_path = None
 
+    encryption_result = None
+    encrypted_files = []
+
+    if enable_encryption and encryption_password and HAS_FILE_ENCRYPTION:
+        try:
+            enc_output_dir = output_dir or script_dir
+            if output_path:
+                enc_output_dir = os.path.dirname(output_path) or script_dir
+
+            files_to_encrypt = []
+            for fp in [output_path, subject_summary_path, balance_check_path]:
+                if fp and os.path.isfile(fp):
+                    files_to_encrypt.append(fp)
+
+            if files_to_encrypt:
+                encryption_result = _encrypt_output_files(
+                    files_to_encrypt,
+                    password=encryption_password,
+                    mode=encryption_mode,
+                    output_dir=enc_output_dir,
+                )
+                encrypted_files = [
+                    r.encrypted_path for r in encryption_result.results
+                    if r.success and r.encrypted_path
+                ]
+                _save_encryption_record(encryption_result, script_dir=script_dir)
+                logger.info('输出文件加密完成: 模式=%s, 成功=%d, 失败=%d',
+                            encryption_mode,
+                            encryption_result.success_count,
+                            encryption_result.failure_count)
+        except Exception as e:
+            logger.error('输出文件加密失败: %s', e, exc_info=True)
+            encryption_result = None
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -9552,6 +9660,8 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         duplicate_record_count=duplicate_count,
         db_inserted_count=db_inserted,
         db_duplicate_count=db_duplicates,
+        encryption_result=encryption_result,
+        encrypted_files=encrypted_files,
     )
 
 
