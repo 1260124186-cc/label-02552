@@ -19,6 +19,13 @@ from typing import List, Optional, Dict, Any, Union, Tuple
 from abc import ABC, abstractmethod
 
 
+try:
+    from pii_classifier import PIILogFilter
+    HAS_PII_CLASSIFIER = True
+except ImportError:
+    HAS_PII_CLASSIFIER = False
+
+
 def get_script_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
@@ -76,7 +83,13 @@ def get_output_dir(subdir=None):
 
 
 def get_logger():
-    return logging.getLogger('bankcheck')
+    logger = logging.getLogger('bankcheck')
+    if HAS_PII_CLASSIFIER:
+        pii_filter = PIILogFilter()
+        for h in logger.handlers:
+            if not any(isinstance(f, PIILogFilter) for f in h.filters):
+                h.addFilter(pii_filter)
+    return logger
 
 
 def _normalize_account_str(value):

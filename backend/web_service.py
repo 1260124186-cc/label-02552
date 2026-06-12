@@ -37,6 +37,12 @@ import database as db_module
 import workflow as workflow_module
 
 try:
+    from pii_classifier import setup_pii_aware_logging, PIILogFilter
+    HAS_PII_CLASSIFIER = True
+except ImportError:
+    HAS_PII_CLASSIFIER = False
+
+try:
     from task_queue import (
         get_job_orchestrator,
         JobContext,
@@ -45,7 +51,6 @@ try:
     HAS_TASK_QUEUE = True
 except ImportError as e:
     HAS_TASK_QUEUE = False
-    logger.warning('任务队列模块不可用: %s', e)
 
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -156,22 +161,34 @@ _sse_lock = threading.Lock()
 
 def setup_logging():
     log_file = os.path.join(BACKEND_DIR, 'web_service.log')
-    logger = logging.getLogger('bankcheck.web')
-    logger.setLevel(logging.DEBUG)
 
-    if not logger.handlers:
-        fmt = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S',
+    if HAS_PII_CLASSIFIER:
+        logger = setup_pii_aware_logging(
+            logger_name='bankcheck.web',
+            log_file=log_file,
+            console_level=logging.INFO,
+            file_level=logging.DEBUG,
         )
-        fh = logging.FileHandler(log_file, encoding='utf-8')
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(fmt)
-        ch = logging.StreamHandler(sys.stdout)
-        ch.setLevel(logging.INFO)
-        ch.setFormatter(fmt)
-        logger.addHandler(fh)
-        logger.addHandler(ch)
+    else:
+        logger = logging.getLogger('bankcheck.web')
+        logger.setLevel(logging.DEBUG)
+
+        if not logger.handlers:
+            fmt = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S',
+            )
+            fh = logging.FileHandler(log_file, encoding='utf-8')
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(fmt)
+            ch = logging.StreamHandler(sys.stdout)
+            ch.setLevel(logging.INFO)
+            ch.setFormatter(fmt)
+            logger.addHandler(fh)
+            logger.addHandler(ch)
+
+    if not HAS_TASK_QUEUE:
+        logger.warning('任务队列模块不可用')
 
     return logger
 

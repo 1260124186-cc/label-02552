@@ -50,6 +50,12 @@ except ImportError:
         return None
 
 try:
+    from pii_classifier import setup_pii_aware_logging, PIILogFilter, build_safe_log_context
+    HAS_PII_CLASSIFIER = True
+except ImportError:
+    HAS_PII_CLASSIFIER = False
+
+try:
     import database as db_module
     HAS_DATABASE = True
 except ImportError:
@@ -396,41 +402,47 @@ def get_script_dir():
 
 def setup_logging():
     """
-    初始化日志系统。
-    - 控制台输出 INFO 级别及以上日志
-    - 日志文件（bankcheck.log）记录 DEBUG 级别及以上日志，
+    初始化日志系统（带 PII 脱敏）。
+    - 控制台输出 INFO 级别及以上日志（严格脱敏）
+    - 日志文件（bankcheck.log）记录 DEBUG 级别及以上日志（部分脱敏）
       文件保存在脚本/exe 所在目录下
+    - 所有 handler 均附加 PIILogFilter，确保敏感字段不被落盘
     """
     log_dir = get_script_dir()
     log_file = os.path.join(log_dir, 'bankcheck.log')
 
-    logger = logging.getLogger('bankcheck')
-    logger.setLevel(logging.DEBUG)
+    if HAS_PII_CLASSIFIER:
+        logger = setup_pii_aware_logging(
+            logger_name='bankcheck',
+            log_file=log_file,
+            console_level=logging.INFO,
+            file_level=logging.DEBUG,
+        )
+    else:
+        logger = logging.getLogger('bankcheck')
+        logger.setLevel(logging.DEBUG)
 
-    # 避免重复添加 handler
-    if logger.handlers:
-        return logger
+        if logger.handlers:
+            return logger
 
-    # 控制台 handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_fmt = logging.Formatter(
-        '[%(asctime)s] %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-    )
-    console_handler.setFormatter(console_fmt)
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_fmt = logging.Formatter(
+            '[%(asctime)s] %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+        )
+        console_handler.setFormatter(console_fmt)
 
-    # 文件 handler
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
-    file_fmt = logging.Formatter(
-        '[%(asctime)s] %(levelname)s [%(funcName)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-    )
-    file_handler.setFormatter(file_fmt)
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        file_fmt = logging.Formatter(
+            '[%(asctime)s] %(levelname)s [%(funcName)s] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+        )
+        file_handler.setFormatter(file_fmt)
 
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+        logger.addHandler(file_handler)
 
     logger.info('日志系统初始化完成，日志文件: %s', log_file)
     if not HAS_TKINTER:

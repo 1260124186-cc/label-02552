@@ -24,6 +24,13 @@ from enum import Enum
 from typing import List, Optional, Dict, Any, Tuple
 
 
+try:
+    from pii_classifier import PIILogFilter
+    HAS_PII_CLASSIFIER = True
+except ImportError:
+    HAS_PII_CLASSIFIER = False
+
+
 WORKFLOW_DB_FILENAME = 'workflow.db'
 
 
@@ -104,7 +111,13 @@ def get_writable_dir():
 
 
 def get_logger():
-    return logging.getLogger('bankcheck.workflow')
+    logger = logging.getLogger('bankcheck.workflow')
+    if HAS_PII_CLASSIFIER:
+        pii_filter = PIILogFilter()
+        for h in logger.handlers:
+            if not any(isinstance(f, PIILogFilter) for f in h.filters):
+                h.addFilter(pii_filter)
+    return logger
 
 
 def get_workflow_db_path(script_dir=None):

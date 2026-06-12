@@ -13,6 +13,12 @@ from datetime import datetime
 from flask import (Flask, render_template, request, jsonify,
                    send_file, redirect, url_for, flash)
 
+try:
+    from pii_classifier import setup_pii_aware_logging, PIILogFilter
+    HAS_PII_CLASSIFIER = True
+except ImportError:
+    HAS_PII_CLASSIFIER = False
+
 import lookup_manager as lm
 
 try:
@@ -39,25 +45,33 @@ def setup_logging():
     log_dir = os.path.dirname(os.path.abspath(__file__))
     log_file = os.path.join(log_dir, 'lookup_manager.log')
 
-    logger = logging.getLogger('bankcheck')
-    logger.setLevel(logging.INFO)
-
-    if not logger.handlers:
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(logging.INFO)
-
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+    if HAS_PII_CLASSIFIER:
+        logger = setup_pii_aware_logging(
+            logger_name='bankcheck',
+            log_file=log_file,
+            console_level=logging.INFO,
+            file_level=logging.INFO,
         )
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
+    else:
+        logger = logging.getLogger('bankcheck')
+        logger.setLevel(logging.INFO)
 
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
+        if not logger.handlers:
+            file_handler = logging.FileHandler(log_file, encoding='utf-8')
+            file_handler.setLevel(logging.INFO)
+
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            file_handler.setFormatter(formatter)
+            console_handler.setFormatter(formatter)
+
+            logger.addHandler(file_handler)
+            logger.addHandler(console_handler)
 
     return logger
 
