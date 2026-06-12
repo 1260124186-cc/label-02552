@@ -35,6 +35,17 @@ import bankcheck
 import batch_manager as batch_module
 import database as db_module
 
+try:
+    from task_queue import (
+        get_job_orchestrator,
+        JobContext,
+        TaskStatus,
+    )
+    HAS_TASK_QUEUE = True
+except ImportError as e:
+    HAS_TASK_QUEUE = False
+    logger.warning('任务队列模块不可用: %s', e)
+
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BACKEND_DIR, 'uploads')
@@ -43,8 +54,98 @@ TASKS_DB_PATH = os.path.join(BACKEND_DIR, 'web_tasks.json')
 
 MAX_CONCURRENT_TASKS = 2
 
+USE_TASK_QUEUE = os.environ.get('USE_TASK_QUEUE', 'false').lower() == 'true'
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+_job_orchestrator = None
+
+
+def _get_job_orchestrator():
+    """获取作业编排器实例"""
+    global _job_orchestrator
+    if _job_orchestrator is None and HAS_TASK_QUEUE and USE_TASK_QUEUE:
+        try:
+            _job_orchestrator = get_job_orchestrator()
+            logger.info('作业编排器已初始化')
+        except Exception as e:
+            logger.error('初始化作业编排器失败: %s', e)
+    return _job_orchestrator
+
+
+def _job_to_web_task(job_context: JobContext) -> WebTask:
+    """将 JobContext 转换为 WebTask"""
+    status_map = {
+        TaskStatus.PENDING.value: 'pending',
+        TaskStatus.QUEUED.value: 'pending',
+        TaskStatus.RUNNING.value: 'processing',
+        TaskStatus.COMPLETED.value: 'completed',
+        TaskStatus.FAILED.value: 'failed',
+        TaskStatus.CANCELLED.value: 'cancelled',
+        TaskStatus.TIMEOUT.value: 'failed',
+    }
+
+    web_task = WebTask(
+        task_id=job_context.job_id,
+        status=status_map.get(job_context.status, 'pending'),
+        created_at=job_context.created_at,
+        started_at=job_context.started_at,
+        finished_at=job_context.finished_at,
+        upload_folder=job_context.input_folder,
+        output_path=job_context.output_path,
+        incremental=job_context.incremental,
+        operator=job_context.operator,
+        total_files=job_context.total_files,
+        processed_files=job_context.processed_files,
+        error_files=job_context.error_files,
+        unprocessed_files=job_context.unprocessed_files,
+        total_records=job_context.total_records,
+        new_records=job_context.new_records,
+        duplicate_records=job_context.duplicate_records,
+        db_inserted=job_context.metadata.get('db_inserted', 0),
+        db_duplicates=job_context.metadata.get('db_duplicates', 0),
+        error_message=job_context.error_message,
+        batch_id=job_context.batch_id,
+        progress_stage=job_context.progress_stage,
+        progress_percent=job_context.progress_percent,
+        progress_message=job_context.progress_message,
+    )
+
+    if job_context.subject_summary_path:
+        web_task.file_names.append(job_context.subject_summary_path)
+    if job_context.balance_check_path:
+        web_task.file_names.append(job_context.balance_check_path)
+    if job_context.duplicate_check_path:
+        web_task.file_names.append(job_context.duplicate_check_path)
+    if job_context.accounting_period_path:
+        web_task.file_names.append(job_context.accounting_period_path)
+
+    return web_task
+
+
+def _notify_sse_from_job(job_context: JobContext):
+    """将作业进度通过 SSE 推送给前端"""
+    web_task = _job_to_web_task(job_context)
+    _save_task(web_task)
+    _sse_push(job_context.job_id, {
+        'type': 'progress',
+        'stage': job_context.progress_stage,
+        'percent': job_context.progress_percent,
+        'message': job_context.progress_message,
+        'status': web_task.status,
+        'task_id': job_context.job_id,
+    })
+
+    if web_task.status in ('completed', 'failed', 'cancelled'):
+        _sse_push(job_context.job_id, {
+            'type': web_task.status,
+            'status': web_task.status,
+            'task_id': job_context.job_id,
+            'data': web_task.to_dict(),
+        })
+        if job_context.job_id in _cancel_events:
+            del _cancel_events[job_context.job_id]
 
 _task_semaphore = threading.Semaphore(MAX_CONCURRENT_TASKS)
 _cancel_events: Dict[str, threading.Event] = {}
@@ -391,6 +492,80 @@ def _safe_filename(filename):
     return safe
 
 
+def _run_pipeline_with_task_queue(task: WebTask, cancel_event: threading.Event):
+    """使用任务队列异步处理流水线"""
+    try:
+        orchestrator = _get_job_orchestrator()
+        if orchestrator is None:
+            raise Exception('任务队列不可用')
+
+        def progress_callback(job_context: JobContext):
+            if cancel_event.is_set():
+                orchestrator.cancel_job(job_context.job_id)
+                return
+            _notify_sse_from_job(job_context)
+
+        job_context = orchestrator.submit_job(
+            input_folder=task.upload_folder,
+            script_dir=BACKEND_DIR,
+            incremental=task.incremental,
+            keep_strategy='keep_unprocessed',
+            operator=task.operator,
+            user_id='web_user',
+            on_progress=progress_callback,
+        )
+
+        task.task_id = job_context.job_id
+        _cancel_events[job_context.job_id] = cancel_event
+        _save_task(task)
+
+        while True:
+            if cancel_event.is_set():
+                orchestrator.cancel_job(job_context.job_id)
+                break
+
+            current_job = orchestrator.get_job_status(job_context.job_id)
+            if current_job and current_job.status in [
+                TaskStatus.COMPLETED.value,
+                TaskStatus.FAILED.value,
+                TaskStatus.CANCELLED.value,
+            ]:
+                break
+
+            time.sleep(1)
+
+        final_job = orchestrator.get_job_status(job_context.job_id)
+        if final_job:
+            web_task = _job_to_web_task(final_job)
+            _save_task(web_task)
+
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            task_output_dir = os.path.join(OUTPUT_DIR, web_task.task_id)
+            os.makedirs(task_output_dir, exist_ok=True)
+
+            if final_job.output_path and os.path.exists(final_job.output_path):
+                output_filename = f'银行流水总表_{timestamp}.xlsx'
+                dest = os.path.join(task_output_dir, output_filename)
+                shutil.copy2(final_job.output_path, dest)
+                web_task.output_path = dest
+
+            _save_task(web_task)
+            _notify_sse_from_job(final_job)
+
+    except Exception as e:
+        logger.error('任务队列处理失败 %s: %s', task.task_id, e, exc_info=True)
+        task.status = 'failed'
+        task.error_message = str(e)
+        task.finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        _save_task(task)
+        _sse_push(task.task_id, {
+            'type': 'error',
+            'message': str(e),
+            'status': 'failed',
+            'task_id': task.task_id,
+        })
+
+
 @app.route('/api/upload', methods=['POST'])
 def api_upload():
     if 'files' not in request.files:
@@ -402,6 +577,7 @@ def api_upload():
 
     incremental = request.form.get('incremental', 'true').lower() == 'true'
     operator = request.form.get('operator', '').strip()
+    use_async = request.form.get('use_async', 'false').lower() == 'true'
 
     task_id = f"WEB{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6]}"
     task_upload_dir = os.path.join(UPLOAD_DIR, task_id)
@@ -474,15 +650,190 @@ def api_upload():
     )
     _save_task(task)
 
-    thread = threading.Thread(target=_run_pipeline_async, args=(task, cancel_event), daemon=True)
+    if use_async and HAS_TASK_QUEUE and USE_TASK_QUEUE:
+        thread = threading.Thread(
+            target=_run_pipeline_with_task_queue,
+            args=(task, cancel_event),
+            daemon=True
+        )
+        mode = '异步队列模式'
+    else:
+        thread = threading.Thread(
+            target=_run_pipeline_async,
+            args=(task, cancel_event),
+            daemon=True
+        )
+        mode = '同步线程模式'
+
     thread.start()
 
-    logger.info('任务 %s 已创建，共上传 %d 个文件', task_id, saved_count)
+    logger.info('任务 %s 已创建，共上传 %d 个文件，模式: %s', task_id, saved_count, mode)
     return jsonify({
         'success': True,
         'task_id': task_id,
-        'message': f'已上传 {saved_count} 个文件，正在后台处理',
+        'message': f'已上传 {saved_count} 个文件，正在后台处理（{mode}）',
+        'async_mode': use_async and HAS_TASK_QUEUE and USE_TASK_QUEUE,
     })
+
+
+@app.route('/api/queue/status', methods=['GET'])
+def api_queue_status():
+    """获取任务队列状态"""
+    if not HAS_TASK_QUEUE:
+        return jsonify({
+            'success': False,
+            'message': '任务队列模块未安装',
+        }), 503
+
+    if not USE_TASK_QUEUE:
+        return jsonify({
+            'success': False,
+            'message': '任务队列未启用（设置 USE_TASK_QUEUE=true 启用）',
+        }), 503
+
+    try:
+        orchestrator = _get_job_orchestrator()
+        if orchestrator is None:
+            return jsonify({
+                'success': False,
+                'message': '任务队列未初始化',
+            }), 503
+
+        from task_queue import get_message_queue
+        mq = get_message_queue()
+
+        queue_status = {}
+        for queue_name in ['scan', 'parse', 'merge', 'report', 'persist', 'cleanup', 'default']:
+            try:
+                queue_status[queue_name] = mq.get_queue_length(queue_name)
+            except Exception:
+                queue_status[queue_name] = 0
+
+        running_jobs = orchestrator.list_jobs(status=TaskStatus.RUNNING.value)
+        pending_jobs = orchestrator.list_jobs(status=TaskStatus.PENDING.value)
+        completed_jobs = orchestrator.list_jobs(status=TaskStatus.COMPLETED.value, limit=10)
+
+        return jsonify({
+            'success': True,
+            'enabled': True,
+            'backend': mq.config.backend,
+            'queues': queue_status,
+            'running_jobs': len(running_jobs),
+            'pending_jobs': len(pending_jobs),
+            'recent_completed': [j.to_dict() for j in completed_jobs],
+        })
+
+    except Exception as e:
+        logger.error('获取队列状态失败: %s', e)
+        return jsonify({
+            'success': False,
+            'message': str(e),
+        }), 500
+
+
+@app.route('/api/queue/workers', methods=['GET'])
+def api_worker_status():
+    """获取 Worker 状态"""
+    if not HAS_TASK_QUEUE or not USE_TASK_QUEUE:
+        return jsonify({
+            'success': False,
+            'message': '任务队列未启用',
+        }), 503
+
+    try:
+        from task_queue import WorkerManager, load_config
+        config = load_config()
+        manager = WorkerManager(config=config, num_workers=0)
+
+        return jsonify({
+            'success': True,
+            'status': manager.get_status(),
+            'config': {
+                'worker_queues': config.worker.queues,
+                'task_timeout': config.worker.task_timeout,
+                'max_retries': config.max_retries,
+            },
+        })
+    except Exception as e:
+        logger.error('获取 Worker 状态失败: %s', e)
+        return jsonify({
+            'success': False,
+            'message': str(e),
+        }), 500
+
+
+@app.route('/api/jobs/<job_id>', methods=['GET'])
+def api_get_job(job_id):
+    """获取作业详情"""
+    if not HAS_TASK_QUEUE or not USE_TASK_QUEUE:
+        return jsonify({
+            'success': False,
+            'message': '任务队列未启用',
+        }), 503
+
+    try:
+        orchestrator = _get_job_orchestrator()
+        if orchestrator is None:
+            return jsonify({
+                'success': False,
+                'message': '任务队列未初始化',
+            }), 503
+
+        job_context = orchestrator.get_job_status(job_id)
+        if job_context is None:
+            return jsonify({
+                'success': False,
+                'message': '作业不存在',
+            }), 404
+
+        return jsonify({
+            'success': True,
+            'job': job_context.to_dict(),
+        })
+
+    except Exception as e:
+        logger.error('获取作业详情失败: %s', e)
+        return jsonify({
+            'success': False,
+            'message': str(e),
+        }), 500
+
+
+@app.route('/api/jobs/<job_id>/cancel', methods=['POST'])
+def api_cancel_job(job_id):
+    """取消作业"""
+    if not HAS_TASK_QUEUE or not USE_TASK_QUEUE:
+        return jsonify({
+            'success': False,
+            'message': '任务队列未启用',
+        }), 503
+
+    try:
+        orchestrator = _get_job_orchestrator()
+        if orchestrator is None:
+            return jsonify({
+                'success': False,
+                'message': '任务队列未初始化',
+            }), 503
+
+        success = orchestrator.cancel_job(job_id)
+        if not success:
+            return jsonify({
+                'success': False,
+                'message': '取消作业失败（作业可能已完成或不存在）',
+            }), 400
+
+        return jsonify({
+            'success': True,
+            'message': '作业已取消',
+        })
+
+    except Exception as e:
+        logger.error('取消作业失败: %s', e)
+        return jsonify({
+            'success': False,
+            'message': str(e),
+        }), 500
 
 
 @app.route('/api/tasks/<task_id>/stream', methods=['GET'])

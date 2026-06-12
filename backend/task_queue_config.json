@@ -1,0 +1,78 @@
+{
+    "backend": "redis",
+    "redis": {
+        "host": "localhost",
+        "port": 6379,
+        "db": 0,
+        "password": null,
+        "max_connections": 50,
+        "socket_timeout": 5,
+        "socket_connect_timeout": 5
+    },
+    "rabbitmq": {
+        "host": "localhost",
+        "port": 5672,
+        "username": "guest",
+        "password": "guest",
+        "virtual_host": "/",
+        "heartbeat": 60,
+        "connection_attempts": 3,
+        "retry_delay": 5
+    },
+    "queues": {
+        "scan": {
+            "name": "task_queue:scan",
+            "max_priority": 10,
+            "auto_delete": false,
+            "durable": true
+        },
+        "parse": {
+            "name": "task_queue:parse",
+            "max_priority": 10,
+            "auto_delete": false,
+            "durable": true
+        },
+        "merge": {
+            "name": "task_queue:merge",
+            "max_priority": 10,
+            "auto_delete": false,
+            "durable": true
+        },
+        "report": {
+            "name": "task_queue:report",
+            "max_priority": 10,
+            "auto_delete": false,
+            "durable": true
+        },
+        "persist": {
+            "name": "task_queue:persist",
+            "max_priority": 10,
+            "auto_delete": false,
+            "durable": true
+        },
+        "cleanup": {
+            "name": "task_queue:cleanup",
+            "max_priority": 5,
+            "auto_delete": false,
+            "durable": true
+        },
+        "default": {
+            "name": "task_queue:default",
+            "max_priority": 10,
+            "auto_delete": false,
+            "durable": true
+        }
+    },
+    "worker": {
+        "num_workers": 4,
+        "queues": ["scan", "parse", "merge", "report", "persist", "cleanup"],
+        "task_timeout": 3600,
+        "idle_sleep_seconds": 1,
+        "max_tasks_per_child": 1000,
+        "auto_restart": true,
+        "graceful_shutdown_timeout": 30
+    },
+    "result_expire_seconds": 86400,
+    "max_retries": 3,
+    "retry_backoff_seconds": 5
+}
