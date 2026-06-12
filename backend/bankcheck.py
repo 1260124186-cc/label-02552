@@ -82,6 +82,21 @@ except ImportError:
     HAS_ONBOARDING = False
     onboarding = None
 
+try:
+    from cryptography.hazmat.primitives.asymmetric import rsa, padding
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.exceptions import InvalidSignature
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    HAS_CRYPTOGRAPHY = False
+    rsa = None
+    padding = None
+    hashes = None
+    serialization = None
+    default_backend = None
+    InvalidSignature = Exception
+
 # ──────────────────────────────────────────────
 # tkinter 兼容：尝试导入并安全测试，失败则回退命令行模式
 # ──────────────────────────────────────────────
@@ -1648,6 +1663,9 @@ class ProcessingResult:
     duplicate_record_count: int = 0
     db_inserted_count: int = 0
     db_duplicate_count: int = 0
+    output_hash: Optional[str] = None
+    signature_id: Optional[str] = None
+    signature_info: Optional[Dict[str, Any]] = None
 
 
 # ──────────────────────────────────────────────
@@ -1853,7 +1871,8 @@ else:
     ask_incremental_mode = cli_ask_incremental_mode
 
 
-def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
+def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
+                 enable_signature=False, signature_password=None, auto_generate_key=True):
     logger = get_logger()
 
     _profiler = None
@@ -2135,6 +2154,42 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
             logger.error('自动生成协同编辑模板失败: %s', e, exc_info=True)
             collab_template_path = None
 
+    output_hash = None
+    signature_id = None
+    signature_info = None
+
+    if output_path and enable_signature and HAS_CRYPTOGRAPHY:
+        try:
+            output_hash = compute_file_hash(output_path)
+
+            if auto_generate_key and not has_signing_key(script_dir):
+                ensure_signing_key(script_dir, auto_generate=True, password=signature_password)
+
+            signature_info = sign_output_file(
+                output_path=output_path,
+                script_dir=script_dir,
+                input_directory=folder,
+                password=signature_password,
+                extra_data={
+                    'record_count': len(final_rows),
+                    'incremental_mode': actual_incremental,
+                    'processed_files': len(processed_files),
+                }
+            )
+
+            if signature_info:
+                signature_id = save_signature_record(
+                    signature_info,
+                    script_dir=script_dir
+                )
+                signature_info['signature_id'] = signature_id
+                logger.info('总表数字签名完成: %s', signature_id)
+            else:
+                logger.warning('数字签名未生成（可能缺少签名密钥）')
+        except Exception as e:
+            logger.error('数字签名失败: %s', e, exc_info=True)
+            signature_info = None
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -2154,6 +2209,9 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None):
         duplicate_record_count=duplicate_count,
         db_inserted_count=db_inserted,
         db_duplicate_count=db_duplicates,
+        output_hash=output_hash,
+        signature_id=signature_id,
+        signature_info=signature_info,
     )
 
 
@@ -2593,6 +2651,37 @@ def get_audit_db_path(script_dir=None):
     return os.path.join(script_dir, AUDIT_DB_FILENAME)
 
 
+def _migrate_audit_db_columns(db_path):
+    """迁移审计数据库表结构，添加缺失的列"""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("PRAGMA table_info(audit_logs)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        new_columns = [
+            ('signature_id', 'TEXT'),
+            ('digital_signature', 'TEXT'),
+            ('signature_algorithm', 'TEXT'),
+            ('signed_at', 'TEXT'),
+        ]
+
+        for col_name, col_type in new_columns:
+            if col_name not in existing_columns:
+                cursor.execute(f'ALTER TABLE audit_logs ADD COLUMN {col_name} {col_type}')
+                logger = get_logger()
+                logger.info('审计数据库已添加列: %s', col_name)
+
+        conn.commit()
+    except Exception as e:
+        logger = get_logger()
+        logger.warning('审计数据库迁移失败: %s', e)
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 def init_audit_db(db_path=None):
     """
     初始化审计数据库，创建所需表结构。
@@ -2645,9 +2734,15 @@ def init_audit_db(db_path=None):
             duration_ms INTEGER,
             client_ip TEXT,
             client_hostname TEXT,
+            signature_id TEXT,
+            digital_signature TEXT,
+            signature_algorithm TEXT,
+            signed_at TEXT,
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     ''')
+
+    _migrate_audit_db_columns(db_path)
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS config_changes (
@@ -2883,6 +2978,10 @@ class AuditRecord:
     duration_ms: Optional[int] = None
     client_ip: Optional[str] = None
     client_hostname: Optional[str] = None
+    signature_id: Optional[str] = None
+    digital_signature: Optional[str] = None
+    signature_algorithm: Optional[str] = None
+    signed_at: Optional[str] = None
 
 
 class AuditLogger:
@@ -2944,7 +3043,9 @@ class AuditLogger:
                     config_snapshot = ?, input_files_hash = ?,
                     output_hash = ?, started_at = ?,
                     completed_at = ?, duration_ms = ?,
-                    client_ip = ?, client_hostname = ?
+                    client_ip = ?, client_hostname = ?,
+                    signature_id = ?, digital_signature = ?,
+                    signature_algorithm = ?, signed_at = ?
                 WHERE audit_id = ?
             ''', (
                 self.record.input_directory, self.record.output_path,
@@ -2956,6 +3057,8 @@ class AuditLogger:
                 self.record.output_hash, self.record.started_at,
                 self.record.completed_at, self.record.duration_ms,
                 self.record.client_ip, self.record.client_hostname,
+                self.record.signature_id, self.record.digital_signature,
+                self.record.signature_algorithm, self.record.signed_at,
                 self.audit_id,
             ))
         else:
@@ -2970,8 +3073,10 @@ class AuditLogger:
                     config_snapshot, input_files_hash,
                     output_hash, started_at,
                     completed_at, duration_ms,
-                    client_ip, client_hostname
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    client_ip, client_hostname,
+                    signature_id, digital_signature,
+                    signature_algorithm, signed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 self.audit_id, self.user_id, self.username, self.operation_type,
                 self.record.input_directory, self.record.output_path,
@@ -2983,10 +3088,37 @@ class AuditLogger:
                 self.record.output_hash, self.record.started_at,
                 self.record.completed_at, self.record.duration_ms,
                 self.record.client_ip, self.record.client_hostname,
+                self.record.signature_id, self.record.digital_signature,
+                self.record.signature_algorithm, self.record.signed_at,
             ))
 
         conn.commit()
         conn.close()
+
+    def record_signature(self, signature_info):
+        """
+        记录数字签名信息。
+
+        Args:
+            signature_info: 签名信息字典（来自 sign_output_file）
+        """
+        if not signature_info:
+            return
+
+        signature_id = save_signature_record(
+            signature_info,
+            audit_id=self.audit_id,
+            script_dir=self.script_dir,
+            db_path=self.db_path
+        )
+
+        self.record.signature_id = signature_id
+        self.record.digital_signature = signature_info.get('signature')
+        self.record.signature_algorithm = signature_info.get('algorithm')
+        self.record.signed_at = signature_info.get('signed_at')
+        self._save_record()
+
+        self.logger.info('审计记录 [%s] 已记录数字签名: %s', self.audit_id, signature_id)
 
     def record_input(self, input_directory, lookup_file=None):
         """记录输入信息"""
@@ -3025,6 +3157,8 @@ class AuditLogger:
             self.record.lookup_missing = result.lookup_missing
             if result.output_path:
                 self.record.output_hash = compute_file_hash(result.output_path)
+            if result.signature_info:
+                self.record_signature(result.signature_info)
         elif isinstance(result, DiffResult):
             self.record.extracted_records = result.added_count + result.deleted_count + result.changed_count
             self.record.output_path = result.output_path
@@ -3517,8 +3651,669 @@ def manual_record_lookup_change(script_dir=None, username=None, change_reason=''
     )
 
 
+# ──────────────────────────────────────────────
+# 电子签章与数字签名模块
+# ──────────────────────────────────────────────
+
+SIGNATURE_KEY_FILENAME = 'bankcheck_signing_key.pem'
+SIGNATURE_PUB_FILENAME = 'bankcheck_signing_key.pub.pem'
+SIGNATURE_ALGORITHM = 'RSA-SHA256'
+
+
+def get_signature_key_path(script_dir=None, public=False):
+    """获取签名密钥文件路径"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    filename = SIGNATURE_PUB_FILENAME if public else SIGNATURE_KEY_FILENAME
+    return os.path.join(script_dir, filename)
+
+
+def generate_signing_key_pair(script_dir=None, key_size=2048, password=None):
+    """
+    生成 RSA 密钥对用于数字签名。
+
+    Args:
+        script_dir: 脚本目录，用于存储密钥
+        key_size: 密钥长度，默认 2048 位
+        password: 私钥密码（可选）
+
+    Returns:
+        Tuple[str, str]: (私钥路径, 公钥路径)
+    """
+    if not HAS_CRYPTOGRAPHY:
+        raise ImportError('cryptography 库未安装，无法使用数字签名功能')
+
+    script_dir = script_dir or get_script_dir()
+    private_key_path = get_signature_key_path(script_dir, public=False)
+    public_key_path = get_signature_key_path(script_dir, public=True)
+
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=key_size,
+        backend=default_backend()
+    )
+
+    encryption_algorithm = serialization.NoEncryption()
+    if password:
+        encryption_algorithm = serialization.BestAvailableEncryption(password.encode('utf-8'))
+
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=encryption_algorithm
+    )
+
+    public_key = private_key.public_key()
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+    with open(private_key_path, 'wb') as f:
+        f.write(private_pem)
+
+    with open(public_key_path, 'wb') as f:
+        f.write(public_pem)
+
+    os.chmod(private_key_path, 0o600)
+    os.chmod(public_key_path, 0o644)
+
+    logger = get_logger()
+    logger.info('RSA 密钥对已生成: 私钥=%s, 公钥=%s', private_key_path, public_key_path)
+    return private_key_path, public_key_path
+
+
+def load_private_key(script_dir=None, password=None):
+    """
+    加载私钥用于签名。
+
+    Args:
+        script_dir: 脚本目录
+        password: 私钥密码（如果有）
+
+    Returns:
+        private_key: RSA 私钥对象，失败返回 None
+    """
+    if not HAS_CRYPTOGRAPHY:
+        return None
+
+    private_key_path = get_signature_key_path(script_dir, public=False)
+    if not os.path.exists(private_key_path):
+        return None
+
+    try:
+        with open(private_key_path, 'rb') as f:
+            key_data = f.read()
+
+        password_bytes = password.encode('utf-8') if password else None
+        private_key = serialization.load_pem_private_key(
+            key_data,
+            password=password_bytes,
+            backend=default_backend()
+        )
+        return private_key
+    except Exception as e:
+        logger = get_logger()
+        logger.error('加载私钥失败: %s', e)
+        return None
+
+
+def load_public_key(script_dir=None, public_key_path=None):
+    """
+    加载公钥用于验证签名。
+
+    Args:
+        script_dir: 脚本目录（用于查找默认公钥）
+        public_key_path: 公钥文件路径（优先使用）
+
+    Returns:
+        public_key: RSA 公钥对象，失败返回 None
+    """
+    if not HAS_CRYPTOGRAPHY:
+        return None
+
+    if public_key_path is None:
+        public_key_path = get_signature_key_path(script_dir, public=True)
+
+    if not os.path.exists(public_key_path):
+        return None
+
+    try:
+        with open(public_key_path, 'rb') as f:
+            key_data = f.read()
+
+        public_key = serialization.load_pem_public_key(
+            key_data,
+            backend=default_backend()
+        )
+        return public_key
+    except Exception as e:
+        logger = get_logger()
+        logger.error('加载公钥失败: %s', e)
+        return None
+
+
+def build_signature_payload(file_hash, username, operation_time, input_directory, extra_data=None):
+    """
+    构建签名载荷数据。
+
+    Args:
+        file_hash: 文件 SHA256 哈希值
+        username: 操作用户
+        operation_time: 操作时间
+        input_directory: 输入目录
+        extra_data: 额外数据（可选）
+
+    Returns:
+        bytes: 签名载荷字节串
+    """
+    payload = {
+        'file_hash': file_hash,
+        'username': username,
+        'operation_time': operation_time,
+        'input_directory': input_directory,
+        'algorithm': SIGNATURE_ALGORITHM,
+    }
+    if extra_data:
+        payload['extra_data'] = extra_data
+
+    payload_str = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return payload_str.encode('utf-8')
+
+
+def sign_data(private_key, data_bytes):
+    """
+    使用私钥对数据进行数字签名。
+
+    Args:
+        private_key: RSA 私钥对象
+        data_bytes: 待签名的数据字节串
+
+    Returns:
+        str: Base64 编码的签名字符串，失败返回 None
+    """
+    if not HAS_CRYPTOGRAPHY or private_key is None:
+        return None
+
+    try:
+        import base64
+        signature = private_key.sign(
+            data_bytes,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return base64.b64encode(signature).decode('ascii')
+    except Exception as e:
+        logger = get_logger()
+        logger.error('数字签名失败: %s', e)
+        return None
+
+
+def verify_signature(public_key, signature_b64, data_bytes):
+    """
+    使用公钥验证数字签名。
+
+    Args:
+        public_key: RSA 公钥对象
+        signature_b64: Base64 编码的签名字符串
+        data_bytes: 原始数据字节串
+
+    Returns:
+        bool: 签名是否有效
+    """
+    if not HAS_CRYPTOGRAPHY or public_key is None or signature_b64 is None:
+        return False
+
+    try:
+        import base64
+        signature = base64.b64decode(signature_b64)
+        public_key.verify(
+            signature,
+            data_bytes,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return True
+    except InvalidSignature:
+        return False
+    except Exception as e:
+        logger = get_logger()
+        logger.error('签名验证失败: %s', e)
+        return False
+
+
+def sign_output_file(output_path, script_dir=None, username=None, input_directory=None,
+                     private_key=None, password=None, extra_data=None):
+    """
+    为输出文件生成数字签名。
+
+    Args:
+        output_path: 输出文件路径
+        script_dir: 脚本目录
+        username: 操作用户（默认自动获取）
+        input_directory: 输入目录
+        private_key: 私钥对象（可选，优先使用）
+        password: 私钥密码（可选）
+        extra_data: 额外数据（可选）
+
+    Returns:
+        Dict: 签名结果信息，包含 signature、payload 等
+    """
+    if not HAS_CRYPTOGRAPHY:
+        return None
+
+    if not output_path or not os.path.exists(output_path):
+        return None
+
+    file_hash = compute_file_hash(output_path)
+    if not file_hash:
+        return None
+
+    username = username or get_current_user()
+    operation_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    payload_bytes = build_signature_payload(
+        file_hash=file_hash,
+        username=username,
+        operation_time=operation_time,
+        input_directory=input_directory,
+        extra_data=extra_data
+    )
+
+    if private_key is None:
+        private_key = load_private_key(script_dir, password)
+
+    if private_key is None:
+        logger = get_logger()
+        logger.warning('未找到签名私钥，跳过数字签名')
+        return None
+
+    signature_b64 = sign_data(private_key, payload_bytes)
+    if not signature_b64:
+        return None
+
+    return {
+        'file_path': output_path,
+        'file_hash': file_hash,
+        'username': username,
+        'operation_time': operation_time,
+        'input_directory': input_directory,
+        'algorithm': SIGNATURE_ALGORITHM,
+        'signature': signature_b64,
+        'payload': payload_bytes.decode('utf-8'),
+        'signed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'),
+    }
+
+
+def verify_output_file_signature(output_path, signature_info, script_dir=None, public_key=None):
+    """
+    验证输出文件的数字签名。
+
+    Args:
+        output_path: 输出文件路径
+        signature_info: 签名信息字典（来自 sign_output_file 的返回值）
+        script_dir: 脚本目录
+        public_key: 公钥对象（可选，优先使用）
+
+    Returns:
+        bool: 签名是否有效
+    """
+    if not HAS_CRYPTOGRAPHY or not signature_info:
+        return False
+
+    current_hash = compute_file_hash(output_path)
+    if not current_hash or current_hash != signature_info.get('file_hash'):
+        return False
+
+    payload_bytes = build_signature_payload(
+        file_hash=signature_info.get('file_hash'),
+        username=signature_info.get('username'),
+        operation_time=signature_info.get('operation_time'),
+        input_directory=signature_info.get('input_directory'),
+        extra_data=json.loads(signature_info.get('payload', '{}')).get('extra_data')
+    )
+
+    if public_key is None:
+        public_key = load_public_key(script_dir)
+
+    return verify_signature(
+        public_key=public_key,
+        signature_b64=signature_info.get('signature'),
+        data_bytes=payload_bytes
+    )
+
+
+def has_signing_key(script_dir=None):
+    """检查是否存在签名密钥"""
+    private_path = get_signature_key_path(script_dir, public=False)
+    return os.path.exists(private_path)
+
+
+def ensure_signing_key(script_dir=None, auto_generate=True, password=None):
+    """
+    确保签名密钥存在，不存在则自动生成。
+
+    Args:
+        script_dir: 脚本目录
+        auto_generate: 是否自动生成
+        password: 私钥密码（可选）
+
+    Returns:
+        bool: 密钥是否可用
+    """
+    if has_signing_key(script_dir):
+        return True
+
+    if not auto_generate or not HAS_CRYPTOGRAPHY:
+        return False
+
+    try:
+        generate_signing_key_pair(script_dir, password=password)
+        return True
+    except Exception as e:
+        logger = get_logger()
+        logger.error('自动生成签名密钥失败: %s', e)
+        return False
+
+
+@dataclass
+class SignatureRecord:
+    """数字签名记录数据类"""
+    signature_id: str
+    audit_id: str
+    file_path: str
+    file_hash: str
+    username: str
+    operation_time: str
+    input_directory: Optional[str] = None
+    algorithm: str = SIGNATURE_ALGORITHM
+    signature: Optional[str] = None
+    payload: Optional[str] = None
+    signed_at: Optional[str] = None
+    public_key_path: Optional[str] = None
+    is_verified: bool = False
+    verified_at: Optional[str] = None
+
+
+def _ensure_signature_tables(db_path):
+    """确保数字签名相关表存在"""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS digital_signatures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signature_id TEXT NOT NULL UNIQUE,
+            audit_id TEXT,
+            file_path TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            username TEXT NOT NULL,
+            operation_time TEXT NOT NULL,
+            input_directory TEXT,
+            algorithm TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            payload TEXT,
+            signed_at TEXT NOT NULL,
+            public_key_path TEXT,
+            is_verified INTEGER DEFAULT 0,
+            verified_at TEXT,
+            FOREIGN KEY (audit_id) REFERENCES audit_logs (audit_id)
+        )
+    ''')
+
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_signatures_audit ON digital_signatures(audit_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_signatures_file ON digital_signatures(file_path)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_signatures_hash ON digital_signatures(file_hash)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_signatures_signed ON digital_signatures(signed_at)')
+
+    conn.commit()
+    conn.close()
+
+
+def save_signature_record(signature_info, audit_id=None, script_dir=None, db_path=None):
+    """
+    保存或更新数字签名记录到数据库。
+
+    如果 signature_info 中已有 signature_id，则更新该记录（主要用于添加 audit_id）；
+    否则插入新记录。
+
+    Args:
+        signature_info: 签名信息字典（来自 sign_output_file）
+        audit_id: 关联的审计记录 ID
+        script_dir: 脚本目录
+        db_path: 数据库路径（可选）
+
+    Returns:
+        str: signature_id，失败返回 None
+    """
+    if not signature_info:
+        return None
+
+    if db_path is None:
+        db_path = get_audit_db_path(script_dir)
+
+    init_audit_db(db_path)
+    _ensure_signature_tables(db_path)
+
+    existing_signature_id = signature_info.get('signature_id')
+    signed_at = signature_info.get('signed_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'))
+    public_key_path = get_signature_key_path(script_dir, public=True)
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    if existing_signature_id:
+        cursor.execute('SELECT signature_id FROM digital_signatures WHERE signature_id = ?', (existing_signature_id,))
+        exists = cursor.fetchone()
+        if exists:
+            cursor.execute('''
+                UPDATE digital_signatures SET
+                    audit_id = ?,
+                    file_path = ?,
+                    file_hash = ?,
+                    username = ?,
+                    operation_time = ?,
+                    input_directory = ?,
+                    algorithm = ?,
+                    signature = ?,
+                    payload = ?,
+                    signed_at = ?,
+                    public_key_path = ?
+                WHERE signature_id = ?
+            ''', (
+                audit_id, signature_info.get('file_path'),
+                signature_info.get('file_hash'), signature_info.get('username'),
+                signature_info.get('operation_time'), signature_info.get('input_directory'),
+                signature_info.get('algorithm'), signature_info.get('signature'),
+                signature_info.get('payload'), signed_at, public_key_path,
+                existing_signature_id
+            ))
+            conn.commit()
+            conn.close()
+
+            logger = get_logger()
+            logger.info('数字签名记录已更新 [%s] 关联审计: %s', existing_signature_id, audit_id)
+            return existing_signature_id
+
+    signature_id = existing_signature_id or f"SIG{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
+
+    cursor.execute('''
+        INSERT INTO digital_signatures (
+            signature_id, audit_id, file_path, file_hash, username,
+            operation_time, input_directory, algorithm, signature, payload,
+            signed_at, public_key_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        signature_id, audit_id, signature_info.get('file_path'),
+        signature_info.get('file_hash'), signature_info.get('username'),
+        signature_info.get('operation_time'), signature_info.get('input_directory'),
+        signature_info.get('algorithm'), signature_info.get('signature'),
+        signature_info.get('payload'), signed_at, public_key_path
+    ))
+
+    conn.commit()
+    conn.close()
+
+    logger = get_logger()
+    logger.info('数字签名记录已保存 [%s] 文件: %s', signature_id, signature_info.get('file_path'))
+    return signature_id
+
+
+def query_signatures(script_dir=None, audit_id=None, signature_id=None, file_path=None,
+                    file_hash=None, username=None, limit=100):
+    """
+    查询数字签名记录。
+
+    Args:
+        script_dir: 脚本目录
+        audit_id: 按审计 ID 过滤
+        signature_id: 按签名 ID 过滤
+        file_path: 按文件路径过滤
+        file_hash: 按文件哈希过滤
+        username: 按用户名过滤
+        limit: 返回记录数限制
+
+    Returns:
+        List[Dict]: 签名记录列表
+    """
+    db_path = get_audit_db_path(script_dir)
+    if not os.path.exists(db_path):
+        return []
+
+    _ensure_signature_tables(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = 'SELECT * FROM digital_signatures WHERE 1=1'
+    params = []
+
+    if audit_id:
+        query += ' AND audit_id = ?'
+        params.append(audit_id)
+    if signature_id:
+        query += ' AND signature_id = ?'
+        params.append(signature_id)
+    if file_path:
+        query += ' AND file_path = ?'
+        params.append(file_path)
+    if file_hash:
+        query += ' AND file_hash = ?'
+        params.append(file_hash)
+    if username:
+        query += ' AND username = ?'
+        params.append(username)
+
+    query += ' ORDER BY signed_at DESC LIMIT ?'
+    params.append(limit)
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    results = []
+    for row in rows:
+        result = dict(row)
+        result['is_verified'] = bool(result.get('is_verified', 0))
+        results.append(result)
+
+    return results
+
+
+def verify_and_update_signature(signature_id, script_dir=None, public_key=None):
+    """
+    验证签名并更新验证状态。
+
+    Args:
+        signature_id: 签名记录 ID
+        script_dir: 脚本目录
+        public_key: 公钥对象（可选）
+
+    Returns:
+        bool: 签名是否有效
+    """
+    db_path = get_audit_db_path(script_dir)
+    if not os.path.exists(db_path):
+        return False
+
+    _ensure_signature_tables(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT * FROM digital_signatures WHERE signature_id = ?', (signature_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False
+
+    signature_info = dict(row)
+    conn.close()
+
+    is_valid = verify_output_file_signature(
+        output_path=signature_info.get('file_path'),
+        signature_info=signature_info,
+        script_dir=script_dir,
+        public_key=public_key
+    )
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE digital_signatures SET is_verified = ?, verified_at = ?
+        WHERE signature_id = ?
+    ''', (
+        1 if is_valid else 0,
+        datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f') if is_valid else None,
+        signature_id
+    ))
+    conn.commit()
+    conn.close()
+
+    return is_valid
+
+
+def export_signature_manifest(output_path, script_dir=None, **query_kwargs):
+    """
+    导出签名清单到 JSON 文件。
+
+    Args:
+        output_path: 输出 JSON 文件路径
+        script_dir: 脚本目录
+        query_kwargs: 查询参数（同 query_signatures）
+
+    Returns:
+        str: 输出文件路径，失败返回 None
+    """
+    signatures = query_signatures(script_dir=script_dir, **query_kwargs)
+    if not signatures:
+        return None
+
+    manifest = {
+        'exported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'signature_count': len(signatures),
+        'algorithm': SIGNATURE_ALGORITHM,
+        'public_key_path': get_signature_key_path(script_dir, public=True),
+        'signatures': signatures
+    }
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    return output_path
+
+
 def query_audit_logs(script_dir=None, username=None, operation_type=None,
-                     start_date=None, end_date=None, status=None, limit=100):
+                     start_date=None, end_date=None, status=None, limit=100,
+                     has_signature=None, output_hash=None, signature_id=None):
     """
     查询审计日志记录。
 
@@ -3530,6 +4325,9 @@ def query_audit_logs(script_dir=None, username=None, operation_type=None,
         end_date: 结束日期 (YYYY-MM-DD)
         status: 按状态过滤
         limit: 返回记录数限制
+        has_signature: 是否有数字签名（True/False/None）
+        output_hash: 按输出文件哈希过滤
+        signature_id: 按签名 ID 过滤
 
     Returns:
         List[Dict] 审计记录列表
@@ -3540,6 +4338,8 @@ def query_audit_logs(script_dir=None, username=None, operation_type=None,
 
     if not os.path.exists(db_path):
         return []
+
+    _migrate_audit_db_columns(db_path)
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -3563,6 +4363,17 @@ def query_audit_logs(script_dir=None, username=None, operation_type=None,
     if status:
         query += ' AND status = ?'
         params.append(status)
+    if has_signature is not None:
+        if has_signature:
+            query += ' AND digital_signature IS NOT NULL'
+        else:
+            query += ' AND digital_signature IS NULL'
+    if output_hash:
+        query += ' AND output_hash = ?'
+        params.append(output_hash)
+    if signature_id:
+        query += ' AND signature_id = ?'
+        params.append(signature_id)
 
     query += ' ORDER BY started_at DESC LIMIT ?'
     params.append(limit)
@@ -3571,7 +4382,13 @@ def query_audit_logs(script_dir=None, username=None, operation_type=None,
     rows = cursor.fetchall()
     conn.close()
 
-    return [dict(row) for row in rows]
+    results = []
+    for row in rows:
+        record = dict(row)
+        record['lookup_missing'] = bool(record.get('lookup_missing', 0))
+        results.append(record)
+
+    return results
 
 
 def query_config_changes(script_dir=None, config_type=None, config_name=None,
@@ -3652,7 +4469,10 @@ def export_audit_logs(output_path, script_dir=None, **query_kwargs):
         'started_at', 'completed_at', 'duration_ms',
         'client_ip', 'client_hostname',
         'error_message', 'config_snapshot',
-        'input_files_hash', 'output_hash', 'id'
+        'input_files_hash', 'output_hash',
+        'signature_id', 'digital_signature',
+        'signature_algorithm', 'signed_at',
+        'id'
     ]
     for col in columns_order:
         if col not in df.columns:
@@ -3663,6 +4483,103 @@ def export_audit_logs(output_path, script_dir=None, **query_kwargs):
     logger = get_logger()
     logger.info('审计日志已导出到: %s (共 %d 条记录)', output_path, len(records))
     return output_path
+
+
+def export_signatures(output_path, script_dir=None, **query_kwargs):
+    """
+    导出数字签名记录到 Excel 文件。
+
+    Args:
+        output_path: 输出文件路径
+        script_dir: 脚本目录
+        **query_kwargs: 查询参数（同 query_signatures）
+
+    Returns:
+        输出文件路径，失败返回 None
+    """
+    signatures = query_signatures(script_dir=script_dir, **query_kwargs)
+    if not signatures:
+        return None
+
+    df = pd.DataFrame(signatures)
+    columns_order = [
+        'signature_id', 'audit_id', 'file_path', 'file_hash',
+        'username', 'operation_time', 'input_directory',
+        'algorithm', 'signature', 'payload',
+        'signed_at', 'public_key_path',
+        'is_verified', 'verified_at', 'id'
+    ]
+    for col in columns_order:
+        if col not in df.columns:
+            df[col] = None
+    df = df[columns_order]
+
+    df.to_excel(output_path, index=False, engine='openpyxl')
+    logger = get_logger()
+    logger.info('数字签名记录已导出到: %s (共 %d 条记录)', output_path, len(signatures))
+    return output_path
+
+
+def verify_file_by_path(file_path, script_dir=None, public_key=None):
+    """
+    根据文件路径验证文件完整性和数字签名。
+
+    Args:
+        file_path: 要验证的文件路径
+        script_dir: 脚本目录
+        public_key: 公钥对象（可选）
+
+    Returns:
+        Dict: 验证结果，包含 integrity_valid（完整性）、signature_valid（签名有效性）等信息
+    """
+    result = {
+        'file_path': file_path,
+        'exists': False,
+        'integrity_valid': False,
+        'signature_valid': False,
+        'signature_record': None,
+        'error': None,
+    }
+
+    if not file_path or not os.path.exists(file_path):
+        result['error'] = '文件不存在'
+        return result
+
+    result['exists'] = True
+
+    try:
+        current_hash = compute_file_hash(file_path)
+        signatures = query_signatures(script_dir=script_dir, file_path=file_path, limit=10)
+
+        if not signatures:
+            result['error'] = '未找到该文件的签名记录'
+            return result
+
+        latest_signature = signatures[0]
+        result['signature_record'] = latest_signature
+
+        result['integrity_valid'] = current_hash == latest_signature.get('file_hash')
+        if not result['integrity_valid']:
+            result['error'] = '文件内容已被篡改'
+            return result
+
+        result['signature_valid'] = verify_output_file_signature(
+            output_path=file_path,
+            signature_info=latest_signature,
+            script_dir=script_dir,
+            public_key=public_key
+        )
+
+        if not result['signature_valid']:
+            result['error'] = '数字签名验证失败'
+
+        return result
+
+    except Exception as e:
+        result['error'] = f'验证过程出错: {e}'
+        logger = get_logger()
+        logger.error('文件验证失败: %s', e, exc_info=True)
+        return result
 
 
 def export_config_changes(output_path, script_dir=None, expand_details=False, **query_kwargs):
