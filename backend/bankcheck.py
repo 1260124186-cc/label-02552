@@ -247,6 +247,7 @@ def cli_askmode():
     print(t('cli.option_subject_summary'))
     print(t('cli.option_balance_check'))
     print(t('cli.option_duplicate_check'))
+    print(t('cli.option_interest_fee_check'))
     choice = input(t('cli.enter_choice')).strip()
     if choice == '2':
         return 'diff'
@@ -270,6 +271,8 @@ def cli_askmode():
         return 'balance_check'
     elif choice == '12':
         return 'duplicate_check'
+    elif choice == '13':
+        return 'interest_fee_check'
     return 'pipeline'
 
 
@@ -334,6 +337,7 @@ def _gui_askmode_full():
         (t('modes.subject_summary_name'), 'subject_summary', t('modes.subject_summary_desc'), '#3F51B5'),
         (t('modes.balance_check_name'), 'balance_check', t('modes.balance_check_desc'), '#8BC34A'),
         (t('modes.duplicate_check_name'), 'duplicate_check', t('modes.duplicate_check_desc'), '#F44336'),
+        (t('modes.interest_fee_check_name'), 'interest_fee_check', t('modes.interest_fee_check_desc'), '#009688'),
         (t('modes.db_query_name'), 'db_query', t('modes.db_query_desc'), '#00BCD4'),
         (t('modes.db_stats_name'), 'db_stats', t('modes.db_stats_desc'), '#795548'),
         (t('modes.batch_history_name'), 'batch_history', t('modes.batch_history_desc'), '#E91E63'),
@@ -1682,6 +1686,7 @@ class ProcessingResult:
     subject_summary_path: Optional[str] = None
     balance_check_path: Optional[str] = None
     duplicate_check_path: Optional[str] = None
+    interest_fee_check_path: Optional[str] = None
     accounting_period_path: Optional[str] = None
     perf_report_path: Optional[str] = None
     collab_template_path: Optional[str] = None
@@ -2253,6 +2258,28 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
             logger.error('自动生成重复交易检测报告失败: %s', e, exc_info=True)
             duplicate_check_path = None
 
+    interest_fee_check_path = None
+    if final_rows:
+        try:
+            output_dir = script_dir
+            if output_path:
+                output_dir = os.path.dirname(output_path) or script_dir
+            source_info = {
+                '数据来源': '主流程自动生成',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            interest_fee_check_path = generate_interest_fee_check_from_records(
+                final_rows, output_dir, source_info
+            )
+            if interest_fee_check_path:
+                logger.info(t('success.interest_fee_check_generated', path=interest_fee_check_path))
+        except Exception as e:
+            logger.error('自动生成利息手续费核对报告失败: %s', e, exc_info=True)
+            interest_fee_check_path = None
+
     accounting_period_path = None
     if final_rows:
         try:
@@ -2349,7 +2376,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
 
             files_to_encrypt = []
             for fp in [output_path, subject_summary_path, balance_check_path,
-                       duplicate_check_path, accounting_period_path]:
+                       duplicate_check_path, interest_fee_check_path, accounting_period_path]:
                 if fp and os.path.isfile(fp):
                     files_to_encrypt.append(fp)
 
@@ -2387,6 +2414,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
         duplicate_check_path=duplicate_check_path,
+        interest_fee_check_path=interest_fee_check_path,
         accounting_period_path=accounting_period_path,
         perf_report_path=perf_report_path,
         collab_template_path=collab_template_path,
@@ -2450,6 +2478,9 @@ def format_result_message(result):
 
         if result.duplicate_check_path:
             msg += f'\n\n重复交易检测：{result.duplicate_check_path}'
+
+        if result.interest_fee_check_path:
+            msg += f'\n\n利息手续费核对：{result.interest_fee_check_path}'
 
         if result.accounting_period_path:
             msg += f'\n\n会计期间总表：{result.accounting_period_path}'
@@ -8029,6 +8060,14 @@ def parse_args_and_run():
                        help='指定总表文件直接生成重复交易检测报告')
     parser.add_argument('--duplicate-output', type=str, metavar='OUTPUT_DIR',
                        help='指定重复交易检测报告输出目录')
+    parser.add_argument('--interest-fee-check', action='store_true',
+                       help='进入利息与手续费专项核对功能')
+    parser.add_argument('--interest-fee-total', type=str, metavar='TOTAL_FILE',
+                       help='指定总表文件直接生成利息手续费核对报告')
+    parser.add_argument('--interest-fee-output', type=str, metavar='OUTPUT_DIR',
+                       help='指定利息手续费核对报告输出目录')
+    parser.add_argument('--interest-fee-period', type=str, metavar='PERIOD',
+                       help='指定汇总期间类型: month(月), quarter(季), year(年), week(周)，默认 month')
 
     args = parser.parse_args()
 
@@ -8303,6 +8342,32 @@ def parse_args_and_run():
             return True
         else:
             run_duplicate_check_flow(script_dir)
+            return True
+
+    if args.interest_fee_check or args.interest_fee_total:
+        if args.interest_fee_total:
+            total_path = os.path.abspath(args.interest_fee_total)
+            if not os.path.exists(total_path):
+                logger.error('总表文件不存在: %s', total_path)
+                print(f'错误: 总表文件不存在: {total_path}')
+                return True
+
+            output_dir = None
+            if args.interest_fee_output:
+                output_dir = os.path.abspath(args.interest_fee_output)
+                os.makedirs(output_dir, exist_ok=True)
+
+            period_type = args.interest_fee_period if args.interest_fee_period else 'month'
+
+            result_path = generate_interest_fee_check_from_total(total_path, output_dir, period_type)
+            if result_path:
+                print(f'\n✅ 利息手续费核对报告已生成！')
+                print(f'   输出文件: {result_path}\n')
+            else:
+                print(f'\n❌ 生成失败，请检查总表文件是否有数据\n')
+            return True
+        else:
+            run_interest_fee_check_flow(script_dir)
             return True
 
     return None
@@ -8825,6 +8890,8 @@ def main():
         run_balance_check_flow(script_dir)
     elif mode == 'duplicate_check':
         run_duplicate_check_flow(script_dir)
+    elif mode == 'interest_fee_check':
+        run_interest_fee_check_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
@@ -12574,6 +12641,842 @@ def run_duplicate_check_flow(script_dir):
         logger.error('重复交易检测报告导出失败: %s', e, exc_info=True)
 
     logger.info('========== 重复交易检测结束 ==========')
+
+
+# ──────────────────────────────────────────────
+# 利息与手续费专项核对模块
+# ──────────────────────────────────────────────
+
+INTEREST_FEE_KEYWORDS = [
+    '利息', '结息', '手续费', '服务费', '管理费', '年费', '工本费',
+    '短信费', '网银费', '账户管理费', '结算手续费', '汇兑手续费',
+    '转账手续费', '提现手续费', '支付手续费', '跨行手续费',
+    'interest', 'fee', 'charge', 'commission',
+]
+
+TRANSACTION_TYPE_INTEREST = 'interest'
+TRANSACTION_TYPE_FEE = 'fee'
+
+FEE_CATEGORY_KEYWORDS = {
+    '利息收入': ['利息收入', '存款利息', '活期利息', '定期利息', '结息'],
+    '利息支出': ['利息支出', '贷款利息', '借款利息', '罚息'],
+    '转账手续费': ['转账', '汇款', '汇兑', '跨行'],
+    '提现手续费': ['提现', '取现'],
+    '支付手续费': ['支付', '快捷支付', '网关支付'],
+    '账户管理费': ['账户管理费', '年费', '账户维护费'],
+    '网银服务费': ['网银', '网上银行', '手机银行'],
+    '短信服务费': ['短信', '通知'],
+    '其他手续费': ['手续费', '服务费', '工本费', '其他'],
+}
+
+EXPECTED_RATE_CONFIG = {
+    '转账手续费': {'rate': 0.005, 'min': 1.0, 'max': 50.0, 'base': 'amount'},
+    '提现手续费': {'rate': 0.001, 'min': 0.1, 'max': 100.0, 'base': 'amount'},
+    '跨行手续费': {'rate': 0.003, 'min': 2.0, 'max': 50.0, 'base': 'amount'},
+    '账户管理费': {'fixed': 10.0, 'base': 'monthly'},
+    '年费': {'fixed': 100.0, 'base': 'yearly'},
+    '短信服务费': {'fixed': 3.0, 'base': 'monthly'},
+}
+
+ANOMALY_THRESHOLD = {
+    'vs_expected_rate': 0.3,
+    'vs_historical_mean': 0.5,
+    'period_over_period': 0.5,
+}
+
+
+@dataclass
+class InterestFeeTransaction:
+    """利息手续费交易记录"""
+    transaction_id: str
+    trade_date: Optional[datetime]
+    bank: str
+    bank_account: str
+    subject: str
+    summary: str
+    amount: float
+    counterpart: str
+    transaction_type: str
+    fee_category: str
+    matched_keyword: str
+
+
+@dataclass
+class PeriodSummary:
+    """期间汇总记录"""
+    period: str
+    period_type: str
+    subject: str
+    bank: str
+    fee_category: str
+    transaction_type: str
+    transaction_count: int
+    total_amount: float
+    avg_amount: float
+    max_amount: float
+    min_amount: float
+    historical_mean: float
+    historical_std: float
+    expected_amount: float
+    deviation_from_expected: float
+    deviation_from_historical: float
+    period_over_period_change: float
+    is_anomaly: bool
+    anomaly_reasons: List[str]
+
+
+@dataclass
+class InterestFeeCheckResult:
+    """利息手续费核对结果"""
+    total_records: int = 0
+    interest_records: int = 0
+    fee_records: int = 0
+    total_interest_amount: float = 0.0
+    total_fee_amount: float = 0.0
+    filtered_transactions: List[InterestFeeTransaction] = field(default_factory=list)
+    period_summaries: List[PeriodSummary] = field(default_factory=list)
+    anomaly_count: int = 0
+    anomaly_summaries: List[PeriodSummary] = field(default_factory=list)
+    check_summary: Dict[str, Any] = field(default_factory=dict)
+
+
+def _classify_transaction(summary: str) -> Tuple[str, str, str]:
+    """
+    分类交易：识别交易类型和费用类别
+
+    Returns:
+        (transaction_type, fee_category, matched_keyword)
+    """
+    summary_lower = str(summary).lower() if summary else ''
+    summary_cn = str(summary) if summary else ''
+
+    matched_keyword = ''
+    for kw in INTEREST_FEE_KEYWORDS:
+        if kw.lower() in summary_lower or kw in summary_cn:
+            matched_keyword = kw
+            break
+
+    if not matched_keyword:
+        return '', '', ''
+
+    transaction_type = TRANSACTION_TYPE_FEE
+    fee_category = '其他手续费'
+
+    if '利息' in summary_cn or 'interest' in summary_lower or '结息' in summary_cn:
+        transaction_type = TRANSACTION_TYPE_INTEREST
+        for category, keywords in FEE_CATEGORY_KEYWORDS.items():
+            if '利息' in category:
+                for kw in keywords:
+                    if kw in summary_cn or kw.lower() in summary_lower:
+                        fee_category = category
+                        break
+                if fee_category != '其他手续费':
+                    break
+        if fee_category == '其他手续费':
+            fee_category = '利息收入'
+    else:
+        for category, keywords in FEE_CATEGORY_KEYWORDS.items():
+            if '利息' not in category:
+                for kw in keywords:
+                    if kw in summary_cn or kw.lower() in summary_lower:
+                        fee_category = category
+                        break
+                if fee_category != '其他手续费':
+                    break
+
+    return transaction_type, fee_category, matched_keyword
+
+
+def _get_period_key(date_val: Optional[datetime], period_type: str = 'month') -> str:
+    """获取期间键值"""
+    if date_val is None:
+        return '未知'
+    if period_type == 'year':
+        return date_val.strftime('%Y')
+    elif period_type == 'quarter':
+        quarter = (date_val.month - 1) // 3 + 1
+        return f'{date_val.year}Q{quarter}'
+    elif period_type == 'week':
+        return date_val.strftime('%Y-W%W')
+    else:
+        return date_val.strftime('%Y-%m')
+
+
+def filter_interest_fee_transactions(records: List[Dict[str, Any]]) -> List[InterestFeeTransaction]:
+    """
+    筛选摘要含利息、手续费等关键词的交易
+
+    Args:
+        records: 交易记录列表
+
+    Returns:
+        筛选后的利息手续费交易列表
+    """
+    logger = get_logger()
+    result = []
+
+    for record in records:
+        summary = record.get('摘要', '')
+        if not summary:
+            continue
+
+        trans_type, fee_category, matched_kw = _classify_transaction(summary)
+        if not trans_type:
+            continue
+
+        payment = _safe_float(record.get('付款'))
+        receipt = _safe_float(record.get('收款'))
+        amount = receipt if receipt > 0 else abs(payment)
+
+        trade_date = _parse_transaction_date(record.get('交易日期'))
+
+        txn = InterestFeeTransaction(
+            transaction_id=str(record.get('交易流水号', '')),
+            trade_date=trade_date,
+            bank=str(record.get('银行', '')),
+            bank_account=str(record.get('银行账号', '')),
+            subject=str(record.get('主体', '')),
+            summary=str(summary),
+            amount=amount,
+            counterpart=str(record.get('对方户名', '')),
+            transaction_type=trans_type,
+            fee_category=fee_category,
+            matched_keyword=matched_kw,
+        )
+        result.append(txn)
+
+    logger.info('筛选出 %d 条利息手续费交易', len(result))
+    return result
+
+
+def _calculate_expected_amount(category: str, amount: float, period_type: str) -> float:
+    """计算预期金额"""
+    config = EXPECTED_RATE_CONFIG.get(category, {})
+    if not config:
+        return 0.0
+
+    base = config.get('base', 'amount')
+    if base == 'amount':
+        rate = config.get('rate', 0)
+        min_fee = config.get('min', 0)
+        max_fee = config.get('max', float('inf'))
+        expected = amount * rate
+        return max(min_fee, min(expected, max_fee))
+    elif base == 'monthly':
+        return config.get('fixed', 0.0)
+    elif base == 'yearly':
+        if period_type == 'year':
+            return config.get('fixed', 0.0)
+        return config.get('fixed', 0.0) / 12
+
+    return 0.0
+
+
+def summarize_by_period(transactions: List[InterestFeeTransaction],
+                        period_type: str = 'month') -> List[PeriodSummary]:
+    """
+    按期间汇总利息手续费交易
+
+    Args:
+        transactions: 利息手续费交易列表
+        period_type: 期间类型 ('year', 'quarter', 'month', 'week')
+
+    Returns:
+        期间汇总列表
+    """
+    logger = get_logger()
+
+    summary_map: Dict[Tuple[str, str, str, str, str], List[InterestFeeTransaction]] = {}
+    for txn in transactions:
+        period = _get_period_key(txn.trade_date, period_type)
+        key = (period, txn.subject, txn.bank, txn.fee_category, txn.transaction_type)
+        if key not in summary_map:
+            summary_map[key] = []
+        summary_map[key].append(txn)
+
+    category_history: Dict[Tuple[str, str, str, str], List[float]] = {}
+    period_totals: Dict[Tuple[str, str, str, str, str], float] = {}
+    for key, txns in summary_map.items():
+        period, subject, bank, category, txn_type = key
+        total = sum(t.amount for t in txns)
+        period_totals[key] = total
+        hist_key = (subject, bank, category, txn_type)
+        if hist_key not in category_history:
+            category_history[hist_key] = []
+        category_history[hist_key].append(total)
+
+    sorted_periods = sorted({k[0] for k in summary_map.keys()})
+    prev_period_totals: Dict[Tuple[str, str, str, str], float] = {}
+
+    result = []
+    for period in sorted_periods:
+        for key, txns in summary_map.items():
+            if key[0] != period:
+                continue
+
+            _, subject, bank, category, txn_type = key
+            amounts = [t.amount for t in txns]
+            total_amount = sum(amounts)
+            count = len(amounts)
+
+            hist_key = (subject, bank, category, txn_type)
+            history = category_history.get(hist_key, [])
+            if len(history) > 1:
+                historical_mean = sum(history) / len(history)
+                variance = sum((x - historical_mean) ** 2 for x in history) / len(history)
+                historical_std = variance ** 0.5
+            else:
+                historical_mean = total_amount
+                historical_std = 0.0
+
+            expected_amount = 0.0
+            for t in txns:
+                expected_amount += _calculate_expected_amount(category, t.amount, period_type)
+
+            deviation_from_expected = 0.0
+            if expected_amount > 0:
+                deviation_from_expected = (total_amount - expected_amount) / expected_amount
+
+            deviation_from_historical = 0.0
+            if historical_mean > 0:
+                deviation_from_historical = (total_amount - historical_mean) / historical_mean
+
+            pop_change = 0.0
+            prev_total = prev_period_totals.get(hist_key, 0.0)
+            if prev_total > 0:
+                pop_change = (total_amount - prev_total) / prev_total
+            prev_period_totals[hist_key] = total_amount
+
+            anomaly_reasons = []
+            is_anomaly = False
+
+            if abs(deviation_from_expected) > ANOMALY_THRESHOLD['vs_expected_rate']:
+                is_anomaly = True
+                anomaly_reasons.append(f'与预期费率偏差{deviation_from_expected*100:.1f}%，超出阈值{ANOMALY_THRESHOLD["vs_expected_rate"]*100:.0f}%')
+
+            if abs(deviation_from_historical) > ANOMALY_THRESHOLD['vs_historical_mean']:
+                is_anomaly = True
+                anomaly_reasons.append(f'与历史均值偏差{deviation_from_historical*100:.1f}%，超出阈值{ANOMALY_THRESHOLD["vs_historical_mean"]*100:.0f}%')
+
+            if abs(pop_change) > ANOMALY_THRESHOLD['period_over_period']:
+                is_anomaly = True
+                anomaly_reasons.append(f'环比变动{pop_change*100:.1f}%，超出阈值{ANOMALY_THRESHOLD["period_over_period"]*100:.0f}%')
+
+            summary = PeriodSummary(
+                period=period,
+                period_type=period_type,
+                subject=subject,
+                bank=bank,
+                fee_category=category,
+                transaction_type=txn_type,
+                transaction_count=count,
+                total_amount=total_amount,
+                avg_amount=total_amount / count if count > 0 else 0.0,
+                max_amount=max(amounts) if amounts else 0.0,
+                min_amount=min(amounts) if amounts else 0.0,
+                historical_mean=historical_mean,
+                historical_std=historical_std,
+                expected_amount=expected_amount,
+                deviation_from_expected=deviation_from_expected,
+                deviation_from_historical=deviation_from_historical,
+                period_over_period_change=pop_change,
+                is_anomaly=is_anomaly,
+                anomaly_reasons=anomaly_reasons,
+            )
+            result.append(summary)
+
+    logger.info('按%s汇总生成 %d 条期间汇总记录，异常 %d 条',
+                period_type, len(result), sum(1 for s in result if s.is_anomaly))
+    return result
+
+
+def check_interest_fee(records: List[Dict[str, Any]],
+                       period_type: str = 'month') -> InterestFeeCheckResult:
+    """
+    利息与手续费专项核对
+
+    核对逻辑：
+    1. 筛选摘要含利息、手续费等关键词的交易
+    2. 按期间（月/季/年）汇总
+    3. 与预期费率对比
+    4. 与历史均值对比
+    5. 环比波动分析
+    6. 标记异常波动
+
+    Args:
+        records: 交易记录列表
+        period_type: 汇总期间类型
+
+    Returns:
+        InterestFeeCheckResult: 核对结果
+    """
+    logger = get_logger()
+    result = InterestFeeCheckResult()
+
+    if not records:
+        logger.warning('无交易记录可核对')
+        result.check_summary = {'status': '无数据'}
+        return result
+
+    filtered = filter_interest_fee_transactions(records)
+    result.filtered_transactions = filtered
+    result.total_records = len(filtered)
+
+    for txn in filtered:
+        if txn.transaction_type == TRANSACTION_TYPE_INTEREST:
+            result.interest_records += 1
+            result.total_interest_amount += txn.amount
+        else:
+            result.fee_records += 1
+            result.total_fee_amount += txn.amount
+
+    summaries = summarize_by_period(filtered, period_type)
+    result.period_summaries = summaries
+    result.anomaly_summaries = [s for s in summaries if s.is_anomaly]
+    result.anomaly_count = len(result.anomaly_summaries)
+
+    result.check_summary = {
+        'total_records': result.total_records,
+        'interest_records': result.interest_records,
+        'fee_records': result.fee_records,
+        'total_interest_amount': result.total_interest_amount,
+        'total_fee_amount': result.total_fee_amount,
+        'period_count': len(summaries),
+        'anomaly_count': result.anomaly_count,
+        'period_type': period_type,
+        'check_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    logger.info(
+        '利息手续费核对完成 - 总记录: %d (利息: %d, 手续费: %d), '
+        '期间汇总: %d, 异常: %d',
+        result.total_records, result.interest_records, result.fee_records,
+        len(summaries), result.anomaly_count
+    )
+
+    return result
+
+
+def export_interest_fee_check_result(check_result: InterestFeeCheckResult,
+                                     output_path: str,
+                                     source_info: Optional[Dict[str, Any]] = None) -> str:
+    """
+    导出利息手续费核对结果为 Excel 文件
+
+    输出的 Sheet 包括：
+    1. 核对总览 - 整体统计信息
+    2. 交易明细 - 所有筛选出的利息手续费交易
+    3. 期间汇总 - 按期间汇总统计
+    4. 异常清单 - 异常波动记录
+
+    Args:
+        check_result: 核对结果
+        output_path: 输出文件路径
+        source_info: 数据源信息
+
+    Returns:
+        str: 输出文件路径
+    """
+    logger = get_logger()
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            overview_data = []
+            summary = check_result.check_summary
+
+            overview_items = [
+                ('核对项', '数值'),
+                ('利息手续费交易总数', summary.get('total_records', 0)),
+                ('利息类交易数', summary.get('interest_records', 0)),
+                ('手续费类交易数', summary.get('fee_records', 0)),
+                ('利息总金额(元)', summary.get('total_interest_amount', 0.0)),
+                ('手续费总金额(元)', summary.get('total_fee_amount', 0.0)),
+                ('期间汇总数', summary.get('period_count', 0)),
+                ('异常汇总数', summary.get('anomaly_count', 0)),
+                ('汇总期间', summary.get('period_type', 'month')),
+                ('核对时间', summary.get('check_time', '')),
+            ]
+            if source_info:
+                for k, v in source_info.items():
+                    overview_items.append((k, v))
+
+            overview_df = pd.DataFrame(overview_items[1:], columns=overview_items[0])
+            overview_df.to_excel(writer, sheet_name='核对总览', index=False)
+
+            if check_result.filtered_transactions:
+                txn_data = []
+                for txn in check_result.filtered_transactions:
+                    txn_data.append({
+                        '期间': _get_period_key(txn.trade_date, summary.get('period_type', 'month')),
+                        '主体': txn.subject,
+                        '银行': txn.bank,
+                        '银行账号': txn.bank_account,
+                        '交易日期': txn.trade_date.strftime('%Y-%m-%d') if txn.trade_date else '',
+                        '交易类型': '利息' if txn.transaction_type == TRANSACTION_TYPE_INTEREST else '手续费',
+                        '费用类别': txn.fee_category,
+                        '金额(元)': txn.amount,
+                        '摘要': txn.summary,
+                        '对方户名': txn.counterpart,
+                        '匹配关键词': txn.matched_keyword,
+                        '交易流水号': txn.transaction_id,
+                    })
+
+                txn_df = pd.DataFrame(txn_data)
+                txn_df = txn_df[[
+                    '期间', '主体', '银行', '银行账号', '交易日期',
+                    '交易类型', '费用类别', '金额(元)', '摘要',
+                    '对方户名', '匹配关键词', '交易流水号'
+                ]]
+                txn_df.to_excel(writer, sheet_name='交易明细', index=False)
+
+                ws = writer.sheets['交易明细']
+                for idx, col_name in enumerate(txn_df.columns, 1):
+                    col_letter = openpyxl.utils.get_column_letter(idx)
+                    max_len = max(
+                        len(str(col_name)),
+                        max((len(str(v)) for v in txn_df.iloc[:, idx - 1].astype(str)), default=0)
+                    )
+                    ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+                for row in ws.iter_rows(min_row=2):
+                    for cell in row:
+                        col_name = txn_df.columns[cell.column - 1]
+                        if '金额' in str(col_name):
+                            cell.number_format = '#,##0.00'
+
+            if check_result.period_summaries:
+                period_data = []
+                for s in check_result.period_summaries:
+                    period_data.append({
+                        '期间': s.period,
+                        '主体': s.subject,
+                        '银行': s.bank,
+                        '费用类别': s.fee_category,
+                        '交易类型': '利息' if s.transaction_type == TRANSACTION_TYPE_INTEREST else '手续费',
+                        '交易笔数': s.transaction_count,
+                        '总金额(元)': s.total_amount,
+                        '平均金额(元)': s.avg_amount,
+                        '最大金额(元)': s.max_amount,
+                        '最小金额(元)': s.min_amount,
+                        '历史均值(元)': s.historical_mean,
+                        '预期金额(元)': s.expected_amount,
+                        '与预期偏差(%)': s.deviation_from_expected * 100,
+                        '与历史偏差(%)': s.deviation_from_historical * 100,
+                        '环比变动(%)': s.period_over_period_change * 100,
+                        '是否异常': '是' if s.is_anomaly else '否',
+                        '异常原因': '; '.join(s.anomaly_reasons),
+                    })
+
+                period_df = pd.DataFrame(period_data)
+                period_df.to_excel(writer, sheet_name='期间汇总', index=False)
+
+                ws = writer.sheets['期间汇总']
+                for idx, col_name in enumerate(period_df.columns, 1):
+                    col_letter = openpyxl.utils.get_column_letter(idx)
+                    max_len = max(
+                        len(str(col_name)),
+                        max((len(str(v)) for v in period_df.iloc[:, idx - 1].astype(str)), default=0)
+                    )
+                    ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+                for row in ws.iter_rows(min_row=2):
+                    for cell in row:
+                        col_name = period_df.columns[cell.column - 1]
+                        if '金额' in str(col_name):
+                            cell.number_format = '#,##0.00'
+                        elif '偏差' in str(col_name) or '变动' in str(col_name):
+                            cell.number_format = '0.00'
+
+                for row in ws.iter_rows(min_row=2):
+                    for cell in row:
+                        col_name = period_df.columns[cell.column - 1]
+                        if col_name == '是否异常' and cell.value == '是':
+                            cell.fill = openpyxl.styles.PatternFill(
+                                start_color='FFC7CE', end_color='FFC7CE', fill_type='solid'
+                            )
+
+            if check_result.anomaly_summaries:
+                anomaly_data = []
+                for i, s in enumerate(check_result.anomaly_summaries, 1):
+                    anomaly_data.append({
+                        '序号': i,
+                        '期间': s.period,
+                        '主体': s.subject,
+                        '银行': s.bank,
+                        '费用类别': s.fee_category,
+                        '交易类型': '利息' if s.transaction_type == TRANSACTION_TYPE_INTEREST else '手续费',
+                        '交易笔数': s.transaction_count,
+                        '总金额(元)': s.total_amount,
+                        '历史均值(元)': s.historical_mean,
+                        '预期金额(元)': s.expected_amount,
+                        '与预期偏差(%)': s.deviation_from_expected * 100,
+                        '与历史偏差(%)': s.deviation_from_historical * 100,
+                        '环比变动(%)': s.period_over_period_change * 100,
+                        '异常原因': '; '.join(s.anomaly_reasons),
+                    })
+
+                anomaly_df = pd.DataFrame(anomaly_data)
+                anomaly_df.to_excel(writer, sheet_name='异常清单', index=False)
+
+                ws = writer.sheets['异常清单']
+                for idx, col_name in enumerate(anomaly_df.columns, 1):
+                    col_letter = openpyxl.utils.get_column_letter(idx)
+                    max_len = max(
+                        len(str(col_name)),
+                        max((len(str(v)) for v in anomaly_df.iloc[:, idx - 1].astype(str)), default=0)
+                    )
+                    ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+                for row in ws.iter_rows(min_row=2):
+                    for cell in row:
+                        col_name = anomaly_df.columns[cell.column - 1]
+                        if '金额' in str(col_name):
+                            cell.number_format = '#,##0.00'
+                        elif '偏差' in str(col_name) or '变动' in str(col_name):
+                            cell.number_format = '0.00'
+                        elif '序号' in str(col_name) or '笔数' in str(col_name):
+                            cell.number_format = '#,##0'
+
+            ws_overview = writer.sheets['核对总览']
+            for col_idx in range(1, 3):
+                col_letter = openpyxl.utils.get_column_letter(col_idx)
+                ws_overview.column_dimensions[col_letter].width = 25
+
+            for row in ws_overview.iter_rows(min_row=2):
+                for cell in row:
+                    if cell.column == 2:
+                        val = cell.value
+                        if isinstance(val, (int, float)):
+                            if isinstance(val, float):
+                                cell.number_format = '#,##0.00'
+                            else:
+                                cell.number_format = '#,##0'
+
+        logger.info('利息手续费核对结果已导出: %s', output_path)
+        return output_path
+
+    except Exception as e:
+        logger.error('导出利息手续费核对结果失败: %s', e, exc_info=True)
+        raise
+
+
+def generate_interest_fee_check_from_records(records: List[Dict[str, Any]],
+                                             output_dir: Optional[str] = None,
+                                             source_info: Optional[Dict[str, Any]] = None,
+                                             period_type: str = 'month') -> Optional[str]:
+    """
+    从交易记录列表直接生成利息手续费核对报告
+
+    Args:
+        records: 交易记录列表
+        output_dir: 输出目录
+        source_info: 数据源信息
+        period_type: 汇总期间类型
+
+    Returns:
+        str: 生成的文件路径，无数据则返回 None
+    """
+    logger = get_logger()
+
+    if not records:
+        logger.warning('无交易记录，跳过利息手续费核对')
+        return None
+
+    if output_dir is None:
+        output_dir = get_script_dir()
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'利息手续费核对报告_{timestamp}.xlsx'
+    output_path = os.path.join(output_dir, filename)
+
+    check_result = check_interest_fee(records, period_type=period_type)
+
+    if check_result.total_records == 0:
+        logger.warning('未筛选到任何利息手续费交易，跳过报告生成')
+        return None
+
+    return export_interest_fee_check_result(check_result, output_path, source_info)
+
+
+def generate_interest_fee_check_from_total(total_path: str,
+                                           output_dir: Optional[str] = None,
+                                           period_type: str = 'month') -> Optional[str]:
+    """
+    从银行流水总表文件生成利息手续费核对报告
+
+    Args:
+        total_path: 总表文件路径
+        output_dir: 输出目录
+        period_type: 汇总期间类型
+
+    Returns:
+        str: 生成的文件路径，无数据则返回 None
+    """
+    logger = get_logger()
+
+    if not total_path or not os.path.exists(total_path):
+        logger.error('总表文件不存在: %s', total_path)
+        return None
+
+    records = load_total_table(total_path)
+    if not records:
+        logger.warning('总表文件无数据: %s', total_path)
+        return None
+
+    source_info = {
+        '数据来源文件': os.path.basename(total_path),
+        '总表记录数': len(records),
+        '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    return generate_interest_fee_check_from_records(
+        records, output_dir, source_info, period_type
+    )
+
+
+def run_interest_fee_check_flow(script_dir):
+    """利息手续费核对 CLI 流程"""
+    logger = get_logger()
+    logger.info('========== 利息手续费核对开始 ==========')
+
+    print('\n' + '=' * 70)
+    print('利息与手续费专项核对 - 筛选、汇总、费率对比与异常检测')
+    print('=' * 70)
+    print('\n请选择数据来源：')
+    print('  1) 从银行流水总表文件（Excel）')
+    print('  2) 从数据库（按条件查询后核对）')
+    print('  0) 返回主菜单')
+
+    choice = input('\n请输入选项（默认 1）: ').strip() or '1'
+
+    records = []
+    source_info = {}
+
+    if choice == '0':
+        return
+    elif choice == '1':
+        total_path = ask_file('请选择【银行流水总表】文件')
+        if not total_path:
+            show_info('提示', '未选择总表文件，返回。')
+            return
+        logger.info('用户选择总表文件: %s', total_path)
+        records = load_total_table(total_path)
+        if not records:
+            show_warning('错误', '总表文件无数据或读取失败。')
+            return
+        source_info = {
+            '数据来源文件': os.path.basename(total_path),
+            '总表记录数': len(records),
+            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    elif choice == '2':
+        if not HAS_DATABASE:
+            show_warning('错误', '数据库模块不可用。')
+            return
+
+        print('\n输入查询条件（直接回车表示不限制）：')
+        subject = input('主体名称: ').strip() or None
+        bank = input('银行名称: ').strip() or None
+        account = input('银行账号: ').strip() or None
+        start_date = input('开始日期 (YYYY-MM-DD): ').strip() or None
+        end_date = input('结束日期 (YYYY-MM-DD): ').strip() or None
+
+        try:
+            qr = db_module.query_transactions(
+                subject=subject, bank=bank, account=account,
+                start_date=start_date, end_date=end_date,
+                limit=999999, script_dir=script_dir
+            )
+            records = [r.to_dict() for r in qr.records]
+        except Exception as e:
+            show_warning('错误', f'数据库查询失败: {e}')
+            logger.error('数据库查询失败: %s', e, exc_info=True)
+            return
+
+        if not records:
+            show_info('提示', '查询结果为空。')
+            return
+
+        source_info = {
+            '数据来源': '数据库查询',
+            '查询主体': subject or '全部',
+            '查询银行': bank or '全部',
+            '查询账号': account or '全部',
+            '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+            '记录数': len(records),
+            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    else:
+        print('无效选项')
+        return
+
+    print('\n请选择汇总期间类型：')
+    print('  1) 按月汇总（默认）')
+    print('  2) 按季度汇总')
+    print('  3) 按年汇总')
+    print('  4) 按周汇总')
+    period_choice = input('\n请输入选项（默认 1）: ').strip() or '1'
+
+    period_type_map = {
+        '1': 'month',
+        '2': 'quarter',
+        '3': 'year',
+        '4': 'week',
+    }
+    period_label_map = {
+        '1': '按月',
+        '2': '按季度',
+        '3': '按年',
+        '4': '按周',
+    }
+    period_type = period_type_map.get(period_choice, 'month')
+    period_label = period_label_map.get(period_choice, '按月')
+
+    print(f'\n开始核对，共 {len(records)} 条记录，{period_label}汇总...')
+    check_result = check_interest_fee(records, period_type=period_type)
+    summary = check_result.check_summary
+
+    print('\n' + '=' * 70)
+    print('核对结果总览')
+    print('=' * 70)
+    print(f'  总记录数:           {summary.get("total_records", 0):,}')
+    print(f'  利息类交易:         {summary.get("interest_records", 0):,} 笔')
+    print(f'  手续费类交易:       {summary.get("fee_records", 0):,} 笔')
+    print(f'  利息总金额:         {summary.get("total_interest_amount", 0):,.2f} 元')
+    print(f'  手续费总金额:       {summary.get("total_fee_amount", 0):,.2f} 元')
+    print(f'  期间汇总数:         {summary.get("period_count", 0):,}')
+    print(f'  异常汇总数:         {summary.get("anomaly_count", 0):,}')
+
+    if check_result.anomaly_count > 0:
+        print(f'\n  ⚠️  发现 {check_result.anomaly_count} 个期间存在异常波动')
+        for anomaly in check_result.anomaly_summaries[:10]:
+            print(f'    - [{anomaly.period}] {anomaly.subject}/{anomaly.bank}/{anomaly.fee_category}: '
+                  f'{anomaly.total_amount:,.2f}元, 原因: {"; ".join(anomaly.anomaly_reasons)}')
+        if len(check_result.anomaly_summaries) > 10:
+            print(f'    ... 还有 {len(check_result.anomaly_summaries) - 10} 条异常，详见导出文件')
+    else:
+        print(f'\n  ✅ 未检测到异常波动！')
+
+    output_dir = input('\n请输入输出目录（直接回车默认当前目录）: ').strip()
+    if not output_dir:
+        output_dir = script_dir
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_path = os.path.join(output_dir, f'利息手续费核对报告_{timestamp}.xlsx')
+
+    try:
+        export_interest_fee_check_result(check_result, output_path, source_info)
+        msg = f'核对报告已导出！\n\n输出文件：{output_path}'
+        show_info('导出成功', msg)
+        logger.info('利息手续费核对报告导出完成: %s', output_path)
+    except Exception as e:
+        msg = f'导出失败：{e}'
+        show_warning('导出失败', msg)
+        logger.error('利息手续费核对报告导出失败: %s', e, exc_info=True)
+
+    logger.info('========== 利息手续费核对结束 ==========')
 
 
 # ══════════════════════════════════════════════════════════════════════════════

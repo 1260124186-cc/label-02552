@@ -683,3 +683,184 @@ class TestRunPipelineKeepStrategyIntegration:
         assert len(remaining) == 1
         assert '未知银行_流水.xlsx' in remaining_names
         assert '北京银行_流水.xlsx' not in remaining_names
+
+
+class TestInterestFeeCheckIntegration:
+    """利息与手续费核对集成测试"""
+
+    def _create_beijing_bank_with_interest_fee(self, path):
+        """创建包含利息和手续费交易的北京银行Excel"""
+        rows = [
+            [1, '2024-01-05', 'CNY', 50000, None, 1500000, '供应商A公司', '622001234', '工商银行', '转账', '001', '采购付款', None, None, None, 'BJ20240105001'],
+            [2, '2024-01-10', 'CNY', None, 80000, 1580000, '客户B公司', '622005678', '建设银行', '转账', '002', '销售收款', None, None, None, 'BJ20240110002'],
+            [3, '2024-01-15', 'CNY', None, 125.50, 1580125.50, '北京银行', '622009999', '北京银行', '结息', '003', '2024年第一季度存款利息', None, None, None, 'BJ20240115003'],
+            [4, '2024-01-20', 'CNY', 50, None, 1580075.50, '北京银行', '622009999', '北京银行', '手续费', '004', '跨行转账手续费', None, None, None, 'BJ20240120004'],
+            [5, '2024-02-05', 'CNY', 10, None, 1580065.50, '北京银行', '622009999', '北京银行', '管理费', '005', '月度账户管理费', None, None, None, 'BJ20240205005'],
+            [6, '2024-02-10', 'CNY', 30, None, 1580035.50, '北京银行', '622009999', '北京银行', '手续费', '006', '网银服务费', None, None, None, 'BJ20240210006'],
+            [7, '2024-03-15', 'CNY', None, 150.00, 1580185.50, '北京银行', '622009999', '北京银行', '结息', '007', '2024年第二季度存款利息', None, None, None, 'BJ20240315007'],
+            [8, '2024-03-20', 'CNY', 100, None, 1580085.50, '北京银行', '622009999', '北京银行', '手续费', '008', '大额转账手续费', None, None, None, 'BJ20240320008'],
+        ]
+        _create_beijing_bank_excel(path, rows=rows)
+        return path
+
+    def test_interest_fee_check_in_pipeline(self, tmp_dir):
+        """测试主流程中自动生成利息手续费核对报告"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+        self._create_beijing_bank_with_interest_fee(
+            os.path.join(source_folder, '北京银行_流水.xlsx')
+        )
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+
+        assert result.interest_fee_check_path is not None
+        assert os.path.exists(result.interest_fee_check_path)
+        assert '利息手续费核对报告' in os.path.basename(result.interest_fee_check_path)
+
+        wb = openpyxl.load_workbook(result.interest_fee_check_path)
+        assert '核对总览' in wb.sheetnames
+        assert '交易明细' in wb.sheetnames
+        assert '期间汇总' in wb.sheetnames
+        assert '异常清单' in wb.sheetnames
+
+        ws_detail = wb['交易明细']
+        assert ws_detail.max_row >= 6
+        wb.close()
+
+    def test_interest_fee_check_standalone(self, tmp_dir):
+        """测试独立运行利息手续费核对"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+        excel_path = self._create_beijing_bank_with_interest_fee(
+            os.path.join(source_folder, '北京银行_流水.xlsx')
+        )
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+        total_path = result.output_path
+
+        report_path = bankcheck.generate_interest_fee_check_from_total(
+            total_path, output_dir=tmp_dir, period_type='month'
+        )
+
+        assert report_path is not None
+        assert os.path.exists(report_path)
+
+        wb = openpyxl.load_workbook(report_path)
+        ws_overview = wb['核对总览']
+        overview_data = {}
+        for row in ws_overview.iter_rows(min_row=2, values_only=True):
+            if row[0] and row[1] is not None:
+                overview_data[row[0]] = row[1]
+
+        assert overview_data.get('利息手续费交易总数') == 6
+        assert overview_data.get('利息类交易数') == 2
+        assert overview_data.get('手续费类交易数') == 4
+        assert overview_data.get('利息总金额(元)') == pytest.approx(275.50)
+        assert overview_data.get('手续费总金额(元)') == pytest.approx(190.0)
+        wb.close()
+
+    def test_interest_fee_check_quarterly(self, tmp_dir):
+        """测试按季度汇总的利息手续费核对"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+        excel_path = self._create_beijing_bank_with_interest_fee(
+            os.path.join(source_folder, '北京银行_流水.xlsx')
+        )
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+        total_path = result.output_path
+
+        report_path = bankcheck.generate_interest_fee_check_from_total(
+            total_path, output_dir=tmp_dir, period_type='quarter'
+        )
+
+        assert report_path is not None
+        assert os.path.exists(report_path)
+
+        wb = openpyxl.load_workbook(report_path)
+        ws_period = wb['期间汇总']
+        periods = set()
+        for row in ws_period.iter_rows(min_row=2, values_only=True):
+            if row[0]:
+                periods.add(row[0])
+
+        assert '2024Q1' in periods
+        wb.close()
+
+    def test_interest_fee_check_no_matching_transactions(self, tmp_dir):
+        """测试无利息手续费交易的场景"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+        _create_beijing_bank_excel(os.path.join(source_folder, '北京银行_流水.xlsx'))
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+        total_path = result.output_path
+
+        report_path = bankcheck.generate_interest_fee_check_from_total(
+            total_path, output_dir=tmp_dir, period_type='month'
+        )
+
+        assert report_path is None
+
+    def test_interest_fee_check_multiple_banks(self, tmp_dir):
+        """测试多银行场景下的利息手续费核对"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+
+        beijing_rows = [
+            [1, '2024-01-15', 'CNY', None, 125.50, 1500125.50, '北京银行', '622001', '北京银行', '结息', '001', '季度存款利息', None, None, None, 'BJ001'],
+            [2, '2024-01-20', 'CNY', 50, None, 1500075.50, '北京银行', '622001', '北京银行', '手续费', '002', '转账手续费', None, None, None, 'BJ002'],
+        ]
+        _create_beijing_bank_excel(
+            os.path.join(source_folder, '北京银行_流水.xlsx'), rows=beijing_rows
+        )
+
+        east_asia_rows = [
+            ['2024-01-10', '09:30:00', 'CNY', 200, None, 499800, '手续费', 0, 0, '转账', 'EA001', '支付手续费'],
+            ['2024-01-25', '14:15:00', 'CNY', None, 300.00, 500100, 0, 300, 0, '结息', 'EA002', '存款利息'],
+        ]
+        _create_east_asia_bank_excel(
+            os.path.join(source_folder, '东亚银行_流水.xlsx'), rows=east_asia_rows
+        )
+
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+        total_path = result.output_path
+
+        report_path = bankcheck.generate_interest_fee_check_from_total(
+            total_path, output_dir=tmp_dir, period_type='month'
+        )
+
+        assert report_path is not None
+        assert os.path.exists(report_path)
+
+        wb = openpyxl.load_workbook(report_path)
+        ws_detail = wb['交易明细']
+        banks = set()
+        for row in ws_detail.iter_rows(min_row=2, values_only=True):
+            if row[2]:
+                banks.add(row[2])
+
+        assert '北京银行' in banks
+        assert '东亚银行' in banks
+        wb.close()
