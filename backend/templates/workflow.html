@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>工作流审批 - 银行流水检验</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .stats-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 28px;
+            font-weight: bold;
+            color: #2563eb;
+            display: block;
+        }
+        .stat-label {
+            color: #64748b;
+            font-size: 14px;
+        }
+        .workflow-card {
+            background: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .workflow-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .workflow-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #1e293b;
+        }
+        .workflow-meta {
+            font-size: 13px;
+            color: #64748b;
+            margin-bottom: 10px;
+        }
+        .workflow-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #2563eb;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
+        .btn-success {
+            background: #16a34a;
+            color: white;
+        }
+        .btn-success:hover {
+            background: #15803d;
+        }
+        .btn-warning {
+            background: #d97706;
+            color: white;
+        }
+        .btn-warning:hover {
+            background: #b45309;
+        }
+        .btn-danger {
+            background: #dc2626;
+            color: white;
+        }
+        .btn-danger:hover {
+            background: #b91c1c;
+        }
+        .btn-secondary {
+            background: #64748b;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: #475569;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .status-draft {
+            background: #e2e8f0;
+            color: #475569;
+        }
+        .status-pending_approval {
+            background: #fef3c7;
+            color: #92400e;
+        }
+        .status-approved {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        .status-rejected {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        .status-published {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+        .status-cancelled {
+            background: #f1f5f9;
+            color: #64748b;
+        }
+        .exception-item {
+            background: #f8fafc;
+            border-left: 4px solid #f59e0b;
+            padding: 12px;
+            margin: 8px 0;
+            border-radius: 4px;
+        }
+        .exception-confirmed {
+            border-left-color: #10b981;
+            background: #ecfdf5;
+        }
+        .action-log {
+            background: #f8fafc;
+            padding: 10px 15px;
+            border-radius: 6px;
+            margin: 8px 0;
+            font-size: 13px;
+        }
+        .action-log .action-time {
+            color: #64748b;
+            font-size: 12px;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal.active {
+            display: flex;
+        }
+        .modal-content {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .modal-title {
+            font-size: 20px;
+            font-weight: 600;
+        }
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: #64748b;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #374151;
+        }
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        .form-group textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 20px 0 10px 0;
+            color: #1e293b;
+        }
+        .filter-bar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .filter-bar select,
+        .filter-bar input {
+            padding: 8px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        .exception-status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-left: 8px;
+        }
+        .exception-pending {
+            background: #fef3c7;
+            color: #92400e;
+        }
+        .exception-confirmed {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        .exception-resolved {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+        .exception-ignored {
+            background: #e2e8f0;
+            color: #475569;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #64748b;
+        }
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+        .nav-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        .nav-tab {
+            padding: 12px 24px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            color: #64748b;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+        }
+        .nav-tab.active {
+            color: #2563eb;
+            border-bottom-color: #2563eb;
+        }
+        .nav-tab:hover:not(.active) {
+            color: #374151;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>工作流审批管理</h1>
+            <p class="subtitle">提交批次 → 复核人确认异常清单 → 正式发布总表</p>
+        </header>
+
+        <div class="stats-bar" id="statsBar">
+            <div class="stat-card">
+                <span class="stat-value" id="statTotal">-</span>
+                <span class="stat-label">总数</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statDraft">-</span>
+                <span class="stat-label">草稿</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statPending">-</span>
+                <span class="stat-label">待审批</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statApproved">-</span>
+                <span class="stat-label">已通过</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statPublished">-</span>
+                <span class="stat-label">已发布</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="statExceptions">-</span>
+                <span class="stat-label">待处理异常</span>
+            </div>
+        </div>
+
+        <div class="filter-bar">
+            <button class="btn btn-primary" onclick="openCreateModal()">+ 新建工作流</button>
+            <select id="filterStatus" onchange="loadWorkflows()">
+                <option value="">全部状态</option>
+                <option value="draft">草稿</option>
+                <option value="pending_approval">待审批</option>
+                <option value="approved">已通过</option>
+                <option value="rejected">已驳回</option>
+                <option value="published">已发布</option>
+                <option value="cancelled">已取消</option>
+            </select>
+            <input type="text" id="filterSubmitter" placeholder="搜索提交人" oninput="loadWorkflows()">
+            <input type="text" id="filterBatch" placeholder="搜索批次号" oninput="loadWorkflows()">
+        </div>
+
+        <div class="nav-tabs">
+            <button class="nav-tab active" data-tab="all" onclick="switchTab('all')">全部</button>
+            <button class="nav-tab" data-tab="mine" onclick="switchTab('mine')">我提交的</button>
+            <button class="nav-tab" data-tab="approve" onclick="switchTab('approve')">待我审批</button>
+        </div>
+
+        <div id="workflowList"></div>
+
+        <div class="empty-state" id="emptyState" style="display: none;">
+            <div class="empty-state-icon">📋</div>
+            <p>暂无工作流数据</p>
+        </div>
+    </div>
+
+    <div class="modal" id="createModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">新建工作流</h3>
+                <button class="close-btn" onclick="closeModal('createModal')">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>批次号 *</label>
+                <input type="text" id="createBatchId" placeholder="请输入批次号">
+            </div>
+            <div class="form-group">
+                <label>标题 *</label>
+                <input type="text" id="createTitle" placeholder="请输入工作流标题">
+            </div>
+            <div class="form-group">
+                <label>描述</label>
+                <textarea id="createDescription" placeholder="请输入描述说明"></textarea>
+            </div>
+            <div class="form-group">
+                <label>总记录数</label>
+                <input type="number" id="createTotalRecords" value="0" min="0">
+            </div>
+            <div class="form-group">
+                <label>输入文件夹</label>
+                <input type="text" id="createInputFolder" placeholder="可选">
+            </div>
+            <div class="workflow-actions">
+                <button class="btn btn-secondary" onclick="closeModal('createModal')">取消</button>
+                <button class="btn btn-primary" onclick="createWorkflow()">创建</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="detailModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title" id="detailTitle">工作流详情</h3>
+                <button class="close-btn" onclick="closeModal('detailModal')">&times;</button>
+            </div>
+            <div id="detailContent"></div>
+        </div>
+    </div>
+
+    <div class="modal" id="rejectModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">驳回工作流</h3>
+                <button class="close-btn" onclick="closeModal('rejectModal')">&times;</button>
+            </div>
+            <input type="hidden" id="rejectWorkflowId">
+            <div class="form-group">
+                <label>驳回原因 *</label>
+                <textarea id="rejectReason" placeholder="请输入驳回原因"></textarea>
+            </div>
+            <div class="form-group">
+                <label>备注</label>
+                <input type="text" id="rejectRemark" placeholder="可选">
+            </div>
+            <div class="workflow-actions">
+                <button class="btn btn-secondary" onclick="closeModal('rejectModal')">取消</button>
+                <button class="btn btn-danger" onclick="confirmReject()">确认驳回</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api/workflows';
+        let currentTab = 'all';
+        let currentUser = '';
+
+        async function request(url, options = {}) {
+            const response = await fetch(url, {
+                headers: { 'Content-Type': 'application/json' },
+                ...options
+            });
+            return await response.json();
+        }
+
+        function getStatusText(status) {
+            const map = {
+                'draft': '草稿',
+                'pending_approval': '待审批',
+                'approved': '已通过',
+                'rejected': '已驳回',
+                'published': '已发布',
+                'cancelled': '已取消'
+            };
+            return map[status] || status;
+        }
+
+        function getExceptionStatusText(status) {
+            const map = {
+                'pending': '待处理',
+                'confirmed': '已确认',
+                'resolved': '已解决',
+                'ignored': '已忽略'
+            };
+            return map[status] || status;
+        }
+
+        async function loadStats() {
+            const result = await request(API_BASE + '/stats');
+            if (result.success) {
+                const data = result.data;
+                document.getElementById('statTotal').textContent = data.total_count || 0;
+                document.getElementById('statDraft').textContent = data.draft_count || 0;
+                document.getElementById('statPending').textContent = data.pending_approval_count || 0;
+                document.getElementById('statApproved').textContent = data.approved_count || 0;
+                document.getElementById('statPublished').textContent = data.published_count || 0;
+                document.getElementById('statExceptions').textContent = data.pending_exceptions || 0;
+            }
+        }
+
+        async function loadWorkflows() {
+            const params = new URLSearchParams();
+            const status = document.getElementById('filterStatus').value;
+            const submitter = document.getElementById('filterSubmitter').value;
+            const batchId = document.getElementById('filterBatch').value;
+
+            if (status) params.append('status', status);
+            if (submitter && currentTab === 'mine') params.append('submitter', submitter || currentUser);
+            if (currentTab === 'mine' && !submitter) params.append('submitter', currentUser);
+            if (currentTab === 'approve') params.append('status', 'pending_approval');
+            if (batchId) params.append('batch_id', batchId);
+
+            const result = await request(API_BASE + '?' + params.toString());
+            const listEl = document.getElementById('workflowList');
+            const emptyEl = document.getElementById('emptyState');
+
+            if (result.success && result.data.length > 0) {
+                listEl.innerHTML = result.data.map(renderWorkflowCard).join('');
+                listEl.style.display = 'block';
+                emptyEl.style.display = 'none';
+            } else {
+                listEl.style.display = 'none';
+                emptyEl.style.display = 'block';
+            }
+        }
+
+        function renderWorkflowCard(wf) {
+            const canSubmit = (wf.status === 'draft' || wf.status === 'rejected') && wf.submitter === currentUser;
+            const canApprove = wf.status === 'pending_approval';
+            const canPublish = wf.status === 'approved';
+            const canCancel = wf.status !== 'published' && wf.submitter === currentUser;
+
+            return `
+                <div class="workflow-card">
+                    <div class="workflow-header">
+                        <div>
+                            <span class="workflow-title">${wf.title}</span>
+                            <span class="status-badge status-${wf.status}">${getStatusText(wf.status)}</span>
+                        </div>
+                        <div style="color: #64748b; font-size: 12px;">${wf.workflow_id}</div>
+                    </div>
+                    <div class="workflow-meta">
+                        <span>批次: ${wf.batch_id}</span> | 
+                        <span>提交人: ${wf.submitter}</span> | 
+                        <span>记录数: ${wf.total_records}</span> | 
+                        <span>异常: ${wf.exception_count || 0} (已确认 ${wf.confirmed_exception_count || 0})</span>
+                        ${wf.approver ? `| 审批人: ${wf.approver}` : ''}
+                        ${wf.publisher ? `| 发布人: ${wf.publisher}` : ''}
+                    </div>
+                    ${wf.description ? `<div style="color: #475569; margin-bottom: 10px;">${wf.description}</div>` : ''}
+                    ${wf.reject_reason ? `<div style="background: #fee2e2; color: #991b1b; padding: 8px 12px; border-radius: 4px; margin-bottom: 10px;">驳回原因: ${wf.reject_reason}</div>` : ''}
+                    <div style="font-size: 12px; color: #94a3b8;">
+                        创建: ${wf.created_at}
+                        ${wf.submitted_at ? `| 提交: ${wf.submitted_at}` : ''}
+                        ${wf.approved_at ? `| 审批: ${wf.approved_at}` : ''}
+                        ${wf.published_at ? `| 发布: ${wf.published_at}` : ''}
+                    </div>
+                    <div class="workflow-actions">
+                        <button class="btn btn-secondary" onclick="viewDetail('${wf.workflow_id}')">查看详情</button>
+                        ${canSubmit ? `<button class="btn btn-primary" onclick="submitWorkflow('${wf.workflow_id}')">提交审批</button>` : ''}
+                        ${canApprove ? `
+                            <button class="btn btn-success" onclick="approveWorkflow('${wf.workflow_id}')">审批通过</button>
+                            <button class="btn btn-danger" onclick="openRejectModal('${wf.workflow_id}')">驳回</button>
+                        ` : ''}
+                        ${canPublish ? `<button class="btn btn-success" onclick="publishWorkflow('${wf.workflow_id}')">正式发布</button>` : ''}
+                        ${canCancel ? `<button class="btn btn-warning" onclick="cancelWorkflow('${wf.workflow_id}')">取消</button>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        async function viewDetail(workflowId) {
+            const result = await request(API_BASE + '/' + workflowId);
+            if (result.success) {
+                const wf = result.data;
+                document.getElementById('detailTitle').textContent = wf.title;
+
+                let exceptionsHtml = '<p>暂无异常项</p>';
+                if (wf.exceptions && wf.exceptions.length > 0) {
+                    exceptionsHtml = wf.exceptions.map(e => `
+                        <div class="exception-item ${e.status === 'confirmed' ? 'exception-confirmed' : ''}">
+                            <div style="font-weight: 500;">
+                                [${e.exception_type}] ${e.description}
+                                <span class="exception-status exception-${e.status}">${getExceptionStatusText(e.status)}</span>
+                            </div>
+                            ${e.amount ? `<div style="color: #dc2626; margin-top: 5px;">金额: ¥${e.amount.toLocaleString()}</div>` : ''}
+                            ${e.counterparty ? `<div style="margin-top: 3px;">对方户名: ${e.counterparty}</div>` : ''}
+                            ${e.transaction_id ? `<div style="margin-top: 3px; font-size: 12px; color: #64748b;">交易ID: ${e.transaction_id}</div>` : ''}
+                            ${e.remark ? `<div style="margin-top: 5px; color: #475569;">备注: ${e.remark}</div>` : ''}
+                            ${e.handled_by ? `<div style="margin-top: 3px; font-size: 12px; color: #64748b;">处理人: ${e.handled_by} @ ${e.handled_at}</div>` : ''}
+                        </div>
+                    `).join('');
+                }
+
+                let actionsHtml = '<p>暂无操作记录</p>';
+                if (wf.actions && wf.actions.length > 0) {
+                    actionsHtml = wf.actions.map(a => `
+                        <div class="action-log">
+                            <div style="font-weight: 500;">${a.operator} - ${a.action}</div>
+                            ${a.remark ? `<div style="color: #475569; margin-top: 3px;">${a.remark}</div>` : ''}
+                            <div class="action-time">${a.created_at}</div>
+                        </div>
+                    `).join('');
+                }
+
+                document.getElementById('detailContent').innerHTML = `
+                    <div style="margin-bottom: 20px;">
+                        <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                            <span class="status-badge status-${wf.status}">${getStatusText(wf.status)}</span>
+                            <span style="color: #64748b;">${wf.workflow_id}</span>
+                        </div>
+                        <table style="width: 100%; border-collapse: collapse;">
+                            <tr><td style="padding: 6px 0; width: 100px; color: #64748b;">批次号</td><td>${wf.batch_id}</td></tr>
+                            <tr><td style="padding: 6px 0; color: #64748b;">提交人</td><td>${wf.submitter}</td></tr>
+                            <tr><td style="padding: 6px 0; color: #64748b;">总记录数</td><td>${wf.total_records}</td></tr>
+                            <tr><td style="padding: 6px 0; color: #64748b;">异常数</td><td>${wf.exception_count || 0} (已确认 ${wf.confirmed_exception_count || 0})</td></tr>
+                            ${wf.approver ? `<tr><td style="padding: 6px 0; color: #64748b;">审批人</td><td>${wf.approver}</td></tr>` : ''}
+                            ${wf.publisher ? `<tr><td style="padding: 6px 0; color: #64748b;">发布人</td><td>${wf.publisher}</td></tr>` : ''}
+                            ${wf.description ? `<tr><td style="padding: 6px 0; color: #64748b;">描述</td><td>${wf.description}</td></tr>` : ''}
+                            ${wf.reject_reason ? `<tr><td style="padding: 6px 0; color: #dc2626;">驳回原因</td><td style="color: #dc2626;">${wf.reject_reason}</td></tr>` : ''}
+                        </table>
+                    </div>
+
+                    <div class="section-title">异常清单</div>
+                    ${exceptionsHtml}
+
+                    <div class="section-title">操作日志</div>
+                    ${actionsHtml}
+                `;
+
+                openModal('detailModal');
+            }
+        }
+
+        function openCreateModal() {
+            document.getElementById('createBatchId').value = '';
+            document.getElementById('createTitle').value = '';
+            document.getElementById('createDescription').value = '';
+            document.getElementById('createTotalRecords').value = '0';
+            document.getElementById('createInputFolder').value = '';
+            openModal('createModal');
+        }
+
+        async function createWorkflow() {
+            const batchId = document.getElementById('createBatchId').value.trim();
+            const title = document.getElementById('createTitle').value.trim();
+            const description = document.getElementById('createDescription').value.trim();
+            const totalRecords = parseInt(document.getElementById('createTotalRecords').value) || 0;
+            const inputFolder = document.getElementById('createInputFolder').value.trim();
+
+            if (!batchId) {
+                alert('请输入批次号');
+                return;
+            }
+            if (!title) {
+                alert('请输入标题');
+                return;
+            }
+
+            const result = await request(API_BASE, {
+                method: 'POST',
+                body: JSON.stringify({
+                    batch_id: batchId,
+                    title: title,
+                    description: description,
+                    total_records: totalRecords,
+                    input_folder: inputFolder
+                })
+            });
+
+            if (result.success) {
+                alert('创建成功');
+                closeModal('createModal');
+                loadStats();
+                loadWorkflows();
+            } else {
+                alert('创建失败: ' + result.message);
+            }
+        }
+
+        async function submitWorkflow(workflowId) {
+            if (!confirm('确定要提交审批吗？')) return;
+
+            const result = await request(API_BASE + '/' + workflowId + '/submit', {
+                method: 'POST',
+                body: JSON.stringify({})
+            });
+
+            if (result.success) {
+                alert('已提交审批');
+                loadStats();
+                loadWorkflows();
+            } else {
+                alert('提交失败: ' + result.message);
+            }
+        }
+
+        async function approveWorkflow(workflowId) {
+            if (!confirm('确认审批通过？异常清单将被视为已确认。')) return;
+
+            const result = await request(API_BASE + '/' + workflowId + '/approve', {
+                method: 'POST',
+                body: JSON.stringify({})
+            });
+
+            if (result.success) {
+                alert('审批通过');
+                loadStats();
+                loadWorkflows();
+            } else {
+                alert('审批失败: ' + result.message);
+            }
+        }
+
+        function openRejectModal(workflowId) {
+            document.getElementById('rejectWorkflowId').value = workflowId;
+            document.getElementById('rejectReason').value = '';
+            document.getElementById('rejectRemark').value = '';
+            openModal('rejectModal');
+        }
+
+        async function confirmReject() {
+            const workflowId = document.getElementById('rejectWorkflowId').value;
+            const rejectReason = document.getElementById('rejectReason').value.trim();
+            const remark = document.getElementById('rejectRemark').value.trim();
+
+            if (!rejectReason) {
+                alert('请输入驳回原因');
+                return;
+            }
+
+            const result = await request(API_BASE + '/' + workflowId + '/reject', {
+                method: 'POST',
+                body: JSON.stringify({
+                    reject_reason: rejectReason,
+                    remark: remark
+                })
+            });
+
+            if (result.success) {
+                alert('已驳回');
+                closeModal('rejectModal');
+                loadStats();
+                loadWorkflows();
+            } else {
+                alert('驳回失败: ' + result.message);
+            }
+        }
+
+        async function publishWorkflow(workflowId) {
+            if (!confirm('确定要正式发布总表吗？发布后将无法撤销。')) return;
+
+            const result = await request(API_BASE + '/' + workflowId + '/publish', {
+                method: 'POST',
+                body: JSON.stringify({})
+            });
+
+            if (result.success) {
+                alert('总表已正式发布');
+                loadStats();
+                loadWorkflows();
+            } else {
+                alert('发布失败: ' + result.message);
+            }
+        }
+
+        async function cancelWorkflow(workflowId) {
+            if (!confirm('确定要取消该工作流吗？')) return;
+
+            const result = await request(API_BASE + '/' + workflowId + '/cancel', {
+                method: 'POST',
+                body: JSON.stringify({})
+            });
+
+            if (result.success) {
+                alert('已取消');
+                loadStats();
+                loadWorkflows();
+            } else {
+                alert('取消失败: ' + result.message);
+            }
+        }
+
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+            loadWorkflows();
+        }
+
+        function openModal(id) {
+            document.getElementById(id).classList.add('active');
+        }
+
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+        }
+
+        function detectUser() {
+            const userInput = prompt('请输入您的用户名（用于权限控制）：', '');
+            if (userInput && userInput.trim()) {
+                currentUser = userInput.trim();
+            } else {
+                currentUser = 'test_user';
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            detectUser();
+            loadStats();
+            loadWorkflows();
+        });
+
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    modal.classList.remove('active');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

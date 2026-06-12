@@ -34,6 +34,7 @@ from flask import (Flask, render_template, request, jsonify,
 import bankcheck
 import batch_manager as batch_module
 import database as db_module
+import workflow as workflow_module
 
 try:
     from task_queue import (
@@ -1891,6 +1892,425 @@ def directory_page():
     """目录对接管理页面"""
     return render_template('directory.html',
                            has_directory_connector=HAS_DIRECTORY_CONNECTOR_WS)
+
+
+@app.route('/workflow')
+def workflow_page():
+    """工作流管理页面"""
+    return render_template('workflow.html')
+
+
+# ──────────────────────────────────────────────
+# 工作流 API
+# ──────────────────────────────────────────────
+
+def _get_wf_manager():
+    """获取工作流管理器实例"""
+    return workflow_module.get_workflow_manager(BACKEND_DIR)
+
+
+@app.route('/api/workflows', methods=['GET'])
+def api_list_workflows():
+    """查询工作流列表"""
+    try:
+        wf = _get_wf_manager()
+        status = request.args.get('status', '').strip() or None
+        submitter = request.args.get('submitter', '').strip() or None
+        approver = request.args.get('approver', '').strip() or None
+        batch_id = request.args.get('batch_id', '').strip() or None
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+
+        workflows, total = wf.list_workflows(
+            status=status,
+            submitter=submitter,
+            approver=approver,
+            batch_id=batch_id,
+            limit=limit,
+            offset=offset
+        )
+
+        data = [w.to_dict() for w in workflows]
+        return jsonify({
+            'success': True,
+            'data': data,
+            'total': total,
+            'limit': limit,
+            'offset': offset,
+        })
+
+    except Exception as e:
+        logger.error('查询工作流列表失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/<workflow_id>', methods=['GET'])
+def api_get_workflow(workflow_id):
+    """获取工作流详情"""
+    try:
+        wf = _get_wf_manager()
+        try:
+            workflow = wf.get_workflow(workflow_id)
+        except ValueError as e:
+            if '不存在' in str(e):
+                return jsonify({'success': False, 'message': str(e)}), 404
+            raise
+
+        data = workflow.to_dict()
+        exceptions = wf.get_exception_items(workflow_id)
+        actions = wf.get_action_logs(workflow_id)
+
+        data['exceptions'] = [e.to_dict() for e in exceptions]
+        data['actions'] = [a.to_dict() for a in actions]
+
+        return jsonify({'success': True, 'data': data})
+
+    except Exception as e:
+        logger.error('获取工作流详情失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows', methods=['POST'])
+def api_create_workflow():
+    """创建工作流"""
+    try:
+        body = request.get_json(silent=True) or {}
+        batch_id = body.get('batch_id', '').strip()
+        title = body.get('title', '').strip()
+        description = body.get('description', '').strip()
+        submitter = body.get('submitter', '').strip() or None
+        input_folder = body.get('input_folder', '').strip()
+        output_path = body.get('output_path', '').strip() or None
+        total_records = int(body.get('total_records', 0) or 0)
+        exception_items = body.get('exception_items', [])
+
+        if not batch_id:
+            return jsonify({'success': False, 'message': '批次号不能为空'}), 400
+        if not title:
+            return jsonify({'success': False, 'message': '标题不能为空'}), 400
+
+        wf = _get_wf_manager()
+        workflow = wf.create_workflow(
+            batch_id=batch_id,
+            title=title,
+            description=description,
+            submitter=submitter,
+            input_folder=input_folder,
+            output_path=output_path,
+            total_records=total_records,
+            exception_items=exception_items
+        )
+
+        return jsonify({
+            'success': True,
+            'workflow_id': workflow.workflow_id,
+            'data': workflow.to_dict(),
+            'message': '工作流创建成功',
+        }), 201
+
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        logger.error('创建工作流失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/<workflow_id>/submit', methods=['POST'])
+def api_submit_workflow(workflow_id):
+    """提交审批"""
+    try:
+        body = request.get_json(silent=True) or {}
+        operator = body.get('operator', '').strip() or None
+        remark = body.get('remark', '').strip() or None
+
+        wf = _get_wf_manager()
+        workflow = wf.submit_for_approval(
+            workflow_id=workflow_id,
+            operator=operator,
+            remark=remark
+        )
+
+        return jsonify({
+            'success': True,
+            'data': workflow.to_dict(),
+            'message': '已提交审批',
+        })
+
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        logger.error('提交审批失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/<workflow_id>/approve', methods=['POST'])
+def api_approve_workflow(workflow_id):
+    """审批通过"""
+    try:
+        body = request.get_json(silent=True) or {}
+        approver = body.get('approver', '').strip() or None
+        remark = body.get('remark', '').strip() or None
+
+        wf = _get_wf_manager()
+        workflow = wf.approve_workflow(
+            workflow_id=workflow_id,
+            approver=approver,
+            remark=remark
+        )
+
+        return jsonify({
+            'success': True,
+            'data': workflow.to_dict(),
+            'message': '审批通过，异常清单已确认',
+        })
+
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        logger.error('审批失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/<workflow_id>/reject', methods=['POST'])
+def api_reject_workflow(workflow_id):
+    """驳回工作流"""
+    try:
+        body = request.get_json(silent=True) or {}
+        approver = body.get('approver', '').strip() or None
+        reject_reason = body.get('reject_reason', '').strip()
+        remark = body.get('remark', '').strip() or None
+
+        if not reject_reason:
+            return jsonify({'success': False, 'message': '驳回原因不能为空'}), 400
+
+        wf = _get_wf_manager()
+        workflow = wf.reject_workflow(
+            workflow_id=workflow_id,
+            approver=approver,
+            reject_reason=reject_reason,
+            remark=remark
+        )
+
+        return jsonify({
+            'success': True,
+            'data': workflow.to_dict(),
+            'message': '已驳回',
+        })
+
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        logger.error('驳回失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/<workflow_id>/publish', methods=['POST'])
+def api_publish_workflow(workflow_id):
+    """正式发布总表"""
+    try:
+        body = request.get_json(silent=True) or {}
+        publisher = body.get('publisher', '').strip() or None
+        output_path = body.get('output_path', '').strip() or None
+        remark = body.get('remark', '').strip() or None
+
+        wf = _get_wf_manager()
+        workflow = wf.publish_workflow(
+            workflow_id=workflow_id,
+            publisher=publisher,
+            output_path=output_path,
+            remark=remark
+        )
+
+        return jsonify({
+            'success': True,
+            'data': workflow.to_dict(),
+            'message': '总表已正式发布',
+        })
+
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        logger.error('发布失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/<workflow_id>/cancel', methods=['POST'])
+def api_cancel_workflow(workflow_id):
+    """取消工作流"""
+    try:
+        body = request.get_json(silent=True) or {}
+        operator = body.get('operator', '').strip() or None
+        remark = body.get('remark', '').strip() or None
+
+        wf = _get_wf_manager()
+        workflow = wf.cancel_workflow(
+            workflow_id=workflow_id,
+            operator=operator,
+            remark=remark
+        )
+
+        return jsonify({
+            'success': True,
+            'data': workflow.to_dict(),
+            'message': '工作流已取消',
+        })
+
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        logger.error('取消工作流失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/<workflow_id>/exceptions', methods=['GET'])
+def api_list_exceptions(workflow_id):
+    """获取异常项列表"""
+    try:
+        status = request.args.get('status', '').strip() or None
+
+        wf = _get_wf_manager()
+        exceptions = wf.get_exception_items(workflow_id, status=status)
+
+        data = [e.to_dict() for e in exceptions]
+        return jsonify({
+            'success': True,
+            'data': data,
+            'total': len(data),
+        })
+
+    except Exception as e:
+        logger.error('获取异常项列表失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/<workflow_id>/exceptions', methods=['POST'])
+def api_add_exceptions(workflow_id):
+    """添加异常项"""
+    try:
+        body = request.get_json(silent=True) or {}
+        items = body.get('items', [])
+        operator = body.get('operator', '').strip() or None
+
+        if not items:
+            return jsonify({'success': False, 'message': '异常项列表不能为空'}), 400
+
+        wf = _get_wf_manager()
+        new_ids = wf.add_exception_items(
+            workflow_id=workflow_id,
+            items=items,
+            operator=operator
+        )
+
+        return jsonify({
+            'success': True,
+            'exception_ids': new_ids,
+            'message': f'已添加 {len(new_ids)} 个异常项',
+        })
+
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        logger.error('添加异常项失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/exceptions/<int:exception_id>', methods=['PUT'])
+def api_update_exception(exception_id):
+    """更新异常项状态（复核人确认）"""
+    try:
+        body = request.get_json(silent=True) or {}
+        status = body.get('status', '').strip() or None
+        remark = body.get('remark')
+        operator = body.get('operator', '').strip() or None
+
+        if status is None and remark is None:
+            return jsonify({'success': False, 'message': '缺少更新字段'}), 400
+
+        wf = _get_wf_manager()
+        success = wf.update_exception_item(
+            exception_id=exception_id,
+            status=status,
+            remark=remark,
+            operator=operator
+        )
+
+        if not success:
+            return jsonify({'success': False, 'message': '更新失败，异常项不存在'}), 404
+
+        return jsonify({
+            'success': True,
+            'message': '异常项已更新',
+        })
+
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        logger.error('更新异常项失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/exceptions/<int:exception_id>', methods=['DELETE'])
+def api_delete_exception(exception_id):
+    """删除异常项"""
+    try:
+        body = request.get_json(silent=True) or {}
+        operator = (body or {}).get('operator', '').strip() or None
+
+        wf = _get_wf_manager()
+        success = wf.delete_exception_item(
+            exception_id=exception_id,
+            operator=operator
+        )
+
+        if not success:
+            return jsonify({'success': False, 'message': '删除失败，异常项不存在'}), 404
+
+        return jsonify({
+            'success': True,
+            'message': '异常项已删除',
+        })
+
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        logger.error('删除异常项失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/<workflow_id>/actions', methods=['GET'])
+def api_get_action_logs(workflow_id):
+    """获取操作日志"""
+    try:
+        wf = _get_wf_manager()
+        actions = wf.get_action_logs(workflow_id)
+
+        data = [a.to_dict() for a in actions]
+        return jsonify({
+            'success': True,
+            'data': data,
+            'total': len(data),
+        })
+
+    except Exception as e:
+        logger.error('获取操作日志失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/workflows/stats', methods=['GET'])
+def api_workflow_stats():
+    """获取工作流统计信息"""
+    try:
+        wf = _get_wf_manager()
+        stats = wf.get_statistics()
+
+        return jsonify({
+            'success': True,
+            'data': stats,
+        })
+
+    except Exception as e:
+        logger.error('获取工作流统计失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 
 def main():
