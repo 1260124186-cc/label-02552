@@ -2679,8 +2679,14 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         _profiler.record_phase('folder_copy', _copy_dur, '复制文件夹')
 
     excel_files = scan_excel_files(new_folder)
-    if not excel_files:
-        logger.warning('检验版文件夹中未发现任何 Excel 文件')
+    try:
+        from pdf_bank_parser import scan_pdf_files, is_pdf_file, process_pdf_file
+        pdf_files = scan_pdf_files(new_folder)
+    except ImportError:
+        pdf_files = []
+    all_files = excel_files + pdf_files
+    if not all_files:
+        logger.warning('检验版文件夹中未发现任何 Excel 或 PDF 文件')
         if _profiler is not None:
             _profiler.stop()
         return ProcessingResult(
@@ -2699,7 +2705,23 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
     unprocessed_files = []
     error_files = []
 
-    for filepath in excel_files:
+    for filepath in all_files:
+        file_is_pdf = is_pdf_file(filepath) if 'is_pdf_file' in dir() else filepath.lower().endswith('.pdf')
+        if file_is_pdf:
+            try:
+                rows = process_pdf_file(filepath, lookup_data)
+                if rows:
+                    all_rows.extend(rows)
+                    processed_files.append(filepath)
+                    logger.info('成功处理 PDF 文件: %s（%d 条记录）', filepath, len(rows))
+                else:
+                    unprocessed_files.append(filepath)
+                    logger.warning('PDF 文件未解析出有效记录: %s', filepath)
+            except Exception as e:
+                error_files.append((filepath, str(e)))
+                logger.error('处理 PDF 文件「%s」时发生错误: %s', filepath, e, exc_info=True)
+            continue
+
         bank = identify_bank(filepath)
         if bank and bank in BANK_PROCESSORS:
             try:
@@ -2717,10 +2739,10 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
     if _profiler is not None and _phase_process_start is not None:
         _process_dur = (__import__('time').perf_counter() - _phase_process_start) * 1000
         _profiler.record_phase('file_processing', _process_dur,
-                               f'处理 {len(excel_files)} 个文件')
+                               f'处理 {len(all_files)} 个文件')
 
     error_file_paths = {f for f, _ in error_files}
-    delete_processed_files(excel_files, set(unprocessed_files) | error_file_paths)
+    delete_processed_files(all_files, set(unprocessed_files) | error_file_paths)
 
     output_path = None
     final_rows = []
