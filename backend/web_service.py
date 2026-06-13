@@ -601,6 +601,78 @@ def api_wizard_extract_preview():
     return jsonify({'success': False, 'message': result.get('error', '预览失败')}), 400
 
 
+@app.route('/api/wizard/infer-mapping', methods=['POST'])
+def api_wizard_infer_mapping():
+    """自动推断银行流水列映射草案"""
+    body = request.get_json(silent=True) or {}
+    wizard_id = body.get('wizard_id', '').strip()
+    sheet_name = body.get('sheet_name')
+    if not wizard_id:
+        return jsonify({'success': False, 'message': '缺少 wizard_id'}), 400
+    save_dir = os.path.join(WIZARD_UPLOAD_DIR, wizard_id)
+    if not os.path.isdir(save_dir):
+        return jsonify({'success': False, 'message': '会话已过期，请重新上传文件'}), 404
+    files = [f for f in os.listdir(save_dir)
+             if f.lower().endswith(('.xlsx', '.xls')) and not f.startswith('~$')]
+    if not files:
+        return jsonify({'success': False, 'message': '文件不存在'}), 404
+    filepath = os.path.join(save_dir, files[0])
+    try:
+        from bank_template_inferrer import scan_workbook
+        result = scan_workbook(filepath, sheet_name=sheet_name)
+        if result.get('success'):
+            logger.info('自动推断完成: wizard_id=%s, 置信度=%.2f, 映射字段=%d',
+                        wizard_id, result.get('confidence', 0),
+                        len(result.get('column_map', {})))
+            return jsonify({'success': True, 'data': result})
+        return jsonify({
+            'success': False,
+            'message': result.get('error', '推断失败'),
+            'data': result,
+        }), 400
+    except Exception as e:
+        logger.error('自动推断失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/wizard/confirm-mapping', methods=['POST'])
+def api_wizard_confirm_mapping():
+    """确认推断映射并保存为银行配置"""
+    body = request.get_json(silent=True) or {}
+    wizard_id = body.get('wizard_id', '').strip()
+    bank_name = (body.get('bank_name') or '').strip()
+    overrides = body.get('overrides', {})
+    if not wizard_id:
+        return jsonify({'success': False, 'message': '缺少 wizard_id'}), 400
+    if not bank_name:
+        return jsonify({'success': False, 'message': '银行名称不能为空'}), 400
+    save_dir = os.path.join(WIZARD_UPLOAD_DIR, wizard_id)
+    if not os.path.isdir(save_dir):
+        return jsonify({'success': False, 'message': '会话已过期，请重新上传文件'}), 404
+    files = [f for f in os.listdir(save_dir)
+             if f.lower().endswith(('.xlsx', '.xls')) and not f.startswith('~$')]
+    if not files:
+        return jsonify({'success': False, 'message': '文件不存在'}), 404
+    filepath = os.path.join(save_dir, files[0])
+    try:
+        from bank_template_inferrer import scan_workbook, confirm_and_save
+        inferred = scan_workbook(filepath,
+                                 sheet_name=body.get('sheet_name'))
+        if not inferred.get('success'):
+            return jsonify({
+                'success': False,
+                'message': inferred.get('error', '推断失败'),
+            }), 400
+        ok, message = confirm_and_save(inferred, bank_name, overrides=overrides)
+        if ok:
+            logger.info('银行配置已确认保存: %s', bank_name)
+            return jsonify({'success': True, 'message': message})
+        return jsonify({'success': False, 'message': message}), 400
+    except Exception as e:
+        logger.error('确认保存失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 @app.route('/api/bank-rules', methods=['GET'])
 def api_list_bank_rules():
     try:
