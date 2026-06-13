@@ -806,6 +806,388 @@ class BankRuleConfig:
         """获取配置文件路径"""
         return self._config_path
 
+    def get_all_rules(self) -> Dict[str, BankRule]:
+        """获取所有银行规则（含未启用），返回副本"""
+        self.load_config()
+        return dict(self._rules)
+
+    def list_rules_detailed(self) -> List[Dict[str, Any]]:
+        """获取所有银行规则的详细信息列表"""
+        self.load_config()
+        result = []
+        for name, rule in self._rules.items():
+            result.append({
+                'bank_name': rule.bank_name,
+                'account_cell': rule.account_cell,
+                'start_row': rule.start_row,
+                'columns': dict(rule.columns),
+                'payment_sign': rule.payment_sign,
+                'enabled': rule.enabled,
+                'skip_sheets': list(rule.skip_sheets),
+                'expected_headers': {k: list(v) for k, v in rule.expected_headers.items()},
+                'header_validation': rule.header_validation,
+                'multi_account': rule.multi_account,
+            })
+        return result
+
+    def save_rule(self, rule_data: Dict[str, Any]) -> bool:
+        """
+        保存（新增或更新）一条银行规则到 YAML 配置文件。
+
+        Args:
+            rule_data: 包含银行规则字段的字典
+
+        Returns:
+            是否保存成功
+        """
+        logger = get_logger()
+        try:
+            if not os.path.exists(self._config_path):
+                config_data = {'banks': []}
+            else:
+                with open(self._config_path, 'r', encoding='utf-8') as f:
+                    config_data = yaml.safe_load(f) or {}
+                if 'banks' not in config_data:
+                    config_data['banks'] = []
+
+            bank_name = rule_data.get('bank_name', '').strip()
+            if not bank_name:
+                logger.error('保存银行规则失败：银行名称不能为空')
+                return False
+
+            expected_headers = rule_data.get('expected_headers', {})
+            normalized_headers = {}
+            for col_key, header_names in expected_headers.items():
+                if isinstance(header_names, str):
+                    normalized_headers[col_key] = [header_names]
+                elif isinstance(header_names, list):
+                    normalized_headers[col_key] = [h for h in header_names if h]
+
+            new_entry = {
+                'bank_name': bank_name,
+                'account_cell': rule_data.get('account_cell', 'A1'),
+                'start_row': int(rule_data.get('start_row', 1)),
+                'payment_sign': rule_data.get('payment_sign', 'negative'),
+                'enabled': bool(rule_data.get('enabled', True)),
+                'columns': rule_data.get('columns', {}),
+            }
+            if rule_data.get('skip_sheets'):
+                new_entry['skip_sheets'] = rule_data['skip_sheets']
+            if normalized_headers:
+                new_entry['expected_headers'] = normalized_headers
+            if rule_data.get('header_validation'):
+                new_entry['header_validation'] = rule_data['header_validation']
+            if rule_data.get('multi_account'):
+                new_entry['multi_account'] = bool(rule_data['multi_account'])
+
+            replaced = False
+            for i, bank_cfg in enumerate(config_data['banks']):
+                if bank_cfg.get('bank_name') == bank_name:
+                    config_data['banks'][i] = new_entry
+                    replaced = True
+                    break
+            if not replaced:
+                config_data['banks'].append(new_entry)
+
+            with open(self._config_path, 'w', encoding='utf-8') as f:
+                yaml.safe_dump(config_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+            self._last_modified = 0.0
+            self.load_config()
+            reload_bank_processors()
+
+            logger.info('银行规则「%s」已保存到配置文件', bank_name)
+            return True
+        except Exception as e:
+            logger.error('保存银行规则失败: %s', e, exc_info=True)
+            return False
+
+    def delete_rule(self, bank_name: str) -> bool:
+        """
+        从 YAML 配置文件中删除指定银行规则。
+
+        Args:
+            bank_name: 银行名称
+
+        Returns:
+            是否删除成功
+        """
+        logger = get_logger()
+        try:
+            if not os.path.exists(self._config_path):
+                return False
+            with open(self._config_path, 'r', encoding='utf-8') as f:
+                config_data = yaml.safe_load(f) or {}
+            if 'banks' not in config_data:
+                return False
+            original_len = len(config_data['banks'])
+            config_data['banks'] = [b for b in config_data['banks'] if b.get('bank_name') != bank_name]
+            if len(config_data['banks']) == original_len:
+                return False
+            with open(self._config_path, 'w', encoding='utf-8') as f:
+                yaml.safe_dump(config_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+            self._last_modified = 0.0
+            self.load_config()
+            reload_bank_processors()
+            logger.info('银行规则「%s」已从配置文件中删除', bank_name)
+            return True
+        except Exception as e:
+            logger.error('删除银行规则失败: %s', e, exc_info=True)
+            return False
+
+
+def col_letter_to_index(letter: str) -> int:
+    """
+    将 Excel 列字母（如 A, B, ..., Z, AA, AB）转换为 1-based 列号。
+
+    Args:
+        letter: 列字母（大小写不敏感）
+
+    Returns:
+        1-based 列号
+    """
+    letter = letter.upper().strip()
+    if not letter or not letter.isalpha():
+        raise ValueError(f'无效的列字母: {letter}')
+    result = 0
+    for ch in letter:
+        result = result * 26 + (ord(ch) - ord('A') + 1)
+    return result
+
+
+def col_index_to_letter(index: int) -> str:
+    """
+    将 1-based 列号转换为 Excel 列字母。
+
+    Args:
+        index: 1-based 列号
+
+    Returns:
+        列字母（大写）
+    """
+    if index < 1:
+        raise ValueError(f'无效的列号: {index}')
+    result = ''
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        result = chr(ord('A') + remainder) + result
+    return result
+
+
+def parse_cell_ref(cell_ref: str) -> tuple:
+    """
+    解析 Excel 单元格引用（如 'B2'）为 (1-based_col_index, 1-based_row_index)。
+
+    Args:
+        cell_ref: 单元格引用字符串，如 'B2'、'AA10'
+
+    Returns:
+        (col_index, row_index) 元组，均为 1-based
+    """
+    if not cell_ref:
+        raise ValueError('单元格引用不能为空')
+    match = re.match(r'^([A-Za-z]+)(\d+)$', cell_ref.strip())
+    if not match:
+        raise ValueError(f'无效的单元格引用: {cell_ref}')
+    col_letter = match.group(1)
+    row_str = match.group(2)
+    col_index = col_letter_to_index(col_letter)
+    row_index = int(row_str)
+    if row_index < 1:
+        raise ValueError(f'行号必须 >= 1: {row_index}')
+    return col_index, row_index
+
+
+def get_cell_ref(col_index: int, row_index: int) -> str:
+    """
+    根据列号和行号生成 Excel 单元格引用。
+
+    Args:
+        col_index: 1-based 列号
+        row_index: 1-based 行号
+
+    Returns:
+        单元格引用字符串，如 'B2'
+    """
+    return f"{col_index_to_letter(col_index)}{row_index}"
+
+
+def read_excel_preview(filepath: str, sheet_name: Optional[str] = None,
+                       max_rows: int = 50, max_cols: int = 30) -> Dict[str, Any]:
+    """
+    读取 Excel 文件预览数据，用于向导中交互式选择。
+
+    Args:
+        filepath: Excel 文件路径
+        sheet_name: 工作表名称，None 时取第一个工作表
+        max_rows: 最多读取的行数
+        max_cols: 最多读取的列数
+
+    Returns:
+        包含以下字段的字典：
+        - sheet_names: 所有工作表名称列表
+        - current_sheet: 当前工作表名称
+        - data: 二维列表形式的单元格数据 [row_index][col_index]，索引从 0 开始
+        - cell_refs: 对应的单元格引用二维列表
+        - max_row: 实际总行数
+        - max_col: 实际总列数
+    """
+    logger = get_logger()
+    wb, tmp_path = open_workbook_compat(filepath)
+    try:
+        sheet_names = [ws.title for ws in wb.worksheets]
+        if sheet_name:
+            ws = wb[sheet_name]
+        else:
+            ws = wb.active
+            sheet_name = ws.title
+
+        actual_max_row = min(ws.max_row, max_rows)
+        actual_max_col = min(ws.max_column, max_cols)
+
+        data = []
+        cell_refs = []
+        for row_idx in range(1, actual_max_row + 1):
+            row_data = []
+            row_refs = []
+            for col_idx in range(1, actual_max_col + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                val = cell.value
+                if val is not None:
+                    row_data.append(str(val))
+                else:
+                    row_data.append('')
+                row_refs.append(get_cell_ref(col_idx, row_idx))
+            data.append(row_data)
+            cell_refs.append(row_refs)
+
+        result = {
+            'sheet_names': sheet_names,
+            'current_sheet': sheet_name,
+            'data': data,
+            'cell_refs': cell_refs,
+            'max_row': actual_max_row,
+            'max_col': actual_max_col,
+            'total_rows': ws.max_row,
+            'total_cols': ws.max_column,
+        }
+        wb.close()
+        logger.info('已读取 Excel 预览: %s, 工作表=%s, %d行 x %d列',
+                    os.path.basename(filepath), sheet_name, actual_max_row, actual_max_col)
+        return result
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+def preview_extraction(filepath: str, rule_data: Dict[str, Any],
+                       sheet_name: Optional[str] = None,
+                       max_preview_rows: int = 10) -> Dict[str, Any]:
+    """
+    根据给定的规则配置预览提取结果，不写入任何文件。
+
+    Args:
+        filepath: Excel 文件路径
+        rule_data: 规则配置字典（含 bank_name, account_cell, start_row, columns 等）
+        sheet_name: 指定工作表，None 时取第一个
+        max_preview_rows: 最多预览的记录行数
+
+    Returns:
+        包含预览结果的字典：
+        - success: 是否成功
+        - account: 提取到的账号
+        - header_values: 表头行各字段对应的实际值
+        - records: 提取到的记录列表（限制条数）
+        - total_records: 总记录数
+        - error: 错误信息（如有）
+    """
+    logger = get_logger()
+    try:
+        columns = rule_data.get('columns', {})
+        if not columns:
+            return {'success': False, 'error': '未配置任何列映射', 'records': [], 'total_records': 0}
+
+        required = ['trade_date']
+        for f in required:
+            if f not in columns:
+                return {'success': False,
+                        'error': f'缺少必填字段列映射: {f}',
+                        'records': [], 'total_records': 0}
+
+        temp_rule = BankRule(
+            bank_name=rule_data.get('bank_name', '预览银行'),
+            account_cell=rule_data.get('account_cell', 'A1'),
+            start_row=int(rule_data.get('start_row', 1)),
+            columns={k: int(v) for k, v in columns.items()},
+            payment_sign=rule_data.get('payment_sign', 'negative'),
+            enabled=True,
+            skip_sheets=rule_data.get('skip_sheets', []),
+            expected_headers=rule_data.get('expected_headers', {}),
+            header_validation='off',
+            multi_account=bool(rule_data.get('multi_account', False)),
+        )
+        parser = GenericBankParser(temp_rule)
+
+        wb, tmp_path = open_workbook_compat(filepath)
+        try:
+            if sheet_name:
+                ws_list = [wb[sheet_name]]
+            else:
+                ws_list = wb.worksheets
+
+            all_records = []
+            account_val = None
+            header_values = {}
+
+            for ws in ws_list:
+                if ws.title in (temp_rule.skip_sheets or []):
+                    continue
+                try:
+                    account_cell = ws[temp_rule.account_cell]
+                    if account_cell.value is not None:
+                        account_val = str(account_cell.value).strip()
+                except Exception:
+                    pass
+
+                header_row_idx = temp_rule.start_row - 1
+                if header_row_idx >= 1:
+                    for col_key, col_idx in temp_rule.columns.items():
+                        try:
+                            hv = ws.cell(row=header_row_idx, column=col_idx).value
+                            if hv is not None:
+                                header_values[col_key] = str(hv).strip()
+                        except Exception:
+                            pass
+
+                sheet_records = parser._parse_sheet(ws, filepath, ws.title, {})
+                all_records.extend(sheet_records)
+
+            wb.close()
+
+            preview_records = all_records[:max_preview_rows]
+            for r in preview_records:
+                r.pop('唯一id', None)
+
+            logger.info('预览提取完成: %d 条记录（预览前 %d 条）',
+                        len(all_records), len(preview_records))
+
+            return {
+                'success': True,
+                'account': account_val or '',
+                'header_values': header_values,
+                'records': preview_records,
+                'total_records': len(all_records),
+            }
+        finally:
+            cleanup_temp_file(tmp_path)
+    except Exception as e:
+        logger.error('预览提取失败: %s', e, exc_info=True)
+        return {
+            'success': False,
+            'error': str(e),
+            'records': [],
+            'total_records': 0,
+        }
+
 
 class GenericBankParser:
     """通用银行流水解析器 - 根据配置规则动态解析 Excel"""

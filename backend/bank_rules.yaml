@@ -1,154 +1,120 @@
-# 银行流水解析规则配置文件
-# 业务人员可通过修改此文件增删银行解析规则，无需修改 Python 代码
-#
-# 配置说明：
-#   bank_name: 银行名称（用于文件前缀匹配和显示）
-#   account_cell: 银行账号所在单元格，如 "B2"
-#   start_row: 数据起始行号（从 1 开始）
-#   columns: 各字段对应的列映射（列号从 1 开始，A=1, B=2, ...）
-#     支持字段：trade_date, payment, receipt, summary, counterpart, balance, transaction_id
-#   payment_sign: 付款金额符号处理（"negative" 表示取负数，"positive" 表示保持正数）
-#   enabled: 是否启用该银行规则
-#   skip_sheets: 需要跳过的工作表名称列表（可选），这些工作表不会被解析
-#   expected_headers: 关键列对应的预期表头文本（可选），用于校验银行模板是否变更
-#     每个字段可配置一个字符串或字符串列表（表示可接受的多个表头名称）
-#   header_validation: 表头校验模式（可选）
-#     "strict" - 表头不匹配时抛出异常，中断处理
-#     "warn"   - 表头不匹配时记录警告，继续处理（默认）
-#     "off"    - 跳过表头校验
-#   multi_account: 多账号单文件拆分（可选，默认 false）
-#     设为 true 时，解析器会自动扫描同一工作表中是否包含多个账号区块，
-#     按账号切段并分别匹配主体后写入总表，适用于银行把多账户合并在同一文件的场景。
-
-# 会计期间配置：
-#   period_type: 期间类型，"monthly" 按月，"quarterly" 按季度
-#   cutoff_day: 账期截止日（1-31），如 25 表示每月/季第 25 日为截止日，
-#               超过截止日的交易自动归入下一个会计期间
-#   fiscal_year_start_month: 会计年度起始月份（1-12），默认 1，
-#               用于计算跨年季度的期间编号，如 4 表示 4月起始的会计年度
-#   period_name_format: 期间名称格式，"YYYY-MM" 或 "YYYY-QN"
 accounting_period:
-  period_type: "monthly"
+  period_type: monthly
   cutoff_day: 25
   fiscal_year_start_month: 1
-  period_name_format: "YYYY-MM"
-
+  period_name_format: YYYY-MM
 banks:
-  - bank_name: "北京银行"
-    account_cell: "B2"
-    start_row: 4
-    payment_sign: "negative"
-    enabled: true
-    header_validation: "warn"
-    columns:
-      trade_date: 2       # B 列 - 交易日期
-      payment: 4          # D 列 - 付款
-      receipt: 5          # E 列 - 收款
-      summary: 12         # L 列 - 摘要
-      counterpart: 7      # G 列 - 对方户名
-      balance: 6          # F 列 - 余额
-      transaction_id: 16  # P 列 - 交易流水号
-    expected_headers:
-      trade_date: "交易日期"
-      payment: "支出金额"
-      receipt: "收入金额"
-      summary: "摘要"
-      counterpart: "对方户名"
-      balance: "余额"
-      transaction_id: "交易流水号"
-
-  - bank_name: "东亚银行"
-    account_cell: "B1"
-    start_row: 5
-    payment_sign: "negative"
-    enabled: true
-    header_validation: "warn"
-    columns:
-      trade_date: 1       # A 列 - 交易日期
-      payment: 4          # D 列 - 付款
-      receipt: 5          # E 列 - 收款
-      summary: 12         # L 列 - 摘要
-      counterpart: 12     # L 列 - 对方户名（同摘要）
-      balance: 9          # I 列 - 余额
-      transaction_id: 11  # K 列 - 交易流水号
-    expected_headers:
-      trade_date: "交易日期"
-      payment: "支出金额"
-      receipt: "收入金额"
-      summary:
-        - "摘要"
-        - "交易描述/对方"
-      counterpart:
-        - "对方户名"
-        - "交易描述/对方"
-      balance: "余额"
-      transaction_id: "交易流水号"
-
-  - bank_name: "工商银行"
-    account_cell: "B4"
-    start_row: 6
-    payment_sign: "negative"
-    enabled: true
-    header_validation: "warn"
-    columns:
-      trade_date: 1       # A 列 - 交易日期
-      payment: 5          # E 列 - 付款
-      receipt: 4          # D 列 - 收款
-      summary: 8          # H 列 - 摘要
-      counterpart: 7      # G 列 - 对方户名
-      balance: 6          # F 列 - 余额
-      transaction_id: 10  # J 列 - 交易流水号
-    expected_headers:
-      trade_date: "交易日期"
-      payment: "支出金额"
-      receipt: "收入金额"
-      summary: "摘要"
-      counterpart: "对方户名"
-      balance: "余额"
-      transaction_id: "交易流水号"
-
-  - bank_name: "建设银行"
-    account_cell: "A2"
-    start_row: 4
-    payment_sign: "negative"
-    enabled: true
-    header_validation: "warn"
-    columns:
-      trade_date: 2       # B 列 - 交易日期
-      payment: 5          # E 列 - 付款
-      receipt: 4          # D 列 - 收款
-      summary: 9          # I 列 - 摘要
-      counterpart: 7      # G 列 - 对方户名
-      balance: 6          # F 列 - 余额
-      transaction_id: 11  # K 列 - 交易流水号
-    expected_headers:
-      trade_date: "交易日期"
-      payment: "支出金额"
-      receipt: "收入金额"
-      summary: "摘要"
-      counterpart: "对方户名"
-      balance: "余额"
-      transaction_id: "交易流水号"
-
-  - bank_name: "招商银行"
-    account_cell: "B3"
-    start_row: 6
-    payment_sign: "negative"
-    enabled: true
-    header_validation: "warn"
-    columns:
-      trade_date: 1       # A 列 - 交易日期
-      payment: 4          # D 列 - 付款
-      receipt: 3          # C 列 - 收款
-      summary: 10         # J 列 - 摘要
-      counterpart: 9      # I 列 - 对方户名
-      balance: 5          # E 列 - 余额
-      transaction_id: 12  # L 列 - 交易流水号
-    expected_headers:
-      trade_date: "交易日期"
-      payment: "支出金额"
-      receipt: "收入金额"
-      summary: "摘要"
-      counterpart: "对方户名"
-      balance: "余额"
-      transaction_id: "交易流水号"
+- bank_name: 北京银行
+  account_cell: B2
+  start_row: 4
+  payment_sign: negative
+  enabled: true
+  header_validation: warn
+  columns:
+    trade_date: 2
+    payment: 4
+    receipt: 5
+    summary: 12
+    counterpart: 7
+    balance: 6
+    transaction_id: 16
+  expected_headers:
+    trade_date: 交易日期
+    payment: 支出金额
+    receipt: 收入金额
+    summary: 摘要
+    counterpart: 对方户名
+    balance: 余额
+    transaction_id: 交易流水号
+- bank_name: 东亚银行
+  account_cell: B1
+  start_row: 5
+  payment_sign: negative
+  enabled: true
+  header_validation: warn
+  columns:
+    trade_date: 1
+    payment: 4
+    receipt: 5
+    summary: 12
+    counterpart: 12
+    balance: 9
+    transaction_id: 11
+  expected_headers:
+    trade_date: 交易日期
+    payment: 支出金额
+    receipt: 收入金额
+    summary:
+    - 摘要
+    - 交易描述/对方
+    counterpart:
+    - 对方户名
+    - 交易描述/对方
+    balance: 余额
+    transaction_id: 交易流水号
+- bank_name: 工商银行
+  account_cell: B4
+  start_row: 6
+  payment_sign: negative
+  enabled: true
+  header_validation: warn
+  columns:
+    trade_date: 1
+    payment: 5
+    receipt: 4
+    summary: 8
+    counterpart: 7
+    balance: 6
+    transaction_id: 10
+  expected_headers:
+    trade_date: 交易日期
+    payment: 支出金额
+    receipt: 收入金额
+    summary: 摘要
+    counterpart: 对方户名
+    balance: 余额
+    transaction_id: 交易流水号
+- bank_name: 建设银行
+  account_cell: A2
+  start_row: 4
+  payment_sign: negative
+  enabled: true
+  header_validation: warn
+  columns:
+    trade_date: 2
+    payment: 5
+    receipt: 4
+    summary: 9
+    counterpart: 7
+    balance: 6
+    transaction_id: 11
+  expected_headers:
+    trade_date: 交易日期
+    payment: 支出金额
+    receipt: 收入金额
+    summary: 摘要
+    counterpart: 对方户名
+    balance: 余额
+    transaction_id: 交易流水号
+- bank_name: 招商银行
+  account_cell: B3
+  start_row: 6
+  payment_sign: negative
+  enabled: true
+  header_validation: warn
+  columns:
+    trade_date: 1
+    payment: 4
+    receipt: 3
+    summary: 10
+    counterpart: 9
+    balance: 5
+    transaction_id: 12
+  expected_headers:
+    trade_date: 交易日期
+    payment: 支出金额
+    receipt: 收入金额
+    summary: 摘要
+    counterpart: 对方户名
+    balance: 余额
+    transaction_id: 交易流水号

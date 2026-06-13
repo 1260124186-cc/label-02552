@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>银行列映射向导 - 交互式配置</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='column_mapping.css') }}">
+</head>
+<body>
+<div class="wizard-container">
+    <header class="wizard-header">
+        <div>
+            <h1>🏦 银行列映射向导</h1>
+            <div class="subtitle">通过交互式界面配置银行流水解析规则，无需手写 YAML</div>
+        </div>
+        <a href="/upload" class="back-link">← 返回上传</a>
+    </header>
+
+    <nav class="step-nav" id="stepNav">
+        <div class="step-item active" data-step="1"><span class="step-num">1</span>上传文件</div>
+        <div class="step-item" data-step="2"><span class="step-num">2</span>选择账号</div>
+        <div class="step-item" data-step="3"><span class="step-num">3</span>表头与起始行</div>
+        <div class="step-item" data-step="4"><span class="step-num">4</span>映射业务列</div>
+        <div class="step-item" data-step="5"><span class="step-num">5</span>预览提取</div>
+        <div class="step-item" data-step="6"><span class="step-num">6</span>保存配置</div>
+    </nav>
+
+    <div class="wizard-body">
+
+        <!-- Step 1: Upload -->
+        <div class="step-panel active" id="panel1">
+            <h3 class="panel-title">步骤 1 / 6：上传银行流水 Excel 文件</h3>
+            <p class="panel-desc">请上传一份该银行的典型流水 Excel，我们将基于它交互式地完成列映射配置。</p>
+
+            <div class="alert alert-info">
+                💡 提示：请选择格式正确、包含真实数据的 Excel 文件（.xlsx / .xls）。仅支持单个文件。
+            </div>
+
+            <div class="upload-box" id="uploadBoxWizard">
+                <div class="upload-icon">📊</div>
+                <p>拖拽 Excel 文件到此处，或点击选择文件</p>
+                <p class="hint">仅支持 .xlsx / .xls 格式</p>
+                <input type="file" id="fileInputWizard" accept=".xlsx,.xls">
+            </div>
+
+            <div id="fileInfo" class="file-info" style="display:none;">
+                <div>
+                    ✅ 已上传：<span class="filename" id="uploadedFilename"></span>
+                </div>
+                <button type="button" class="change-btn" id="changeFileBtn">更换文件</button>
+            </div>
+
+            <div style="margin-top:24px;">
+                <h4 style="font-size:14px;margin-bottom:10px;color:#495057;">📋 已配置的银行规则</h4>
+                <div id="existingRulesList" class="rules-list">
+                    <div class="empty-state">加载中...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 2: Select Account Cell -->
+        <div class="step-panel" id="panel2">
+            <h3 class="panel-title">步骤 2 / 6：选择银行账号单元格</h3>
+            <p class="panel-desc">在下方预览表格中，<strong>点击包含银行账号的单元格</strong>。该单元格通常位于表头上方，例如 "账号：622202..."。</p>
+
+            <div class="alert alert-info">
+                💡 操作方式：在预览表格中点击账号所在的单元格。右侧会实时显示你的选择。
+            </div>
+
+            <div class="col-legend">
+                <span class="legend-item"><span class="legend-box account"></span>已选账号单元格</span>
+            </div>
+
+            <div id="sheetTabs2" class="sheet-tabs"></div>
+            <div id="excelPreview2" class="excel-preview-wrapper"></div>
+
+            <div class="form-grid" style="margin-top:18px;">
+                <div class="form-group">
+                    <label>已选账号单元格 <span class="required">*</span></label>
+                    <input type="text" class="form-control" id="accountCellInput" placeholder="例如 B2，也可直接手动输入" readonly>
+                </div>
+                <div class="form-group">
+                    <label>单元格值预览</label>
+                    <input type="text" class="form-control" id="accountValuePreview" placeholder="选择单元格后自动显示" readonly>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 3: Header Row & Start Row -->
+        <div class="step-panel" id="panel3">
+            <h3 class="panel-title">步骤 3 / 6：选择表头行与数据起始行</h3>
+            <p class="panel-desc">
+                在预览表格中，<strong>点击表头行的任意单元格</strong>（包含"交易日期"、"金额"等列名的那一行），
+                系统会自动将<strong>下一行</strong>作为数据起始行。你也可以手动调整。
+            </p>
+
+            <div class="col-legend">
+                <span class="legend-item"><span class="legend-box header"></span>表头行</span>
+                <span class="legend-item"><span class="legend-box data"></span>数据起始行</span>
+                <span class="legend-item"><span class="legend-box account"></span>账号单元格</span>
+            </div>
+
+            <div id="sheetTabs3" class="sheet-tabs"></div>
+            <div id="excelPreview3" class="excel-preview-wrapper"></div>
+
+            <div class="form-grid" style="margin-top:18px;">
+                <div class="form-group">
+                    <label>表头行号 <span class="required">*</span></label>
+                    <input type="number" class="form-control" id="headerRowInput" min="1" placeholder="点击表头行自动填写">
+                </div>
+                <div class="form-group">
+                    <label>数据起始行号 <span class="required">*</span> <span class="hint-label">表头行 + 1</span></label>
+                    <input type="number" class="form-control" id="startRowInput" min="1">
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 4: Map Columns -->
+        <div class="step-panel" id="panel4">
+            <h3 class="panel-title">步骤 4 / 6：映射各业务列</h3>
+            <p class="panel-desc">
+                点击预览表格中的某一列，将其分配给对应的业务字段。也可在下拉框中手动选择列号。
+                <strong style="color:#fa5252;">交易日期为必填</strong>，建议尽量映射全部字段以获得最佳效果。
+            </p>
+
+            <div class="col-legend">
+                <span class="legend-item"><span class="legend-box mapped"></span>已映射的列</span>
+                <span class="legend-item"><span class="legend-box header"></span>表头行</span>
+                <span class="legend-item"><span class="legend-box data"></span>数据起始行</span>
+            </div>
+
+            <div id="sheetTabs4" class="sheet-tabs"></div>
+            <div id="excelPreview4" class="excel-preview-wrapper"></div>
+
+            <div style="margin-top:18px;">
+                <div id="selectModeHint" class="alert alert-warning" style="margin-bottom:12px;display:none;">
+                    🎯 <strong>选择模式：</strong>请在上方预览表格中点击任意单元格，系统会将该列分配给当前选中的字段（高亮显示）。
+                </div>
+
+                <div id="fieldMapContainer"></div>
+            </div>
+
+            <div class="form-grid" style="margin-top:20px;">
+                <div class="form-group">
+                    <label>付款金额符号 <span class="hint-label">银行模板约定</span></label>
+                    <select class="form-control" id="paymentSign">
+                        <option value="negative">付款为负数（常用）</option>
+                        <option value="positive">付款保持正数</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>多账号单文件拆分</label>
+                    <select class="form-control" id="multiAccount">
+                        <option value="false">否（单个账号一个文件）</option>
+                        <option value="true">是（同文件含多个账号）</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>表头校验模式</label>
+                    <select class="form-control" id="headerValidation">
+                        <option value="warn">警告（不匹配时提示但继续）</option>
+                        <option value="strict">严格（不匹配则中断）</option>
+                        <option value="off">关闭（不校验）</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 5: Preview Extraction -->
+        <div class="step-panel" id="panel5">
+            <h3 class="panel-title">步骤 5 / 6：预览提取结果</h3>
+            <p class="panel-desc">根据当前配置实时预览解析结果。如发现问题，请返回上一步调整。</p>
+
+            <div style="text-align:right;margin-bottom:12px;">
+                <button type="button" class="btn btn-sm btn-primary" id="refreshPreviewBtn">
+                    <span class="spinner" id="previewSpinner" style="display:none;"></span>
+                    🔄 重新预览
+                </button>
+            </div>
+
+            <div id="previewArea">
+                <div class="empty-state">点击"重新预览"查看提取结果</div>
+            </div>
+        </div>
+
+        <!-- Step 6: Save -->
+        <div class="step-panel" id="panel6">
+            <h3 class="panel-title">步骤 6 / 6：保存银行配置</h3>
+            <p class="panel-desc">确认配置无误后，输入银行名称并保存。该名称将用于识别文件名前缀（例如"北京银行_流水.xlsx"）。</p>
+
+            <div class="form-grid" style="margin-bottom:18px;">
+                <div class="form-group">
+                    <label>银行名称 <span class="required">*</span></label>
+                    <input type="text" class="form-control" id="bankNameInput" placeholder="例如：北京银行、工商银行">
+                </div>
+                <div class="form-group">
+                    <label>启用状态</label>
+                    <select class="form-control" id="enabledInput">
+                        <option value="true">启用（默认）</option>
+                        <option value="false">禁用</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="configSummary" class="config-summary">
+                <h4>📋 配置摘要</h4>
+                <table>
+                    <tr><td>账号单元格</td><td id="sumAccountCell">-</td></tr>
+                    <tr><td>表头行 / 起始行</td><td id="sumRows">-</td></tr>
+                    <tr><td>已映射字段数</td><td id="sumMapped">-</td></tr>
+                    <tr><td>字段映射明细</td><td id="sumDetail">-</td></tr>
+                    <tr><td>付款符号 / 多账号</td><td id="sumExtra">-</td></tr>
+                </table>
+            </div>
+        </div>
+
+    </div>
+
+    <footer class="wizard-footer">
+        <span class="progress-tip" id="progressTip">请先上传文件</span>
+        <div class="btn-row">
+            <button type="button" class="btn btn-secondary" id="prevBtn" disabled>← 上一步</button>
+            <button type="button" class="btn btn-primary" id="nextBtn" disabled>下一步 →</button>
+        </div>
+    </footer>
+</div>
+
+<div id="confirmModal" class="modal-overlay">
+    <div class="modal-box">
+        <h3 id="modalTitle">确认删除</h3>
+        <p id="modalBody">确定要删除该银行规则吗？此操作不可撤销。</p>
+        <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" id="modalCancel">取消</button>
+            <button type="button" class="btn btn-danger" id="modalConfirm">确认删除</button>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    'use strict';
+
+    var STEPS = 6;
+    var state = {
+        currentStep: 1,
+        wizardId: null,
+        filename: null,
+        currentSheet: null,
+        previewData: null,
+        accountCell: null,         // e.g. "B2"
+        accountCol: null,          // 1-based
+        accountRow: null,          // 1-based
+        headerRow: null,
+        startRow: null,
+        columnMap: {},             // { trade_date: col_idx(1-based), payment: ... }
+        paymentSign: 'negative',
+        multiAccount: false,
+        headerValidation: 'warn',
+        activeField: null,         // field name currently being mapped by click
+        previewResult: null,
+    };
+
+    var FIELD_DEFS = [
+        { key: 'trade_date',    label: '交易日期',     desc: '每笔交易的日期', required: true },
+        { key: 'payment',       label: '付款金额',     desc: '支出金额列',       required: false },
+        { key: 'receipt',       label: '收款金额',     desc: '收入金额列',       required: false },
+        { key: 'summary',       label: '摘要',         desc: '交易用途/备注',    required: false },
+        { key: 'counterpart',   label: '对方户名',     desc: '交易对手名称',     required: false },
+        { key: 'balance',       label: '余额',         desc: '账户余额',         required: false },
+        { key: 'transaction_id',label: '交易流水号',   desc: '唯一交易编号',     required: false },
+    ];
+
+    // ---------- Toast ----------
+    function showToast(msg, type) {
+        type = type || 'info';
+        var t = document.createElement('div');
+        t.className = 'toast-wizard ' + type;
+        t.textContent = msg;
+        document.body.appendChild(t);
+        setTimeout(function() { t.remove(); }, 2800);
+    }
+
+    // ---------- Modal ----------
+    var modalCb = null;
+    function openModal(title, body, cb) {
+        document.getElementById('modalTitle').textContent = title;
+        document.getElementById('modalBody').textContent = body;
+        document.getElementById('confirmModal').classList.add('active');
+        modalCb = cb;
+    }
+    function closeModal() {
+        document.getElementById('confirmModal').classList.remove('active');
+        modalCb = null;
+    }
+    document.getElementById('modalCancel').addEventListener('click', closeModal);
+    document.getElementById('modalConfirm').addEventListener('click', function() {
+        if (modalCb) modalCb();
+        closeModal();
+    });
+
+    // ---------- Step navigation ----------
+    function setStep(n) {
+        if (n < 1 || n > STEPS) return;
+        state.currentStep = n;
+        document.querySelectorAll('.step-item').forEach(function(el) {
+            var s = parseInt(el.dataset.step, 10);
+            el.classList.toggle('active', s === n);
+            el.classList.toggle('done', s < n);
+        });
+        document.querySelectorAll('.step-panel').forEach(function(el, idx) {
+            el.classList.toggle('active', idx + 1 === n);
+        });
+        document.getElementById('prevBtn').disabled = (n === 1);
+        updateNextButton();
+        updateProgressTip();
+
+        if (n === 2 && state.previewData) renderExcelPreview(2);
+        if (n === 3 && state.previewData) renderExcelPreview(3);
+        if (n === 4 && state.previewData) { renderExcelPreview(4); renderFieldMap(); }
+        if (n === 5) refreshExtractPreview();
+        if (n === 6) updateConfigSummary();
+    }
+
+    function updateProgressTip() {
+        var tips = {
+            1: '请上传一个银行流水 Excel 文件',
+            2: '在表格中点击包含银行账号的单元格',
+            3: '在表格中点击表头行（包含列名的那一行）',
+            4: '依次点击各字段行，再在表格中点击对应列',
+            5: '实时预览提取结果是否正确',
+            6: '确认配置并保存为银行规则',
+        };
+        document.getElementById('progressTip').textContent = tips[state.currentStep] || '';
+    }
+
+    function canProceed() {
+        switch (state.currentStep) {
+            case 1: return !!state.wizardId;
+            case 2: return !!state.accountCell;
+            case 3: return !!(state.headerRow && state.startRow && state.startRow > state.headerRow);
+            case 4: return !!state.columnMap.trade_date;
+            case 5: return true;
+            case 6: return !!(document.getElementById('bankNameInput').value.trim());
+            default: return false;
+        }
+    }
+
+    function updateNextButton() {
+        var btn = document.getElementById('nextBtn');
+        btn.disabled = !canProceed();
+        btn.textContent = (state.currentStep === STEPS) ? '💾 保存配置' : '下一步 →';
+    }
+
+    document.getElementById('prevBtn').addEventListener('click', function() {
+        setStep(state.currentStep - 1);
+    });
+    document.getElementById('nextBtn').addEventListener('click', function() {
+        if (state.currentStep === STEPS) {
+            saveBankRule();
+        } else {
+            setStep(state.currentStep + 1);
+        }
+    });
+
+    // ---------- Step 1: Upload ----------
+    var uploadBox = document.getElementById('uploadBoxWizard');
+    var fileInput = document.getElementById('fileInputWizard');
+
+    uploadBox.addEventListener('click', function() { fileInput.click(); });
+    document.getElementById('changeFileBtn').addEventListener('click', function(e) {
+        e.stopPropagation();
+        fileInput.click();
+    });
+
+    uploadBox.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        uploadBox.classList.add('dragover');
+    });
+    uploadBox.addEventListener('dragleave', function() {
+        uploadBox.classList.remove('dragover');
+    });
+    uploadBox.addEventListener('drop', function(e) {
+        e.preventDefault();
+        uploadBox.classList.remove('dragover');
+        if (e.dataTransfer.files && e.dataTransfer.files.length) {
+            handleFile(e.dataTransfer.files[0]);
+        }
+    });
+    fileInput.addEventListener('change', function(e) {
+        if (e.target.files && e.target.files.length) handleFile(e.target.files[0]);
+    });
+
+    function handleFile(file) {
+        if (!file) return;
+        var name = file.name.toLowerCase();
+        if (!(name.endsWith('.xlsx') || name.endsWith('.xls'))) {
+            showToast('仅支持 .xlsx / .xls 格式', 'error');
+            return;
+        }
+        uploadBox.style.opacity = '0.6';
+        var fd = new FormData();
+        fd.append('file', file);
+        fetch('/api/wizard/upload', { method: 'POST', body: fd })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                uploadBox.style.opacity = '1';
+                if (data.success) {
+                    state.wizardId = data.wizard_id;
+                    state.filename = data.filename;
+                    document.getElementById('uploadedFilename').textContent = data.filename;
+                    document.getElementById('fileInfo').style.display = 'flex';
+                    uploadBox.style.display = 'none';
+                    showToast(data.message, 'success');
+                    loadPreviewData(null);
+                    updateNextButton();
+                } else {
+                    showToast(data.message || '上传失败', 'error');
+                }
+            })
+            .catch(function(err) {
+                uploadBox.style.opacity = '1';
+                showToast('上传失败: ' + err.message, 'error');
+            });
+    }
+
+    function loadExistingRules() {
+        fetch('/api/bank-rules')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var list = document.getElementById('existingRulesList');
+                if (!data.success || !data.data || data.data.length === 0) {
+                    list.innerHTML = '<div class="empty-state">暂无已配置的银行规则</div>';
+                    return;
+                }
+                list.innerHTML = data.data.map(function(r) {
+                    var cols = Object.keys(r.columns || {}).length;
+                    return '<div class="rule-card">' +
+                        '<div class="rule-info">' +
+                            '<div class="rule-name">' + r.bank_name + (r.enabled ? '' : ' （已禁用）') + '</div>' +
+                            '<div class="rule-meta">账号: ' + r.account_cell +
+                                ' · 起始行: ' + r.start_row +
+                                ' · 映射字段: ' + cols + '个' +
+                                (r.multi_account ? ' · 多账号' : '') +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="rule-actions">' +
+                            '<button type="button" class="btn btn-sm btn-danger" data-name="' + r.bank_name + '">删除</button>' +
+                        '</div>' +
+                    '</div>';
+                }).join('');
+                list.querySelectorAll('.btn-danger').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        var nm = btn.getAttribute('data-name');
+                        openModal('确认删除', '确定要删除银行规则「' + nm + '」吗？此操作不可撤销。', function() {
+                            deleteRule(nm);
+                        });
+                    });
+                });
+            })
+            .catch(function() {
+                document.getElementById('existingRulesList').innerHTML =
+                    '<div class="empty-state">加载失败</div>';
+            });
+    }
+
+    function deleteRule(name) {
+        fetch('/api/bank-rules/' + encodeURIComponent(name), { method: 'DELETE' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    showToast('已删除银行规则: ' + name, 'success');
+                    loadExistingRules();
+                } else {
+                    showToast(data.message || '删除失败', 'error');
+                }
+            })
+            .catch(function(err) { showToast('删除失败: ' + err.message, 'error'); });
+    }
+
+    // ---------- Preview Excel Data ----------
+    function loadPreviewData(sheet) {
+        if (!state.wizardId) return;
+        var url = '/api/wizard/preview?wizard_id=' + encodeURIComponent(state.wizardId);
+        if (sheet) url += '&sheet=' + encodeURIComponent(sheet);
+        fetch(url)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    state.previewData = data.data;
+                    state.currentSheet = data.data.current_sheet;
+                    // auto-detect on load? user picks.
+                    [2,3,4].forEach(function(n) {
+                        if (state.currentStep === n) renderExcelPreview(n);
+                    });
+                    if (state.currentStep === 4) renderFieldMap();
+                } else {
+                    showToast(data.message || '预览失败', 'error');
+                }
+            })
+            .catch(function(err) { showToast('读取预览失败: ' + err.message, 'error'); });
+    }
+
+    function renderSheetTabs(step) {
+        var container = document.getElementById('sheetTabs' + step);
+        if (!container || !state.previewData) return;
+        var sheets = state.previewData.sheet_names || [];
+        container.innerHTML = sheets.map(function(s) {
+            return '<div class="sheet-tab ' + (s === state.currentSheet ? 'active' : '') + '" data-sheet="' + s + '">' + s + '</div>';
+        }).join('');
+        container.querySelectorAll('.sheet-tab').forEach(function(el) {
+            el.addEventListener('click', function() {
+                var s = el.getAttribute('data-sheet');
+                if (s !== state.currentSheet) {
+                    state.currentSheet = s;
+                    loadPreviewData(s);
+                }
+            });
+        });
+    }
+
+    function colLetter(idx) {
+        // 1-based
+        var s = '';
+        while (idx > 0) {
+            idx--;
+            s = String.fromCharCode(65 + (idx % 26)) + s;
+            idx = Math.floor(idx / 26);
+        }
+        return s;
+    }
+
+    function renderExcelPreview(step) {
+        renderSheetTabs(step);
+        var wrap = document.getElementById('excelPreview' + step);
+        if (!wrap || !state.previewData) return;
+        var data = state.previewData.data || [];
+        var refs = state.previewData.cell_refs || [];
+        var cols = state.previewData.max_col || 0;
+        if (cols === 0 || data.length === 0) {
+            wrap.innerHTML = '<div class="empty-state">无数据可预览</div>';
+            return;
+        }
+
+        var thead = '<tr><th class="row-head">#</th>';
+        for (var c = 1; c <= cols; c++) thead += '<th>' + colLetter(c) + '</th>';
+        thead += '</tr>';
+
+        var tbody = '';
+        for (var r = 0; r < data.length; r++) {
+            var rowNum = r + 1;
+            var rowClass = '';
+            if (state.headerRow && rowNum === state.headerRow) rowClass = ' row-indicator';
+            else if (state.startRow && rowNum === state.startRow) rowClass = ' row-indicator-data';
+            tbody += '<tr' + rowClass + '><td class="row-head">' + rowNum + '</td>';
+            for (var c = 0; c < data[r].length; c++) {
+                var cellRef = refs[r] ? refs[r][c] : '';
+                var cellClass = 'cell';
+                // styling per step
+                if (step === 2 && state.accountCell && cellRef === state.accountCell) {
+                    cellClass += ' selected-account';
+                }
+                if (step >= 3) {
+                    if (state.accountCell && cellRef === state.accountCell) cellClass += ' selected-account';
+                    if (state.headerRow && rowNum === state.headerRow) cellClass += ' selected-header';
+                    else if (state.startRow && rowNum === state.startRow) cellClass += ' selected-data';
+                }
+                if (step === 4) {
+                    // highlight columns that are mapped
+                    var mappedCols = {};
+                    for (var k in state.columnMap) mappedCols[state.columnMap[k]] = true;
+                    if (mappedCols[c + 1]) cellClass += ' mapped';
+                }
+                var val = data[r][c] === null || data[r][c] === undefined ? '' : String(data[r][c]);
+                tbody += '<td class="' + cellClass + '" data-ref="' + cellRef +
+                         '" data-row="' + rowNum + '" data-col="' + (c + 1) + '" title="' +
+                         cellRef + ': ' + val.replace(/"/g, '&quot;') + '">' +
+                         (val.length > 60 ? val.substring(0, 60) + '…' : val) + '</td>';
+            }
+            tbody += '</tr>';
+        }
+
+        wrap.innerHTML = '<table class="excel-preview"><thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table>';
+
+        // bind cell clicks per step
+        wrap.querySelectorAll('td.cell').forEach(function(td) {
+            td.addEventListener('click', function() {
+                handleCellClick(step, td);
+            });
+        });
+    }
+
+    function handleCellClick(step, td) {
+        var ref = td.getAttribute('data-ref');
+        var row = parseInt(td.getAttribute('data-row'), 10);
+        var col = parseInt(td.getAttribute('data-col'), 10);
+
+        if (step === 2) {
+            state.accountCell = ref;
+            state.accountRow = row;
+            state.accountCol = col;
+            document.getElementById('accountCellInput').value = ref;
+            document.getElementById('accountValuePreview').value =
+                (state.previewData.data[row - 1] && state.previewData.data[row - 1][col - 1]) || '';
+            renderExcelPreview(2);
+            updateNextButton();
+            showToast('已选择账号单元格: ' + ref, 'success');
+        } else if (step === 3) {
+            state.headerRow = row;
+            state.startRow = row + 1;
+            document.getElementById('headerRowInput').value = row;
+            document.getElementById('startRowInput').value = row + 1;
+            renderExcelPreview(3);
+            updateNextButton();
+            showToast('已选择表头行: 第 ' + row + ' 行，数据起始行为第 ' + (row + 1) + ' 行', 'success');
+        } else if (step === 4) {
+            if (!state.activeField) {
+                showToast('请先在下方点击一个字段行（如"交易日期"），再选择列', 'info');
+                return;
+            }
+            state.columnMap[state.activeField] = col;
+            // also capture header text for expected_headers
+            if (state.headerRow && state.previewData.data[state.headerRow - 1]) {
+                var headerTxt = state.previewData.data[state.headerRow - 1][col - 1] || '';
+                if (headerTxt && headerTxt.trim()) {
+                    if (!state.expectedHeaders) state.expectedHeaders = {};
+                    state.expectedHeaders[state.activeField] = headerTxt.trim();
+                }
+            }
+            renderExcelPreview(4);
+            renderFieldMap();
+            updateNextButton();
+        }
+    }
+
+    // header row / start row manual edit
+    document.getElementById('headerRowInput').addEventListener('input', function() {
+        var v = parseInt(this.value, 10);
+        if (!isNaN(v) && v >= 1) {
+            state.headerRow = v;
+            if (!state.startRow || state.startRow <= v) {
+                state.startRow = v + 1;
+                document.getElementById('startRowInput').value = v + 1;
+            }
+            if (state.currentStep === 3) renderExcelPreview(3);
+            if (state.currentStep === 4) renderExcelPreview(4);
+            updateNextButton();
+        }
+    });
+    document.getElementById('startRowInput').addEventListener('input', function() {
+        var v = parseInt(this.value, 10);
+        if (!isNaN(v) && v >= 1) {
+            state.startRow = v;
+            if (state.currentStep === 3) renderExcelPreview(3);
+            if (state.currentStep === 4) renderExcelPreview(4);
+            updateNextButton();
+        }
+    });
+
+    // ---------- Step 4: Field Map ----------
+    function renderFieldMap() {
+        var container = document.getElementById('fieldMapContainer');
+        var cols = state.previewData ? state.previewData.max_col : 26;
+        var html = '';
+        FIELD_DEFS.forEach(function(fd) {
+            var currentCol = state.columnMap[fd.key];
+            var opts = '<option value="">- 未映射 -</option>';
+            for (var c = 1; c <= cols; c++) {
+                opts += '<option value="' + c + '"' + (currentCol == c ? ' selected' : '') + '>' +
+                        colLetter(c) + ' 列' +
+                        (state.headerRow && state.previewData && state.previewData.data[state.headerRow - 1]
+                            ? '（' + (state.previewData.data[state.headerRow - 1][c - 1] || '') + '）'
+                            : '') +
+                        '</option>';
+            }
+            var headerVal = '';
+            if (currentCol && state.headerRow && state.previewData && state.previewData.data[state.headerRow - 1]) {
+                headerVal = state.previewData.data[state.headerRow - 1][currentCol - 1] || '';
+            }
+            var sampleVal = '';
+            if (currentCol && state.startRow && state.previewData && state.previewData.data[state.startRow - 1]) {
+                sampleVal = state.previewData.data[state.startRow - 1][currentCol - 1] || '';
+            }
+            html += '<div class="field-map-row" data-field="' + fd.key + '">' +
+                '<div class="field-name">' +
+                    (fd.required ? '<span class="req">*</span> ' : '') + fd.label +
+                '</div>' +
+                '<div class="field-desc">' + fd.desc + '</div>' +
+                '<div style="font-size:12px;color:#868e96;">' +
+                    (headerVal ? '表头: <strong>' + headerVal + '</strong><br>' : '') +
+                    (sampleVal ? '示例: ' + sampleVal : '') +
+                '</div>' +
+                '<select class="form-control field-select" data-field="' + fd.key + '">' + opts + '</select>' +
+                '</div>';
+        });
+        container.innerHTML = html;
+
+        container.querySelectorAll('.field-map-row').forEach(function(row) {
+            row.addEventListener('click', function(e) {
+                if (e.target.tagName === 'SELECT') return;
+                var f = row.getAttribute('data-field');
+                state.activeField = f;
+                container.querySelectorAll('.field-map-row').forEach(function(r) {
+                    r.style.background = (r === row) ? '#e7f5ff' : '';
+                    r.style.boxShadow = (r === row) ? 'inset 0 0 0 2px #4facfe' : '';
+                });
+                document.getElementById('selectModeHint').style.display = 'block';
+                document.getElementById('selectModeHint').innerHTML =
+                    '🎯 <strong>选择模式：</strong>正在映射字段「' +
+                    FIELD_DEFS.find(function(x) { return x.key === f; }).label +
+                    '」——请在上方预览表格中点击该字段所在的任意单元格。';
+            });
+        });
+        container.querySelectorAll('.field-select').forEach(function(sel) {
+            sel.addEventListener('change', function() {
+                var f = sel.getAttribute('data-field');
+                var v = sel.value;
+                if (v) state.columnMap[f] = parseInt(v, 10);
+                else delete state.columnMap[f];
+                if (state.headerRow && state.previewData && v) {
+                    if (!state.expectedHeaders) state.expectedHeaders = {};
+                    var hv = state.previewData.data[state.headerRow - 1][parseInt(v,10) - 1] || '';
+                    if (hv) state.expectedHeaders[f] = hv.trim();
+                }
+                renderExcelPreview(4);
+                renderFieldMap();
+                updateNextButton();
+            });
+        });
+    }
+
+    document.getElementById('paymentSign').addEventListener('change', function() {
+        state.paymentSign = this.value;
+    });
+    document.getElementById('multiAccount').addEventListener('change', function() {
+        state.multiAccount = this.value === 'true';
+    });
+    document.getElementById('headerValidation').addEventListener('change', function() {
+        state.headerValidation = this.value;
+    });
+
+    // ---------- Step 5: Extract Preview ----------
+    document.getElementById('refreshPreviewBtn').addEventListener('click', refreshExtractPreview);
+
+    function refreshExtractPreview() {
+        var area = document.getElementById('previewArea');
+        if (!state.wizardId) {
+            area.innerHTML = '<div class="empty-state">请先完成前几步配置</div>';
+            return;
+        }
+        document.getElementById('previewSpinner').style.display = 'inline-block';
+
+        var ruleData = {
+            bank_name: '预览银行',
+            account_cell: state.accountCell,
+            start_row: state.startRow || 1,
+            columns: state.columnMap,
+            payment_sign: state.paymentSign,
+            multi_account: state.multiAccount,
+            header_validation: 'off',
+            expected_headers: state.expectedHeaders || {},
+        };
+
+        fetch('/api/wizard/extract-preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                wizard_id: state.wizardId,
+                rule_data: ruleData,
+                sheet_name: state.currentSheet,
+            }),
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('previewSpinner').style.display = 'none';
+            if (!data.success) {
+                area.innerHTML = '<div class="alert alert-error">❌ 预览失败：' + (data.message || '') + '</div>';
+                return;
+            }
+            state.previewResult = data.data;
+            renderExtractPreview(data.data);
+        })
+        .catch(function(err) {
+            document.getElementById('previewSpinner').style.display = 'none';
+            area.innerHTML = '<div class="alert alert-error">❌ 请求失败：' + err.message + '</div>';
+        });
+    }
+
+    function renderExtractPreview(res) {
+        var area = document.getElementById('previewArea');
+        if (!res || !res.success) {
+            area.innerHTML = '<div class="alert alert-error">❌ 预览失败：' + (res && res.error ? res.error : '') + '</div>';
+            return;
+        }
+        var html = '';
+        html += '<div class="preview-section" style="margin-top:0;">';
+        html += '<h4>📊 解析概览</h4>';
+        html += '<div class="preview-summary">';
+        html += '<div class="ps-item"><span class="ps-label">提取到的账号</span><span class="ps-value">' + (res.account || '-') + '</span></div>';
+        html += '<div class="ps-item"><span class="ps-label">总记录数</span><span class="ps-value">' + (res.total_records || 0) + ' 条</span></div>';
+        html += '<div class="ps-item"><span class="ps-label">预览记录数</span><span class="ps-value">' + (res.records || []).length + ' 条</span></div>';
+        var missing = [];
+        FIELD_DEFS.forEach(function(fd) { if (!state.columnMap[fd.key] && fd.required) missing.push(fd.label); });
+        html += '<div class="ps-item"><span class="ps-label">未映射必填字段</span><span class="ps-value">' + (missing.length ? missing.join('、') : '无') + '</span></div>';
+        html += '</div>';
+
+        if (res.header_values && Object.keys(res.header_values).length) {
+            html += '<div class="preview-summary">';
+            html += '<div class="ps-item"><span class="ps-label">表头文本匹配</span><span class="ps-value">';
+            var hvParts = [];
+            for (var k in res.header_values) {
+                var def = FIELD_DEFS.find(function(x){return x.key===k;});
+                hvParts.push((def?def.label:k) + '→' + res.header_values[k]);
+            }
+            html += hvParts.join('，') || '-';
+            html += '</span></div></div>';
+        }
+
+        html += '</div>';
+
+        html += '<div class="preview-section">';
+        html += '<h4>📋 记录预览（前 ' + (res.records || []).length + ' 条）</h4>';
+        if (!res.records || res.records.length === 0) {
+            html += '<div class="empty-state">未提取到任何记录，请检查列映射和起始行设置</div>';
+        } else {
+            var cols = ['银行','银行账号','主体','交易日期','付款','收款','摘要','对方户名','余额','交易流水号'];
+            html += '<div class="preview-table-wrap"><table class="preview-table"><thead><tr>';
+            cols.forEach(function(c) { html += '<th>' + c + '</th>'; });
+            html += '</tr></thead><tbody>';
+            res.records.forEach(function(r) {
+                html += '<tr>';
+                cols.forEach(function(c) {
+                    var v = r[c];
+                    if (v === null || v === undefined) v = '';
+                    else v = String(v);
+                    if (v.length > 40) v = v.substring(0,40) + '…';
+                    html += '<td>' + v + '</td>';
+                });
+                html += '</tr>';
+            });
+            html += '</tbody></table></div>';
+        }
+        html += '</div>';
+        area.innerHTML = html;
+    }
+
+    // ---------- Step 6: Save ----------
+    document.getElementById('bankNameInput').addEventListener('input', updateNextButton);
+
+    function updateConfigSummary() {
+        document.getElementById('sumAccountCell').textContent = state.accountCell || '-';
+        document.getElementById('sumRows').textContent =
+            (state.headerRow || '-') + ' / ' + (state.startRow || '-');
+        var mapped = Object.keys(state.columnMap).length;
+        document.getElementById('sumMapped').textContent = mapped + ' / ' + FIELD_DEFS.length + ' 个字段';
+        var detail = [];
+        FIELD_DEFS.forEach(function(fd) {
+            if (state.columnMap[fd.key]) {
+                detail.push(fd.label + '=' + colLetter(state.columnMap[fd.key]));
+            }
+        });
+        document.getElementById('sumDetail').textContent = detail.join('，') || '暂无';
+        document.getElementById('sumExtra').textContent =
+            (state.paymentSign === 'negative' ? '付款取负' : '付款为正') +
+            ' / ' + (state.multiAccount ? '多账号文件' : '单账号文件') +
+            ' / 校验：' + state.headerValidation;
+    }
+
+    function saveBankRule() {
+        var bankName = document.getElementById('bankNameInput').value.trim();
+        if (!bankName) {
+            showToast('请输入银行名称', 'error');
+            return;
+        }
+        var enabled = document.getElementById('enabledInput').value === 'true';
+
+        var body = {
+            bank_name: bankName,
+            account_cell: state.accountCell,
+            start_row: state.startRow,
+            columns: state.columnMap,
+            payment_sign: state.paymentSign,
+            multi_account: state.multiAccount,
+            header_validation: state.headerValidation,
+            enabled: enabled,
+            expected_headers: state.expectedHeaders || {},
+        };
+
+        document.getElementById('nextBtn').disabled = true;
+        fetch('/api/bank-rules', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('nextBtn').disabled = false;
+            if (data.success) {
+                showToast('✅ 银行规则保存成功：' + bankName, 'success');
+                setTimeout(function() {
+                    window.location.href = '/column-mapping';
+                }, 1200);
+            } else {
+                showToast(data.message || '保存失败', 'error');
+            }
+        })
+        .catch(function(err) {
+            document.getElementById('nextBtn').disabled = false;
+            showToast('保存失败: ' + err.message, 'error');
+        });
+    }
+
+    // ---------- Init ----------
+    loadExistingRules();
+    updateNextButton();
+
+    // allow Enter to proceed on last step
+    document.getElementById('bankNameInput').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && state.currentStep === STEPS && canProceed()) {
+            saveBankRule();
+        }
+    });
+})();
+</script>
+</body>
+</html>

@@ -509,6 +509,176 @@ def dashboard_page():
     return render_template('dashboard.html')
 
 
+@app.route('/column-mapping')
+def column_mapping_page():
+    return render_template('column_mapping.html')
+
+
+WIZARD_UPLOAD_DIR = os.path.join(UPLOAD_DIR, 'wizard')
+os.makedirs(WIZARD_UPLOAD_DIR, exist_ok=True)
+
+
+def _wizard_safe_filename(filename):
+    safe = filename.replace('\\', '/').replace('../', '').replace('..\\', '')
+    safe = os.path.basename(safe)
+    safe = re.sub(r'[\x00-\x1f\x7f]', '', safe)
+    if not safe:
+        safe = 'unnamed'
+    return safe
+
+
+@app.route('/api/wizard/upload', methods=['POST'])
+def api_wizard_upload():
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'message': '未选择文件'}), 400
+    f = request.files['file']
+    if not f or not f.filename:
+        return jsonify({'success': False, 'message': '未选择文件'}), 400
+    fname = f.filename
+    if not (fname.lower().endswith('.xlsx') or fname.lower().endswith('.xls')):
+        return jsonify({'success': False, 'message': '仅支持 .xlsx / .xls 格式'}), 400
+    safe_name = _wizard_safe_filename(fname)
+    wizard_id = f"WZ{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6]}"
+    save_dir = os.path.join(WIZARD_UPLOAD_DIR, wizard_id)
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, safe_name)
+    f.save(save_path)
+    logger.info('向导文件已上传: wizard_id=%s, file=%s', wizard_id, safe_name)
+    return jsonify({
+        'success': True,
+        'wizard_id': wizard_id,
+        'filename': safe_name,
+        'message': '文件上传成功',
+    })
+
+
+@app.route('/api/wizard/preview', methods=['GET'])
+def api_wizard_preview():
+    wizard_id = request.args.get('wizard_id', '').strip()
+    sheet_name = request.args.get('sheet')
+    if not wizard_id:
+        return jsonify({'success': False, 'message': '缺少 wizard_id'}), 400
+    save_dir = os.path.join(WIZARD_UPLOAD_DIR, wizard_id)
+    if not os.path.isdir(save_dir):
+        return jsonify({'success': False, 'message': '会话已过期，请重新上传文件'}), 404
+    files = [f for f in os.listdir(save_dir)
+             if f.lower().endswith(('.xlsx', '.xls')) and not f.startswith('~$')]
+    if not files:
+        return jsonify({'success': False, 'message': '文件不存在'}), 404
+    filepath = os.path.join(save_dir, files[0])
+    try:
+        data = bankcheck.read_excel_preview(
+            filepath, sheet_name=sheet_name if sheet_name else None,
+            max_rows=50, max_cols=30,
+        )
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        logger.error('读取 Excel 预览失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/wizard/extract-preview', methods=['POST'])
+def api_wizard_extract_preview():
+    body = request.get_json(silent=True) or {}
+    wizard_id = body.get('wizard_id', '').strip()
+    rule_data = body.get('rule_data', {})
+    sheet_name = body.get('sheet_name')
+    if not wizard_id:
+        return jsonify({'success': False, 'message': '缺少 wizard_id'}), 400
+    save_dir = os.path.join(WIZARD_UPLOAD_DIR, wizard_id)
+    if not os.path.isdir(save_dir):
+        return jsonify({'success': False, 'message': '会话已过期，请重新上传文件'}), 404
+    files = [f for f in os.listdir(save_dir)
+             if f.lower().endswith(('.xlsx', '.xls')) and not f.startswith('~$')]
+    if not files:
+        return jsonify({'success': False, 'message': '文件不存在'}), 404
+    filepath = os.path.join(save_dir, files[0])
+    result = bankcheck.preview_extraction(
+        filepath, rule_data, sheet_name=sheet_name, max_preview_rows=10,
+    )
+    if result.get('success'):
+        return jsonify({'success': True, 'data': result})
+    return jsonify({'success': False, 'message': result.get('error', '预览失败')}), 400
+
+
+@app.route('/api/bank-rules', methods=['GET'])
+def api_list_bank_rules():
+    try:
+        config = bankcheck.get_bank_config()
+        rules = config.list_rules_detailed()
+        return jsonify({'success': True, 'data': rules, 'total': len(rules)})
+    except Exception as e:
+        logger.error('获取银行规则列表失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/bank-rules', methods=['POST'])
+def api_save_bank_rule():
+    body = request.get_json(silent=True) or {}
+    bank_name = (body.get('bank_name') or '').strip()
+    account_cell = (body.get('account_cell') or '').strip()
+    start_row = body.get('start_row')
+    columns = body.get('columns') or {}
+
+    if not bank_name:
+        return jsonify({'success': False, 'message': '银行名称不能为空'}), 400
+    if not account_cell:
+        return jsonify({'success': False, 'message': '请选择账号单元格'}), 400
+    if not start_row:
+        return jsonify({'success': False, 'message': '请设置数据起始行'}), 400
+    if not columns.get('trade_date'):
+        return jsonify({'success': False, 'message': '请至少映射交易日期列'}), 400
+
+    try:
+        bankcheck.parse_cell_ref(account_cell)
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'账号单元格格式错误: {e}'}), 400
+
+    try:
+        start_row_int = int(start_row)
+        if start_row_int < 1:
+            raise ValueError('起始行必须 >= 1')
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'数据起始行无效: {e}'}), 400
+
+    rule_data = {
+        'bank_name': bank_name,
+        'account_cell': account_cell,
+        'start_row': start_row_int,
+        'columns': {k: int(v) for k, v in columns.items() if v},
+        'payment_sign': body.get('payment_sign', 'negative'),
+        'enabled': bool(body.get('enabled', True)),
+        'expected_headers': body.get('expected_headers') or {},
+        'header_validation': body.get('header_validation', 'warn'),
+        'multi_account': bool(body.get('multi_account', False)),
+        'skip_sheets': body.get('skip_sheets') or [],
+    }
+    try:
+        config = bankcheck.get_bank_config()
+        ok = config.save_rule(rule_data)
+        if ok:
+            logger.info('银行规则已保存: %s', bank_name)
+            return jsonify({'success': True, 'message': '银行规则保存成功'})
+        return jsonify({'success': False, 'message': '保存失败，请检查日志'}), 500
+    except Exception as e:
+        logger.error('保存银行规则失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/bank-rules/<bank_name>', methods=['DELETE'])
+def api_delete_bank_rule(bank_name):
+    try:
+        config = bankcheck.get_bank_config()
+        ok = config.delete_rule(bank_name)
+        if ok:
+            logger.info('银行规则已删除: %s', bank_name)
+            return jsonify({'success': True, 'message': '银行规则已删除'})
+        return jsonify({'success': False, 'message': '银行规则不存在'}), 404
+    except Exception as e:
+        logger.error('删除银行规则失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 def _safe_filename(filename):
     safe = filename.replace('\\', '/').replace('../', '').replace('..\\', '')
     safe = os.path.basename(safe)
