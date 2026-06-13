@@ -354,3 +354,65 @@ def _create_lookup_table_all_banks(path):
         ('杭州VV网络技术有限公司', '6225881234567890'),
     ]
     return _create_lookup_table(path, mappings)
+
+
+def _create_beijing_bank_multi_account_excel(path, accounts=None):
+    """
+    创建包含多个账号区块的北京银行 Excel 文件（同一工作表内纵向堆叠）。
+
+    accounts 参数格式：
+    [
+        {
+            'account': '01090312345678901',
+            'rows': [
+                [1, '2024-01-05', 'CNY', 50000, None, 1500000, ...],
+            ],
+        },
+        {
+            'account': '01090399999999999',
+            'rows': [
+                [1, '2024-02-01', 'CNY', 20000, None, 800000, ...],
+            ],
+        },
+    ]
+    """
+    if accounts is None:
+        accounts = [
+            {
+                'account': '01090312345678901',
+                'rows': [
+                    [1, '2024-01-05', 'CNY', 50000, None, 1500000, '供应商A公司', '622001234', '工商银行', '转账', '001', '采购付款', None, None, None, 'BJ20240105001'],
+                    [2, '2024-01-10', 'CNY', None, 80000, 1580000, '客户B公司', '622005678', '建设银行', '转账', '002', '销售收款', None, None, None, 'BJ20240110002'],
+                ],
+            },
+            {
+                'account': '01090399999999999',
+                'rows': [
+                    [1, '2024-02-01', 'CNY', 20000, None, 800000, '供应商C公司', '622009999', '农业银行', '转账', '003', '材料采购', None, None, None, 'BJ20240201003'],
+                    [2, '2024-02-15', 'CNY', None, 60000, 860000, '客户D公司', '622008888', '中国银行', '转账', '004', '服务收款', None, None, None, 'BJ20240215004'],
+                ],
+            },
+        ]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = '交易明细'
+
+    headers = ['序号', '交易日期', '币种', '支出金额', '收入金额', '余额',
+               '对方户名', '对方账号', '对方行名', '凭证种类', '凭证号码',
+               '摘要', '备注1', '备注2', '备注3', '交易流水号']
+
+    current_row = 1
+    for acct_info in accounts:
+        ws.cell(row=current_row, column=1, value='北京银行交易明细')
+        ws.cell(row=current_row + 1, column=2, value=acct_info['account'])
+        for c, h in enumerate(headers, 1):
+            ws.cell(row=current_row + 2, column=c, value=h)
+        for i, row_data in enumerate(acct_info['rows']):
+            for j, val in enumerate(row_data):
+                ws.cell(row=current_row + 3 + i, column=j + 1, value=val)
+        current_row += 3 + len(acct_info['rows'])
+
+    wb.save(path)
+    wb.close()
+    return path

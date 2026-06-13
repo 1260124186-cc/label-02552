@@ -716,6 +716,7 @@ class BankRule:
     skip_sheets: List[str] = field(default_factory=list)
     expected_headers: Dict[str, List[str]] = field(default_factory=dict)
     header_validation: str = 'warn'
+    multi_account: bool = False
 
 
 class BankRuleConfig:
@@ -780,6 +781,7 @@ class BankRuleConfig:
                     skip_sheets=bank_config.get('skip_sheets', []),
                     expected_headers=normalized_headers,
                     header_validation=bank_config.get('header_validation', 'warn'),
+                    multi_account=bank_config.get('multi_account', False),
                 )
                 self._rules[rule.bank_name] = rule
 
@@ -873,8 +875,230 @@ class GenericBankParser:
 
         return mismatches
 
+    def _detect_account_blocks(self, ws):
+        """
+        扫描工作表中是否包含多个账号区块。
+
+        在账号所在列中查找所有看起来像银行账号的值（6位及以上纯数字），
+        并根据配置中的 account_cell 与 start_row 偏移量，推算每个区块的
+        表头行和数据起始行。
+
+        Returns:
+            列表，每项为字典：
+            {
+                'account': 账号字符串,
+                'account_row': 账号所在行号,
+                'header_row': 表头行号,
+                'data_start_row': 数据起始行号,
+                'data_end_row': 数据结束行号（含）,
+            }
+            仅一个账号时返回单元素列表；无账号时返回空列表。
+        """
+        cell_match = re.match(r'^([A-Z]+)(\d+)$', self.rule.account_cell.upper())
+        if not cell_match:
+            return []
+
+        col_letter = cell_match.group(1)
+        original_row = int(cell_match.group(2))
+
+        col_idx = 0
+        for ch in col_letter:
+            col_idx = col_idx * 26 + (ord(ch) - ord('A') + 1)
+
+        header_offset = (self.rule.start_row - 1) - original_row
+        data_offset = self.rule.start_row - original_row
+
+        account_blocks = []
+        for row_idx in range(1, ws.max_row + 1):
+            cell_value = ws.cell(row=row_idx, column=col_idx).value
+            if cell_value is None:
+                continue
+            cell_str = _normalize_width(str(cell_value).strip())
+            if re.match(r'^\d{6,}$', cell_str):
+                header_row = row_idx + header_offset
+                data_start_row = row_idx + data_offset
+                if header_row < 1:
+                    header_row = 1
+                if data_start_row < 1:
+                    data_start_row = 1
+                account_blocks.append({
+                    'account': cell_str,
+                    'account_row': row_idx,
+                    'header_row': header_row,
+                    'data_start_row': data_start_row,
+                })
+
+        for i, block in enumerate(account_blocks):
+            if i + 1 < len(account_blocks):
+                next_account_row = account_blocks[i + 1]['account_row']
+                block['data_end_row'] = min(
+                    next_account_row - 1,
+                    ws.max_row,
+                )
+            else:
+                block['data_end_row'] = ws.max_row
+
+        return account_blocks
+
+    def _validate_headers_at_row(self, ws, filepath, sheet_name, header_row):
+        """
+        在指定行校验表头，返回不匹配的字段列表。
+        """
+        expected = self.rule.expected_headers
+        if not expected or self.rule.header_validation == 'off':
+            return []
+
+        if header_row < 1:
+            header_row = 1
+
+        mismatches = []
+        for col_key, acceptable_names in expected.items():
+            col_idx = self.rule.columns.get(col_key)
+            if col_idx is None:
+                continue
+
+            actual_value = ws.cell(row=header_row, column=col_idx).value
+            actual_text = str(actual_value).strip() if actual_value is not None else ''
+
+            if not actual_text:
+                mismatches.append(col_key)
+                continue
+
+            if actual_text not in acceptable_names:
+                mismatches.append(col_key)
+
+        return mismatches
+
+    def _parse_segment(self, ws, filepath, sheet_name, lookup_source,
+                       account_value, data_start_row, data_end_row):
+        """
+        解析工作表中指定行范围的数据段，用于多账号场景。
+
+        Args:
+            ws: openpyxl Worksheet 对象
+            filepath: 文件路径
+            sheet_name: 工作表名称
+            lookup_source: 查找表
+            account_value: 当前段的银行账号
+            data_start_row: 数据起始行号
+            data_end_row: 数据结束行号（含）
+
+        Returns:
+            当前段的记录列表
+        """
+        subject_info = get_subject_info(account_value, lookup_source)
+        subject = subject_info.get('subject', '')
+        extra_fields = subject_info.get('extra_fields', {})
+
+        rows = []
+        columns = self.rule.columns
+
+        for row_idx in range(data_start_row, data_end_row + 1):
+            trade_date = ws.cell(row=row_idx, column=columns['trade_date']).value
+            if trade_date is None:
+                continue
+
+            payment_val = ws.cell(row=row_idx, column=columns['payment']).value
+            if is_numeric(payment_val):
+                payment = to_float(payment_val)
+                if self.rule.payment_sign == 'negative':
+                    payment = -abs(payment)
+            else:
+                payment = None
+
+            receipt_val = ws.cell(row=row_idx, column=columns['receipt']).value
+            receipt = to_float(receipt_val) if is_numeric(receipt_val) else None
+
+            summary = ws.cell(row=row_idx, column=columns['summary']).value
+            counterpart = ws.cell(row=row_idx, column=columns['counterpart']).value
+            balance = ws.cell(row=row_idx, column=columns['balance']).value
+            transaction_id = ws.cell(row=row_idx, column=columns['transaction_id']).value
+
+            record = {
+                '唯一id': generate_unique_id(),
+                '银行': self.rule.bank_name,
+                '银行账号': account_value,
+                '主体': subject,
+                '交易日期': trade_date,
+                '付款': payment,
+                '收款': receipt,
+                '摘要': summary,
+                '对方户名': counterpart,
+                '余额': balance,
+                '交易流水号': transaction_id,
+            }
+            for key, val in extra_fields.items():
+                record[key] = val
+
+            rows.append(record)
+
+        if rows:
+            self.logger.info(
+                '%s文件工作表「%s」账号「%s」提取 %d 条记录',
+                self.rule.bank_name, sheet_name,
+                _mask_bank_account(account_value) if HAS_PII_CLASSIFIER else account_value,
+                len(rows))
+        else:
+            self.logger.info(
+                '%s文件工作表「%s」账号「%s」未提取到记录',
+                self.rule.bank_name, sheet_name,
+                _mask_bank_account(account_value) if HAS_PII_CLASSIFIER else account_value)
+
+        return rows
+
+    def _parse_sheet_multi_account(self, ws, filepath, sheet_name, lookup_source):
+        """
+        多账号单文件拆分解析：自动检测同一工作表中的多个账号区块，
+        按账号切段并分别匹配主体后返回记录列表。
+        """
+        blocks = self._detect_account_blocks(ws)
+        if not blocks:
+            self.logger.info(
+                '%s文件工作表「%s」未检测到账号区块，跳过',
+                self.rule.bank_name, sheet_name)
+            return []
+
+        if len(blocks) == 1:
+            self.logger.info(
+                '%s文件工作表「%s」仅检测到 1 个账号区块，按单账号处理',
+                self.rule.bank_name, sheet_name)
+
+        all_rows = []
+        for block in blocks:
+            account_value = block['account']
+            header_row = block['header_row']
+            data_start_row = block['data_start_row']
+            data_end_row = block['data_end_row']
+
+            mismatches = self._validate_headers_at_row(
+                ws, filepath, sheet_name, header_row)
+            if mismatches and self.rule.header_validation == 'strict':
+                detail = ', '.join(mismatches)
+                raise HeaderValidationError(
+                    f'{self.rule.bank_name}文件工作表「{sheet_name}」'
+                    f'账号「{account_value}」表头校验失败，不匹配字段: {detail}')
+            elif mismatches:
+                self.logger.warning(
+                    '%s文件工作表「%s」账号「%s」表头校验未通过：%d 个字段不匹配（%s），继续处理',
+                    self.rule.bank_name, sheet_name, account_value,
+                    len(mismatches), ', '.join(mismatches))
+
+            segment_rows = self._parse_segment(
+                ws, filepath, sheet_name, lookup_source,
+                account_value, data_start_row, data_end_row)
+            all_rows.extend(segment_rows)
+
+        self.logger.info(
+            '%s文件工作表「%s」多账号拆分完成，共 %d 个账号区块，提取 %d 条记录',
+            self.rule.bank_name, sheet_name, len(blocks), len(all_rows))
+
+        return all_rows
+
     def _parse_sheet(self, ws, filepath: str, sheet_name: str,
                      lookup_source) -> List[Dict[str, Any]]:
+        if self.rule.multi_account:
+            return self._parse_sheet_multi_account(ws, filepath, sheet_name, lookup_source)
+
         mismatches = self.validate_headers(ws, filepath, sheet_name)
 
         if mismatches and self.rule.header_validation == 'strict':
