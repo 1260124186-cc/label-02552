@@ -864,3 +864,80 @@ class TestInterestFeeCheckIntegration:
         assert '北京银行' in banks
         assert '东亚银行' in banks
         wb.close()
+
+
+class TestHolidayCheckIntegration:
+    """非工作日交易标记集成测试"""
+
+    def _create_beijing_bank_with_weekend_holiday(self, path):
+        rows = [
+            [1, '2024-01-05', 'CNY', 50000, None, 1500000, '供应商A公司', '622001234', '工商银行', '转账', '001', '采购付款', None, None, None, 'BJ20240105001'],
+            [2, '2024-01-06', 'CNY', 20000, None, 1480000, '供应商B公司', '622005678', '建设银行', '转账', '002', '周末紧急付款', None, None, None, 'BJ20240106002'],
+            [3, '2024-01-01', 'CNY', None, 100000, 1580000, '客户C公司', '622009999', '北京银行', '转账', '003', '元旦收款', None, None, None, 'BJ20240101003'],
+            [4, '2024-02-10', 'CNY', 30000, None, 1550000, '供应商D公司', '622001111', '农业银行', '转账', '004', '春节期间付款', None, None, None, 'BJ20240210004'],
+            [5, '2024-02-04', 'CNY', None, 50000, 1600000, '客户E公司', '622002222', '工商银行', '转账', '005', '调休工作日收款', None, None, None, 'BJ20240204005'],
+        ]
+        _create_beijing_bank_excel(path, rows=rows)
+        return path
+
+    def test_holiday_check_in_pipeline(self, tmp_dir):
+        """测试主流程中自动生成非工作日交易标记报告"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+        self._create_beijing_bank_with_weekend_holiday(
+            os.path.join(source_folder, '北京银行_流水.xlsx')
+        )
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+
+        assert result.holiday_check_path is not None
+        assert os.path.exists(result.holiday_check_path)
+        assert '非工作日交易标记报告' in os.path.basename(result.holiday_check_path)
+
+        wb = openpyxl.load_workbook(result.holiday_check_path)
+        assert '标记总览' in wb.sheetnames
+        assert '非工作日交易明细' in wb.sheetnames
+        wb.close()
+
+    def test_holiday_check_from_total(self, tmp_dir):
+        """测试从总表文件生成非工作日交易标记报告"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+        _create_beijing_bank_excel(os.path.join(source_folder, '北京银行_流水.xlsx'))
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+        total_path = result.output_path
+
+        report_path = bankcheck.generate_holiday_check_from_total(
+            total_path, output_dir=tmp_dir
+        )
+
+        assert report_path is not None
+        assert os.path.exists(report_path)
+
+    def test_holiday_tags_in_summary_table(self, tmp_dir):
+        """测试总表中包含非工作日标签列"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+        self._create_beijing_bank_with_weekend_holiday(
+            os.path.join(source_folder, '北京银行_流水.xlsx')
+        )
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+
+        assert result.output_path is not None
+        df = pd.read_excel(result.output_path, engine='openpyxl')
+        assert '非工作日标签' in df.columns
+        assert '节假日名称' in df.columns

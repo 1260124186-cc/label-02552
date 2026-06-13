@@ -249,6 +249,7 @@ def cli_askmode():
     print(t('cli.option_duplicate_check'))
     print(t('cli.option_interest_fee_check'))
     print(t('cli.option_balance_reconciliation'))
+    print('  15) 非工作日交易标记')
     choice = input(t('cli.enter_choice')).strip()
     if choice == '2':
         return 'diff'
@@ -276,6 +277,8 @@ def cli_askmode():
         return 'interest_fee_check'
     elif choice == '14':
         return 'balance_reconciliation'
+    elif choice == '15':
+        return 'holiday_check'
     return 'pipeline'
 
 
@@ -1691,6 +1694,7 @@ class ProcessingResult:
     balance_check_path: Optional[str] = None
     duplicate_check_path: Optional[str] = None
     interest_fee_check_path: Optional[str] = None
+    holiday_check_path: Optional[str] = None
     accounting_period_path: Optional[str] = None
     perf_report_path: Optional[str] = None
     collab_template_path: Optional[str] = None
@@ -2157,6 +2161,25 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                     output_path, index=False, engine='openpyxl')
                 logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
 
+    _holiday_tag_summary = {}
+    if final_rows:
+        final_rows, _holiday_tag_summary = apply_holiday_tags(final_rows)
+        if _holiday_tag_summary.get('tagged_count', 0) > 0:
+            logger.info('非工作日交易打标: 总记录 %d, 非工作日 %d (周末 %d, 节假日 %d)',
+                        _holiday_tag_summary.get('total_records', 0),
+                        _holiday_tag_summary.get('tagged_count', 0),
+                        _holiday_tag_summary.get('weekend_count', 0),
+                        _holiday_tag_summary.get('holiday_count', 0))
+            if output_path:
+                base_columns = get_summary_columns(final_rows, lookup_data)
+                holiday_extra_cols = ['非工作日标签', '节假日名称']
+                _holiday_columns = base_columns + [
+                    col for col in holiday_extra_cols if col not in base_columns
+                ]
+                pd.DataFrame(final_rows, columns=_holiday_columns).to_excel(
+                    output_path, index=False, engine='openpyxl')
+                logger.info('已将非工作日打标结果回写到总表: %s', output_path)
+
     masked_output_path = None
     if final_rows and output_path:
         try:
@@ -2284,6 +2307,28 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
             logger.error('自动生成利息手续费核对报告失败: %s', e, exc_info=True)
             interest_fee_check_path = None
 
+    holiday_check_path = None
+    if final_rows:
+        try:
+            output_dir = script_dir
+            if output_path:
+                output_dir = os.path.dirname(output_path) or script_dir
+            source_info = {
+                '数据来源': '主流程自动生成',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            holiday_check_path = generate_holiday_check_from_records(
+                final_rows, output_dir, source_info
+            )
+            if holiday_check_path:
+                logger.info('非工作日交易标记报告已自动生成: %s', holiday_check_path)
+        except Exception as e:
+            logger.error('自动生成非工作日交易标记报告失败: %s', e, exc_info=True)
+            holiday_check_path = None
+
     accounting_period_path = None
     if final_rows:
         try:
@@ -2380,7 +2425,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
 
             files_to_encrypt = []
             for fp in [output_path, subject_summary_path, balance_check_path,
-                       duplicate_check_path, interest_fee_check_path, accounting_period_path]:
+                       duplicate_check_path, interest_fee_check_path, holiday_check_path, accounting_period_path]:
                 if fp and os.path.isfile(fp):
                     files_to_encrypt.append(fp)
 
@@ -2419,6 +2464,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         balance_check_path=balance_check_path,
         duplicate_check_path=duplicate_check_path,
         interest_fee_check_path=interest_fee_check_path,
+        holiday_check_path=holiday_check_path,
         accounting_period_path=accounting_period_path,
         perf_report_path=perf_report_path,
         collab_template_path=collab_template_path,
@@ -8898,6 +8944,8 @@ def main():
         run_interest_fee_check_flow(script_dir)
     elif mode == 'balance_reconciliation':
         run_balance_reconciliation_flow(script_dir)
+    elif mode == 'holiday_check':
+        run_holiday_check_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
@@ -9832,6 +9880,78 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             logger.error('自动生成余额连续性校验报告失败: %s', e, exc_info=True)
             balance_check_path = None
 
+    duplicate_check_path = None
+    if final_rows:
+        try:
+            output_dir_for_check = output_dir or script_dir
+            if output_path:
+                output_dir_for_check = os.path.dirname(output_path) or output_dir_for_check
+            source_info = {
+                '数据来源': '主流程自动生成(预设)',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '启用银行': ', '.join(enabled_banks) if enabled_banks else '全部',
+                '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            duplicate_check_path = generate_duplicate_check_from_records(
+                final_rows, output_dir_for_check, source_info
+            )
+            if duplicate_check_path:
+                logger.info('重复交易检测报告已自动生成: %s', duplicate_check_path)
+        except Exception as e:
+            logger.error('自动生成重复交易检测报告失败: %s', e, exc_info=True)
+            duplicate_check_path = None
+
+    interest_fee_check_path_opt = None
+    if final_rows:
+        try:
+            output_dir_for_check = output_dir or script_dir
+            if output_path:
+                output_dir_for_check = os.path.dirname(output_path) or output_dir_for_check
+            source_info = {
+                '数据来源': '主流程自动生成(预设)',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '启用银行': ', '.join(enabled_banks) if enabled_banks else '全部',
+                '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            interest_fee_check_path_opt = generate_interest_fee_check_from_records(
+                final_rows, output_dir_for_check, source_info
+            )
+            if interest_fee_check_path_opt:
+                logger.info('利息手续费核对报告已自动生成: %s', interest_fee_check_path_opt)
+        except Exception as e:
+            logger.error('自动生成利息手续费核对报告失败: %s', e, exc_info=True)
+            interest_fee_check_path_opt = None
+
+    holiday_check_path_opt = None
+    if final_rows:
+        try:
+            output_dir_for_check = output_dir or script_dir
+            if output_path:
+                output_dir_for_check = os.path.dirname(output_path) or output_dir_for_check
+            source_info = {
+                '数据来源': '主流程自动生成(预设)',
+                '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                '记录数': len(final_rows),
+                '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                '启用银行': ', '.join(enabled_banks) if enabled_banks else '全部',
+                '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+                '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            holiday_check_path_opt = generate_holiday_check_from_records(
+                final_rows, output_dir_for_check, source_info
+            )
+            if holiday_check_path_opt:
+                logger.info('非工作日交易标记报告已自动生成: %s', holiday_check_path_opt)
+        except Exception as e:
+            logger.error('自动生成非工作日交易标记报告失败: %s', e, exc_info=True)
+            holiday_check_path_opt = None
+
     encryption_result = None
     encrypted_files = []
 
@@ -9875,6 +9995,9 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         masked_output_path=masked_output_path,
         subject_summary_path=subject_summary_path,
         balance_check_path=balance_check_path,
+        duplicate_check_path=duplicate_check_path,
+        interest_fee_check_path=interest_fee_check_path_opt,
+        holiday_check_path=holiday_check_path_opt,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -15514,6 +15637,815 @@ def run_balance_reconciliation_flow(script_dir):
         logger.error('期末余额与银行对账单核对报告导出失败: %s', e, exc_info=True)
 
     logger.info('========== 期末余额与银行对账单核对结束 ==========')
+
+
+# ──────────────────────────────────────────────
+# 非工作日交易标记模块
+# ──────────────────────────────────────────────
+
+CHINESE_HOLIDAYS = {
+    '2020-01-01': '元旦',
+    '2020-01-25': '春节',
+    '2020-01-26': '春节',
+    '2020-01-27': '春节',
+    '2020-01-28': '春节',
+    '2020-01-29': '春节',
+    '2020-01-30': '春节',
+    '2020-01-31': '春节',
+    '2020-02-01': '春节',
+    '2020-02-02': '春节',
+    '2020-04-04': '清明节',
+    '2020-04-05': '清明节',
+    '2020-04-06': '清明节',
+    '2020-05-01': '劳动节',
+    '2020-05-02': '劳动节',
+    '2020-05-03': '劳动节',
+    '2020-05-04': '劳动节',
+    '2020-05-05': '劳动节',
+    '2020-06-25': '端午节',
+    '2020-06-26': '端午节',
+    '2020-06-27': '端午节',
+    '2020-10-01': '国庆节/中秋节',
+    '2020-10-02': '国庆节',
+    '2020-10-03': '国庆节',
+    '2020-10-04': '国庆节/中秋节',
+    '2020-10-05': '国庆节',
+    '2020-10-06': '国庆节',
+    '2020-10-07': '国庆节',
+    '2020-10-08': '国庆节',
+    '2021-01-01': '元旦',
+    '2021-01-02': '元旦',
+    '2021-01-03': '元旦',
+    '2021-02-11': '春节',
+    '2021-02-12': '春节',
+    '2021-02-13': '春节',
+    '2021-02-14': '春节',
+    '2021-02-15': '春节',
+    '2021-02-16': '春节',
+    '2021-02-17': '春节',
+    '2021-04-03': '清明节',
+    '2021-04-04': '清明节',
+    '2021-04-05': '清明节',
+    '2021-05-01': '劳动节',
+    '2021-05-02': '劳动节',
+    '2021-05-03': '劳动节',
+    '2021-05-04': '劳动节',
+    '2021-05-05': '劳动节',
+    '2021-06-12': '端午节',
+    '2021-06-13': '端午节',
+    '2021-06-14': '端午节',
+    '2021-09-19': '中秋节',
+    '2021-09-20': '中秋节',
+    '2021-09-21': '中秋节',
+    '2021-10-01': '国庆节',
+    '2021-10-02': '国庆节',
+    '2021-10-03': '国庆节',
+    '2021-10-04': '国庆节',
+    '2021-10-05': '国庆节',
+    '2021-10-06': '国庆节',
+    '2021-10-07': '国庆节',
+    '2022-01-01': '元旦',
+    '2022-01-02': '元旦',
+    '2022-01-03': '元旦',
+    '2022-01-31': '春节',
+    '2022-02-01': '春节',
+    '2022-02-02': '春节',
+    '2022-02-03': '春节',
+    '2022-02-04': '春节',
+    '2022-02-05': '春节',
+    '2022-02-06': '春节',
+    '2022-04-03': '清明节',
+    '2022-04-04': '清明节',
+    '2022-04-05': '清明节',
+    '2022-04-30': '劳动节',
+    '2022-05-01': '劳动节',
+    '2022-05-02': '劳动节',
+    '2022-05-03': '劳动节',
+    '2022-05-04': '劳动节',
+    '2022-06-03': '端午节',
+    '2022-06-04': '端午节',
+    '2022-06-05': '端午节',
+    '2022-09-10': '中秋节',
+    '2022-09-11': '中秋节',
+    '2022-09-12': '中秋节',
+    '2022-10-01': '国庆节',
+    '2022-10-02': '国庆节',
+    '2022-10-03': '国庆节',
+    '2022-10-04': '国庆节',
+    '2022-10-05': '国庆节',
+    '2022-10-06': '国庆节',
+    '2022-10-07': '国庆节',
+    '2023-01-01': '元旦',
+    '2023-01-02': '元旦',
+    '2023-01-21': '春节',
+    '2023-01-22': '春节',
+    '2023-01-23': '春节',
+    '2023-01-24': '春节',
+    '2023-01-25': '春节',
+    '2023-01-26': '春节',
+    '2023-01-27': '春节',
+    '2023-04-05': '清明节',
+    '2023-04-29': '劳动节',
+    '2023-04-30': '劳动节',
+    '2023-05-01': '劳动节',
+    '2023-05-02': '劳动节',
+    '2023-05-03': '劳动节',
+    '2023-06-22': '端午节',
+    '2023-06-23': '端午节',
+    '2023-06-24': '端午节',
+    '2023-09-29': '中秋节/国庆节',
+    '2023-09-30': '国庆节',
+    '2023-10-01': '国庆节',
+    '2023-10-02': '国庆节',
+    '2023-10-03': '国庆节',
+    '2023-10-04': '国庆节',
+    '2023-10-05': '国庆节',
+    '2023-10-06': '国庆节',
+    '2024-01-01': '元旦',
+    '2024-02-10': '春节',
+    '2024-02-11': '春节',
+    '2024-02-12': '春节',
+    '2024-02-13': '春节',
+    '2024-02-14': '春节',
+    '2024-02-15': '春节',
+    '2024-02-16': '春节',
+    '2024-02-17': '春节',
+    '2024-04-04': '清明节',
+    '2024-04-05': '清明节',
+    '2024-04-06': '清明节',
+    '2024-05-01': '劳动节',
+    '2024-05-02': '劳动节',
+    '2024-05-03': '劳动节',
+    '2024-05-04': '劳动节',
+    '2024-05-05': '劳动节',
+    '2024-06-08': '端午节',
+    '2024-06-09': '端午节',
+    '2024-06-10': '端午节',
+    '2024-09-15': '中秋节',
+    '2024-09-16': '中秋节',
+    '2024-09-17': '中秋节',
+    '2024-10-01': '国庆节',
+    '2024-10-02': '国庆节',
+    '2024-10-03': '国庆节',
+    '2024-10-04': '国庆节',
+    '2024-10-05': '国庆节',
+    '2024-10-06': '国庆节',
+    '2024-10-07': '国庆节',
+    '2025-01-01': '元旦',
+    '2025-01-28': '春节',
+    '2025-01-29': '春节',
+    '2025-01-30': '春节',
+    '2025-01-31': '春节',
+    '2025-02-01': '春节',
+    '2025-02-02': '春节',
+    '2025-02-03': '春节',
+    '2025-02-04': '春节',
+    '2025-04-04': '清明节',
+    '2025-04-05': '清明节',
+    '2025-04-06': '清明节',
+    '2025-05-01': '劳动节',
+    '2025-05-02': '劳动节',
+    '2025-05-03': '劳动节',
+    '2025-05-04': '劳动节',
+    '2025-05-05': '劳动节',
+    '2025-05-31': '端午节',
+    '2025-06-01': '端午节',
+    '2025-06-02': '端午节',
+    '2025-10-01': '国庆节/中秋节',
+    '2025-10-02': '国庆节',
+    '2025-10-03': '国庆节',
+    '2025-10-04': '国庆节',
+    '2025-10-05': '国庆节',
+    '2025-10-06': '国庆节',
+    '2025-10-07': '国庆节',
+    '2025-10-08': '国庆节',
+    '2026-01-01': '元旦',
+    '2026-01-02': '元旦',
+    '2026-01-03': '元旦',
+    '2026-02-17': '春节',
+    '2026-02-18': '春节',
+    '2026-02-19': '春节',
+    '2026-02-20': '春节',
+    '2026-02-21': '春节',
+    '2026-02-22': '春节',
+    '2026-02-23': '春节',
+    '2026-04-04': '清明节',
+    '2026-04-05': '清明节',
+    '2026-04-06': '清明节',
+    '2026-05-01': '劳动节',
+    '2026-05-02': '劳动节',
+    '2026-05-03': '劳动节',
+    '2026-05-04': '劳动节',
+    '2026-05-05': '劳动节',
+    '2026-05-30': '端午节',
+    '2026-05-31': '端午节',
+    '2026-06-01': '端午节',
+    '2026-10-01': '国庆节',
+    '2026-10-02': '国庆节',
+    '2026-10-03': '国庆节',
+    '2026-10-04': '国庆节',
+    '2026-10-05': '国庆节',
+    '2026-10-06': '国庆节',
+    '2026-10-07': '国庆节',
+    '2026-10-08': '国庆节',
+}
+
+CHINESE_WORKDAY_ADJUSTMENTS = {
+    '2020-01-19', '2020-04-26', '2020-05-09', '2020-06-28', '2020-09-27', '2020-10-10',
+    '2021-02-07', '2021-02-20', '2021-04-25', '2021-05-08', '2021-09-18', '2021-09-26', '2021-10-09',
+    '2022-01-29', '2022-01-30', '2022-04-02', '2022-04-24', '2022-05-07', '2022-10-08', '2022-10-09',
+    '2023-01-28', '2023-01-29', '2023-04-23', '2023-05-06', '2023-06-25', '2023-10-07', '2023-10-08',
+    '2024-02-04', '2024-02-18', '2024-04-07', '2024-04-28', '2024-05-11', '2024-09-14', '2024-09-29', '2024-10-12',
+    '2025-01-26', '2025-02-08', '2025-04-27', '2025-09-28', '2025-10-11',
+    '2026-02-14', '2026-02-15', '2026-04-26', '2026-09-27', '2026-10-10',
+}
+
+HOLIDAY_TAG_WORKDAY = '工作日'
+HOLIDAY_TAG_WEEKEND = '周末'
+HOLIDAY_TAG_HOLIDAY = '法定节假日'
+HOLIDAY_TAG_ADJUSTED_WORKDAY = '调休工作日'
+
+
+def _parse_trade_date(value) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+    s = str(value).strip()
+    if not s:
+        return None
+    for fmt in ('%Y-%m-%d', '%Y/%m/%d', '%Y年%m月%d日', '%Y%m%d'):
+        try:
+            return datetime.strptime(s[:10] if len(s) >= 10 else s, fmt)
+        except (ValueError, TypeError):
+            continue
+    try:
+        return datetime.strptime(s[:10], '%Y-%m-%d')
+    except (ValueError, TypeError):
+        return None
+
+
+def classify_date(date_val) -> Tuple[str, str]:
+    """
+    判断给定日期的类型。
+
+    Args:
+        date_val: 日期值（datetime、str 或 pandas.Timestamp）
+
+    Returns:
+        (date_tag, holiday_name)
+        - date_tag: HOLIDAY_TAG_WORKDAY / HOLIDAY_TAG_WEEKEND / HOLIDAY_TAG_HOLIDAY / HOLIDAY_TAG_ADJUSTED_WORKDAY
+        - holiday_name: 节假日名称（仅法定节假日有值）
+    """
+    dt = _parse_trade_date(date_val)
+    if dt is None:
+        return HOLIDAY_TAG_WORKDAY, ''
+
+    date_str = dt.strftime('%Y-%m-%d')
+
+    if date_str in CHINESE_WORKDAY_ADJUSTMENTS:
+        return HOLIDAY_TAG_ADJUSTED_WORKDAY, ''
+
+    if date_str in CHINESE_HOLIDAYS:
+        return HOLIDAY_TAG_HOLIDAY, CHINESE_HOLIDAYS[date_str]
+
+    if dt.weekday() >= 5:
+        return HOLIDAY_TAG_WEEKEND, ''
+
+    return HOLIDAY_TAG_WORKDAY, ''
+
+
+@dataclass
+class HolidayMarkedRecord:
+    record_index: int
+    unique_id: str
+    bank: str
+    bank_account: str
+    subject: str
+    trade_date: str
+    date_tag: str
+    holiday_name: str
+    payment: Optional[float] = None
+    receipt: Optional[float] = None
+    balance: Optional[float] = None
+    counterpart: str = ''
+    summary: str = ''
+    transaction_id: str = ''
+    import_batch: str = ''
+
+
+@dataclass
+class HolidayCheckResult:
+    total_records: int = 0
+    workday_count: int = 0
+    weekend_count: int = 0
+    holiday_count: int = 0
+    adjusted_workday_count: int = 0
+    non_workday_records: List[HolidayMarkedRecord] = field(default_factory=list)
+    date_type_stats: Dict[str, int] = field(default_factory=dict)
+    holiday_name_stats: Dict[str, int] = field(default_factory=dict)
+    subject_stats: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    check_summary: Dict[str, Any] = field(default_factory=dict)
+
+
+def mark_non_workday_transactions(records: List[Dict[str, Any]]) -> HolidayCheckResult:
+    """
+    对交易记录进行非工作日标记。
+
+    判断每笔交易的交易日期是否为非工作日（周末或法定节假日），
+    并生成标记结果。
+
+    Args:
+        records: 交易记录列表
+
+    Returns:
+        HolidayCheckResult: 标记结果
+    """
+    logger = get_logger()
+    result = HolidayCheckResult()
+    result.total_records = len(records)
+
+    if not records:
+        logger.warning('无交易记录可进行非工作日标记')
+        result.check_summary = {'status': '无数据'}
+        return result
+
+    date_type_stats = {HOLIDAY_TAG_WORKDAY: 0, HOLIDAY_TAG_WEEKEND: 0,
+                       HOLIDAY_TAG_HOLIDAY: 0, HOLIDAY_TAG_ADJUSTED_WORKDAY: 0}
+    holiday_name_stats: Dict[str, int] = {}
+    subject_stats: Dict[str, Dict[str, int]] = {}
+
+    for idx, rec in enumerate(records):
+        date_tag, holiday_name = classify_date(rec.get('交易日期'))
+
+        date_type_stats[date_tag] = date_type_stats.get(date_tag, 0) + 1
+
+        if holiday_name:
+            holiday_name_stats[holiday_name] = holiday_name_stats.get(holiday_name, 0) + 1
+
+        subject = str(rec.get('主体', ''))
+        if subject and date_tag in (HOLIDAY_TAG_WEEKEND, HOLIDAY_TAG_HOLIDAY):
+            if subject not in subject_stats:
+                subject_stats[subject] = {HOLIDAY_TAG_WEEKEND: 0, HOLIDAY_TAG_HOLIDAY: 0}
+            if date_tag == HOLIDAY_TAG_WEEKEND:
+                subject_stats[subject][HOLIDAY_TAG_WEEKEND] += 1
+            elif date_tag == HOLIDAY_TAG_HOLIDAY:
+                subject_stats[subject][HOLIDAY_TAG_HOLIDAY] += 1
+
+        if date_tag in (HOLIDAY_TAG_WEEKEND, HOLIDAY_TAG_HOLIDAY):
+            marked = HolidayMarkedRecord(
+                record_index=idx + 1,
+                unique_id=str(rec.get('唯一id', '')),
+                bank=str(rec.get('银行', '')),
+                bank_account=str(rec.get('银行账号', '')),
+                subject=subject,
+                trade_date=str(rec.get('交易日期', '')),
+                date_tag=date_tag,
+                holiday_name=holiday_name,
+                payment=_safe_float(rec.get('付款')),
+                receipt=_safe_float(rec.get('收款')),
+                balance=_safe_float(rec.get('余额')),
+                counterpart=str(rec.get('对方户名', '')),
+                summary=str(rec.get('摘要', '')),
+                transaction_id=str(rec.get('交易流水号', '')),
+                import_batch=str(rec.get('导入批次号', '')),
+            )
+            result.non_workday_records.append(marked)
+
+    result.workday_count = date_type_stats.get(HOLIDAY_TAG_WORKDAY, 0)
+    result.weekend_count = date_type_stats.get(HOLIDAY_TAG_WEEKEND, 0)
+    result.holiday_count = date_type_stats.get(HOLIDAY_TAG_HOLIDAY, 0)
+    result.adjusted_workday_count = date_type_stats.get(HOLIDAY_TAG_ADJUSTED_WORKDAY, 0)
+    result.date_type_stats = date_type_stats
+    result.holiday_name_stats = holiday_name_stats
+    result.subject_stats = subject_stats
+
+    non_workday_count = result.weekend_count + result.holiday_count
+    non_workday_rate = (non_workday_count / result.total_records * 100) if result.total_records > 0 else 0.0
+
+    result.check_summary = {
+        'total_records': result.total_records,
+        'workday_count': result.workday_count,
+        'weekend_count': result.weekend_count,
+        'holiday_count': result.holiday_count,
+        'adjusted_workday_count': result.adjusted_workday_count,
+        'non_workday_count': non_workday_count,
+        'non_workday_rate': round(non_workday_rate, 2),
+        'marked_records': len(result.non_workday_records),
+        'check_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    logger.info('非工作日交易标记完成: 总记录 %d, 工作日 %d, 周末 %d, 法定节假日 %d, 调休工作日 %d',
+                result.total_records, result.workday_count, result.weekend_count,
+                result.holiday_count, result.adjusted_workday_count)
+
+    return result
+
+
+def apply_holiday_tags(records: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    对交易记录列表打上非工作日标签，回写到记录字典中。
+
+    Args:
+        records: 交易记录列表
+
+    Returns:
+        (标记后的记录列表, 标记统计摘要)
+    """
+    logger = get_logger()
+
+    if not records:
+        return records, {'tagged_count': 0}
+
+    tagged_count = 0
+    for rec in records:
+        date_tag, holiday_name = classify_date(rec.get('交易日期'))
+        rec['非工作日标签'] = date_tag
+        rec['节假日名称'] = holiday_name
+        if date_tag != HOLIDAY_TAG_WORKDAY:
+            tagged_count += 1
+
+    summary = {
+        'total_records': len(records),
+        'tagged_count': tagged_count,
+        'workday_count': sum(1 for r in records if r.get('非工作日标签') == HOLIDAY_TAG_WORKDAY),
+        'weekend_count': sum(1 for r in records if r.get('非工作日标签') == HOLIDAY_TAG_WEEKEND),
+        'holiday_count': sum(1 for r in records if r.get('非工作日标签') == HOLIDAY_TAG_HOLIDAY),
+        'adjusted_workday_count': sum(1 for r in records if r.get('非工作日标签') == HOLIDAY_TAG_ADJUSTED_WORKDAY),
+    }
+
+    if tagged_count > 0:
+        logger.info('非工作日交易打标: 总记录 %d, 非工作日 %d (周末 %d, 节假日 %d)',
+                    len(records), tagged_count,
+                    summary['weekend_count'], summary['holiday_count'])
+
+    return records, summary
+
+
+def export_holiday_check_result(check_result: HolidayCheckResult,
+                                output_path: str,
+                                source_info: Optional[Dict[str, Any]] = None) -> str:
+    """
+    导出非工作日交易标记结果为 Excel 文件。
+
+    输出的 Sheet 包括：
+    1. 标记总览 - 整体统计信息
+    2. 非工作日交易明细 - 所有非工作日交易记录
+    3. 节假日类型分布 - 按节假日名称统计
+    4. 主体分布 - 按主体统计非工作日交易
+
+    Args:
+        check_result: mark_non_workday_transactions 返回的标记结果
+        output_path: 输出 Excel 文件路径
+        source_info: 可选，数据源信息
+
+    Returns:
+        str: 输出文件路径
+    """
+    logger = get_logger()
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            overview_items = [
+                ('检测项', '数值'),
+                ('总记录数', check_result.check_summary.get('total_records', 0)),
+                ('工作日交易数', check_result.check_summary.get('workday_count', 0)),
+                ('周末交易数', check_result.check_summary.get('weekend_count', 0)),
+                ('法定节假日交易数', check_result.check_summary.get('holiday_count', 0)),
+                ('调休工作日交易数', check_result.check_summary.get('adjusted_workday_count', 0)),
+                ('非工作日交易合计', check_result.check_summary.get('non_workday_count', 0)),
+                ('非工作日交易占比(%)', check_result.check_summary.get('non_workday_rate', 0)),
+                ('标记记录数', check_result.check_summary.get('marked_records', 0)),
+                ('检测时间', check_result.check_summary.get('check_time', '')),
+            ]
+            if source_info:
+                for k, v in source_info.items():
+                    overview_items.append((k, v))
+
+            overview_df = pd.DataFrame(overview_items[1:], columns=overview_items[0])
+            overview_df.to_excel(writer, sheet_name='标记总览', index=False)
+
+            if check_result.non_workday_records:
+                detail_data = []
+                for rec in check_result.non_workday_records:
+                    detail_data.append({
+                        '序号(总表)': rec.record_index,
+                        '唯一ID': rec.unique_id,
+                        '主体': rec.subject,
+                        '银行': rec.bank,
+                        '银行账号': rec.bank_account,
+                        '交易日期': rec.trade_date,
+                        '日期类型': rec.date_tag,
+                        '节假日名称': rec.holiday_name,
+                        '付款(元)': rec.payment,
+                        '收款(元)': rec.receipt,
+                        '对方户名': rec.counterpart,
+                        '余额(元)': rec.balance,
+                        '交易流水号': rec.transaction_id,
+                        '摘要': rec.summary,
+                        '导入批次号': rec.import_batch,
+                    })
+
+                detail_df = pd.DataFrame(detail_data)
+                detail_cols = [
+                    '序号(总表)', '唯一ID', '主体', '银行', '银行账号',
+                    '交易日期', '日期类型', '节假日名称',
+                    '付款(元)', '收款(元)', '对方户名', '余额(元)',
+                    '交易流水号', '摘要', '导入批次号',
+                ]
+                detail_df = detail_df[[c for c in detail_cols if c in detail_df.columns]]
+                detail_df.to_excel(writer, sheet_name='非工作日交易明细', index=False)
+
+                ws_detail = writer.sheets['非工作日交易明细']
+                amount_cols = set()
+                for col_idx, col_name in enumerate(detail_df.columns, 1):
+                    col_letter = openpyxl.utils.get_column_letter(col_idx)
+                    if '元' in str(col_name):
+                        amount_cols.add(col_letter)
+                    max_len = max(
+                        len(str(col_name)),
+                        max((len(str(v)) for v in detail_df.iloc[:, col_idx - 1].astype(str)), default=0)
+                    )
+                    ws_detail.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+                for row in ws_detail.iter_rows(min_row=2):
+                    for cell in row:
+                        if cell.column_letter in amount_cols:
+                            cell.number_format = '#,##0.00'
+
+                holiday_type_data = []
+                for name, count in sorted(check_result.holiday_name_stats.items(), key=lambda x: -x[1]):
+                    holiday_type_data.append({
+                        '节假日名称': name,
+                        '交易笔数': count,
+                    })
+
+                for tag, label in [(HOLIDAY_TAG_WEEKEND, '周末'), (HOLIDAY_TAG_HOLIDAY, '法定节假日')]:
+                    count = check_result.date_type_stats.get(tag, 0)
+                    if count > 0:
+                        holiday_type_data.append({
+                            '节假日名称': label,
+                            '交易笔数': count,
+                        })
+
+                if holiday_type_data:
+                    type_df = pd.DataFrame(holiday_type_data)
+                    type_df.to_excel(writer, sheet_name='节假日类型分布', index=False)
+
+                    ws_type = writer.sheets['节假日类型分布']
+                    for col_idx, col_name in enumerate(type_df.columns, 1):
+                        col_letter = openpyxl.utils.get_column_letter(col_idx)
+                        max_len = max(
+                            len(str(col_name)),
+                            max((len(str(v)) for v in type_df.iloc[:, col_idx - 1].astype(str)), default=0)
+                        )
+                        ws_type.column_dimensions[col_letter].width = min(max_len + 4, 30)
+
+                subject_data = []
+                for subject, stats in sorted(check_result.subject_stats.items()):
+                    total = stats.get(HOLIDAY_TAG_WEEKEND, 0) + stats.get(HOLIDAY_TAG_HOLIDAY, 0)
+                    subject_data.append({
+                        '主体': subject,
+                        '周末交易笔数': stats.get(HOLIDAY_TAG_WEEKEND, 0),
+                        '节假日交易笔数': stats.get(HOLIDAY_TAG_HOLIDAY, 0),
+                        '非工作日合计': total,
+                    })
+
+                if subject_data:
+                    subject_df = pd.DataFrame(subject_data)
+                    subject_df.to_excel(writer, sheet_name='主体分布', index=False)
+
+                    ws_subj = writer.sheets['主体分布']
+                    for col_idx, col_name in enumerate(subject_df.columns, 1):
+                        col_letter = openpyxl.utils.get_column_letter(col_idx)
+                        max_len = max(
+                            len(str(col_name)),
+                            max((len(str(v)) for v in subject_df.iloc[:, col_idx - 1].astype(str)), default=0)
+                        )
+                        ws_subj.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+            ws_overview = writer.sheets['标记总览']
+            for col_idx in range(1, 3):
+                col_letter = openpyxl.utils.get_column_letter(col_idx)
+                ws_overview.column_dimensions[col_letter].width = 25
+
+            for row in ws_overview.iter_rows(min_row=2):
+                for cell in row:
+                    if cell.column == 2:
+                        val = cell.value
+                        if isinstance(val, (int, float)):
+                            if isinstance(val, float):
+                                cell.number_format = '#,##0.00'
+                            else:
+                                cell.number_format = '#,##0'
+
+        logger.info('非工作日交易标记结果已导出: %s', output_path)
+        return output_path
+
+    except Exception as e:
+        logger.error('导出非工作日交易标记结果失败: %s', e, exc_info=True)
+        raise
+
+
+def generate_holiday_check_from_records(records: List[Dict[str, Any]],
+                                        output_dir: Optional[str] = None,
+                                        source_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """
+    从交易记录列表直接生成非工作日交易标记报告。
+
+    Args:
+        records: 交易记录列表
+        output_dir: 输出目录
+        source_info: 数据源信息
+
+    Returns:
+        str: 生成的文件路径，如无数据则返回 None
+    """
+    logger = get_logger()
+
+    if not records:
+        logger.warning('无交易记录，跳过非工作日交易标记')
+        return None
+
+    if output_dir is None:
+        output_dir = get_script_dir()
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'非工作日交易标记报告_{timestamp}.xlsx'
+    output_path = os.path.join(output_dir, filename)
+
+    check_result = mark_non_workday_transactions(records)
+
+    if not check_result.non_workday_records:
+        logger.info('未发现非工作日交易，仍导出报告')
+        return export_holiday_check_result(check_result, output_path, source_info)
+
+    return export_holiday_check_result(check_result, output_path, source_info)
+
+
+def generate_holiday_check_from_total(total_path: str,
+                                      output_dir: Optional[str] = None) -> Optional[str]:
+    """
+    从银行流水总表文件生成非工作日交易标记报告。
+
+    Args:
+        total_path: 银行流水总表 Excel 文件路径
+        output_dir: 输出目录
+
+    Returns:
+        str: 生成的文件路径，失败则返回 None
+    """
+    logger = get_logger()
+
+    records = load_total_table(total_path)
+    if not records:
+        logger.warning('总表无数据: %s', total_path)
+        return None
+
+    if output_dir is None:
+        output_dir = os.path.dirname(total_path) or get_script_dir()
+
+    source_info = {
+        '数据来源文件': os.path.basename(total_path),
+        '总表记录数': len(records),
+        '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    return generate_holiday_check_from_records(records, output_dir, source_info)
+
+
+def run_holiday_check_flow(script_dir):
+    """非工作日交易标记 CLI 流程"""
+    logger = get_logger()
+    logger.info('========== 非工作日交易标记开始 ==========')
+
+    print('\n' + '=' * 70)
+    print('非工作日交易标记 - 周末与法定节假日交易自动打标')
+    print('=' * 70)
+    print('\n请选择数据来源：')
+    print('  1) 从银行流水总表文件（Excel）')
+    print('  2) 从数据库（按条件查询后标记）')
+    print('  0) 返回主菜单')
+
+    choice = input('\n请输入选项（默认 1）: ').strip() or '1'
+
+    records = []
+    source_info = {}
+
+    if choice == '0':
+        return
+    elif choice == '1':
+        total_path = ask_file('请选择【银行流水总表】文件')
+        if not total_path:
+            show_info('提示', '未选择总表文件，返回。')
+            return
+        logger.info('用户选择总表文件: %s', total_path)
+        records = load_total_table(total_path)
+        if not records:
+            show_warning('错误', '总表文件无数据或读取失败。')
+            return
+        source_info = {
+            '数据来源文件': os.path.basename(total_path),
+            '总表记录数': len(records),
+            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    elif choice == '2':
+        if not HAS_DATABASE:
+            show_warning('错误', '数据库模块不可用。')
+            return
+
+        print('\n输入查询条件（直接回车表示不限制）：')
+        subject = input('主体名称: ').strip() or None
+        bank = input('银行名称: ').strip() or None
+        account = input('银行账号: ').strip() or None
+        start_date = input('开始日期 (YYYY-MM-DD): ').strip() or None
+        end_date = input('结束日期 (YYYY-MM-DD): ').strip() or None
+
+        try:
+            qr = db_module.query_transactions(
+                subject=subject, bank=bank, account=account,
+                start_date=start_date, end_date=end_date,
+                limit=999999, script_dir=script_dir
+            )
+            records = [r.to_dict() for r in qr.records]
+        except Exception as e:
+            show_warning('错误', f'数据库查询失败: {e}')
+            logger.error('数据库查询失败: %s', e, exc_info=True)
+            return
+
+        if not records:
+            show_info('提示', '查询结果为空。')
+            return
+
+        source_info = {
+            '数据来源': '数据库查询',
+            '查询主体': subject or '全部',
+            '查询银行': bank or '全部',
+            '查询账号': account or '全部',
+            '日期范围': f'{start_date or "不限"} ~ {end_date or "不限"}',
+            '记录数': len(records),
+            '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    else:
+        print('无效选项')
+        return
+
+    print(f'\n开始标记，共 {len(records)} 条记录...')
+    check_result = mark_non_workday_transactions(records)
+    summary = check_result.check_summary
+
+    print('\n' + '=' * 70)
+    print('标记结果总览')
+    print('=' * 70)
+    print(f'  总记录数:         {summary.get("total_records", 0):,}')
+    print(f'  工作日交易:       {summary.get("workday_count", 0):,}')
+    print(f'  周末交易:         {summary.get("weekend_count", 0):,}')
+    print(f'  法定节假日交易:   {summary.get("holiday_count", 0):,}')
+    print(f'  调休工作日交易:   {summary.get("adjusted_workday_count", 0):,}')
+    print(f'  非工作日合计:     {summary.get("non_workday_count", 0):,}')
+    print(f'  非工作日占比:     {summary.get("non_workday_rate", 0):.2f}%')
+
+    if check_result.non_workday_records:
+        print(f'\n  ⚠️  发现 {len(check_result.non_workday_records)} 笔非工作日交易')
+
+        if check_result.holiday_name_stats:
+            print('\n  节假日分布：')
+            for name, count in sorted(check_result.holiday_name_stats.items(), key=lambda x: -x[1]):
+                print(f'    - {name}: {count} 笔')
+
+        top_subjects = sorted(check_result.subject_stats.items(),
+                              key=lambda x: sum(x[1].values()), reverse=True)[:10]
+        if top_subjects:
+            print('\n  主体TOP10（非工作日交易数）：')
+            for subject, stats in top_subjects:
+                total = stats.get(HOLIDAY_TAG_WEEKEND, 0) + stats.get(HOLIDAY_TAG_HOLIDAY, 0)
+                print(f'    - {subject}: {total} 笔 (周末 {stats.get(HOLIDAY_TAG_WEEKEND, 0)}, '
+                      f'节假日 {stats.get(HOLIDAY_TAG_HOLIDAY, 0)})')
+    else:
+        print(f'\n  ✅ 未发现非工作日交易！')
+
+    output_dir = input('\n请输入输出目录（直接回车默认当前目录）: ').strip()
+    if not output_dir:
+        output_dir = script_dir
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_path = os.path.join(output_dir, f'非工作日交易标记报告_{timestamp}.xlsx')
+
+    try:
+        export_holiday_check_result(check_result, output_path, source_info)
+        msg = f'标记报告已导出！\n\n输出文件：{output_path}'
+        show_info('导出成功', msg)
+        logger.info('非工作日交易标记报告导出完成: %s', output_path)
+    except Exception as e:
+        msg = f'导出失败：{e}'
+        show_warning('导出失败', msg)
+        logger.error('非工作日交易标记报告导出失败: %s', e, exc_info=True)
+
+    logger.info('========== 非工作日交易标记结束 ==========')
 
 
 # ──────────────────────────────────────────────
