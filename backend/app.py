@@ -398,6 +398,18 @@ def internal_error(error):
 
 
 def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    try:
+        from self_check import self_check_and_exit_if_failed
+        self_check_and_exit_if_failed(
+            include_optional=False,
+            script_dir=script_dir,
+            verbose=False,
+        )
+    except ImportError:
+        pass
+
     host = '127.0.0.1'
     port = 5000
     debug = True

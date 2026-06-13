@@ -9569,6 +9569,18 @@ def open_voucher_attachments_for_transaction(transaction_id: str, script_dir=Non
 
 
 def main():
+    script_dir = get_script_dir()
+
+    try:
+        from self_check import self_check_and_exit_if_failed
+        self_check_and_exit_if_failed(
+            include_optional=False,
+            script_dir=script_dir,
+            verbose=False,
+        )
+    except ImportError:
+        pass
+
     result = parse_args_and_run()
     if result is not None:
         return
@@ -9576,8 +9588,6 @@ def main():
     setup_logging()
     logger = get_logger()
     logger.info('========== 银行流水检验工具启动 ==========')
-
-    script_dir = get_script_dir()
 
     if HAS_ONBOARDING and onboarding is not None:
         onboarding_result = onboarding.run_onboarding_flow(script_dir)

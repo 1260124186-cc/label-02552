@@ -2600,6 +2600,16 @@ def api_workflow_stats():
 
 
 def main():
+    try:
+        from self_check import self_check_and_exit_if_failed
+        self_check_and_exit_if_failed(
+            include_optional=False,
+            script_dir=BACKEND_DIR,
+            verbose=False,
+        )
+    except ImportError:
+        pass
+
     host = os.environ.get('BANKCHECK_HOST', '0.0.0.0')
     port = int(os.environ.get('BANKCHECK_PORT', '5001'))
     debug = os.environ.get('BANKCHECK_DEBUG', 'false').lower() == 'true'

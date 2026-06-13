@@ -82,6 +82,19 @@ def main():
     setup_logging(args.log_level)
     logger = logging.getLogger('worker_manager')
 
+    try:
+        from self_check import run_self_check, format_report
+        report = run_self_check(
+            include_optional=False,
+            script_dir=str(Path(__file__).parent),
+        )
+        if not report.passed:
+            logger.error('启动自检失败，程序无法启动')
+            logger.error('\n%s', format_report(report, verbose=False))
+            sys.exit(1)
+    except ImportError:
+        pass
+
     config_path = Path(args.config)
     if not config_path.is_absolute():
         config_path = Path(__file__).parent / args.config
