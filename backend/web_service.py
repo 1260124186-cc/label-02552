@@ -160,7 +160,10 @@ _sse_lock = threading.Lock()
 
 
 def setup_logging():
-    log_file = os.path.join(BACKEND_DIR, 'web_service.log')
+    log_dir = os.path.join(BACKEND_DIR, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f'web_service_{timestamp}.log')
 
     if HAS_PII_CLASSIFIER:
         logger = setup_pii_aware_logging(
@@ -168,8 +171,13 @@ def setup_logging():
             log_file=log_file,
             console_level=logging.INFO,
             file_level=logging.DEBUG,
+            rotation_when='midnight',
+            rotation_interval=1,
+            backup_count=0,
+            max_bytes=50 * 1024 * 1024,
         )
     else:
+        from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
         logger = logging.getLogger('bankcheck.web')
         logger.setLevel(logging.DEBUG)
 
@@ -178,7 +186,12 @@ def setup_logging():
                 '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                 datefmt='%Y-%m-%d %H:%M:%S',
             )
-            fh = logging.FileHandler(log_file, encoding='utf-8')
+            fh = RotatingFileHandler(
+                log_file,
+                maxBytes=50 * 1024 * 1024,
+                backupCount=0,
+                encoding='utf-8',
+            )
             fh.setLevel(logging.DEBUG)
             fh.setFormatter(fmt)
             ch = logging.StreamHandler(sys.stdout)
@@ -190,6 +203,7 @@ def setup_logging():
     if not HAS_TASK_QUEUE:
         logger.warning('任务队列模块不可用')
 
+    logger.info('Web 服务日志系统初始化完成，日志文件: %s', log_file)
     return logger
 
 
@@ -424,7 +438,7 @@ def _run_pipeline_async(task: WebTask, cancel_event: threading.Event):
             'incremental_mode': result.incremental_mode,
             'output_folder': task_output_dir,
             'summary_table_path': result.output_path or '',
-            'log_file_path': os.path.join(BACKEND_DIR, 'bankcheck.log'),
+            'log_file_path': bankcheck.get_current_log_file() or bankcheck.find_latest_log_file_in_dir(bankcheck.get_log_dir(BACKEND_DIR), prefix='bankcheck') or '',
         }
         bm.finish_batch(batch_info.batch_id, result_data, status='success')
 

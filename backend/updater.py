@@ -81,13 +81,22 @@ logger = logging.getLogger('bankcheck.updater')
 def setup_logging(log_dir: Optional[str] = None):
     if log_dir is None:
         log_dir = os.path.dirname(os.path.abspath(__file__))
-    log_file = os.path.join(log_dir, 'updater.log')
+    log_dir = os.path.join(log_dir, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f'updater_{timestamp}.log')
 
     _logger = logging.getLogger('bankcheck.updater')
     _logger.setLevel(logging.INFO)
 
     if not _logger.handlers:
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        from logging.handlers import RotatingFileHandler
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=50 * 1024 * 1024,
+            backupCount=0,
+            encoding='utf-8',
+        )
         file_handler.setLevel(logging.INFO)
 
         console_handler = logging.StreamHandler()

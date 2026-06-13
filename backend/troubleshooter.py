@@ -555,13 +555,49 @@ def find_latest_log_file(script_dir: Optional[str] = None) -> Optional[str]:
     if script_dir is None:
         script_dir = get_script_dir()
 
+    log_dir = os.path.join(script_dir, 'logs')
+    if os.path.isdir(log_dir):
+        import re
+        pattern = re.compile(r'^bankcheck_\d{8}_\d{6}\.log$')
+        candidates = []
+        try:
+            for filename in os.listdir(log_dir):
+                if pattern.match(filename):
+                    filepath = os.path.join(log_dir, filename)
+                    try:
+                        mtime = os.path.getmtime(filepath)
+                        candidates.append((mtime, filepath))
+                    except OSError:
+                        continue
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                return candidates[0][1]
+        except OSError:
+            pass
+
+    try:
+        import bankcheck as bc
+        log_dir_bc = bc.get_log_dir(script_dir)
+        latest = bc.find_latest_log_file_in_dir(log_dir_bc, prefix='bankcheck')
+        if latest:
+            return latest
+        current = bc.get_current_log_file()
+        if current and os.path.exists(current):
+            current_parent = os.path.dirname(os.path.dirname(current)) if 'logs' in current else os.path.dirname(current)
+            script_dir_abs = os.path.abspath(script_dir)
+            current_parent_abs = os.path.abspath(current_parent)
+            if current_parent_abs == script_dir_abs:
+                return current
+    except (ImportError, AttributeError):
+        pass
+
     log_file = os.path.join(script_dir, 'bankcheck.log')
     if os.path.exists(log_file):
         return log_file
 
     for root, dirs, files in os.walk(script_dir):
         for f in files:
-            if f == 'bankcheck.log':
+            if f == 'bankcheck.log' or (f.startswith('bankcheck_') and f.endswith('.log')):
                 return os.path.join(root, f)
 
     return None

@@ -42,8 +42,11 @@ if HAS_I18N:
 
 
 def setup_logging():
-    log_dir = os.path.dirname(os.path.abspath(__file__))
-    log_file = os.path.join(log_dir, 'lookup_manager.log')
+    log_dir_parent = os.path.dirname(os.path.abspath(__file__))
+    log_dir = os.path.join(log_dir_parent, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f'lookup_manager_{timestamp}.log')
 
     if HAS_PII_CLASSIFIER:
         logger = setup_pii_aware_logging(
@@ -51,13 +54,23 @@ def setup_logging():
             log_file=log_file,
             console_level=logging.INFO,
             file_level=logging.INFO,
+            rotation_when='midnight',
+            rotation_interval=1,
+            backup_count=0,
+            max_bytes=50 * 1024 * 1024,
         )
     else:
+        from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
         logger = logging.getLogger('bankcheck')
         logger.setLevel(logging.INFO)
 
         if not logger.handlers:
-            file_handler = logging.FileHandler(log_file, encoding='utf-8')
+            file_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=50 * 1024 * 1024,
+                backupCount=0,
+                encoding='utf-8',
+            )
             file_handler.setLevel(logging.INFO)
 
             console_handler = logging.StreamHandler()
@@ -73,6 +86,7 @@ def setup_logging():
             logger.addHandler(file_handler)
             logger.addHandler(console_handler)
 
+    logger.info('查找管理器日志系统初始化完成，日志文件: %s', log_file)
     return logger
 
 

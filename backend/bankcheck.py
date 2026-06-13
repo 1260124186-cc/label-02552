@@ -640,16 +640,111 @@ def get_script_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+LOG_ROTATION_WHEN = 'midnight'
+LOG_ROTATION_INTERVAL = 1
+LOG_BACKUP_COUNT = 0
+LOG_MAX_BYTES = 50 * 1024 * 1024
+LOG_RETENTION_DAYS = 30
+LOG_DIR_NAME = 'logs'
+
+_CURRENT_BATCH_LOG_FILE = None
+
+
+def get_log_dir(script_dir: Optional[str] = None) -> str:
+    if script_dir is None:
+        script_dir = get_script_dir()
+    log_dir = os.path.join(script_dir, LOG_DIR_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    return log_dir
+
+
+def generate_batch_log_filename(prefix: str = 'bankcheck') -> str:
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return f'{prefix}_{timestamp}.log'
+
+
+def get_current_log_file() -> Optional[str]:
+    return _CURRENT_BATCH_LOG_FILE
+
+
+def cleanup_expired_logs(log_dir: str,
+                         retention_days: int = LOG_RETENTION_DAYS,
+                         prefix: str = 'bankcheck') -> int:
+    import time
+    import re
+    if not os.path.isdir(log_dir) or retention_days <= 0:
+        return 0
+
+    cutoff_time = time.time() - (retention_days * 86400)
+    removed_count = 0
+    pattern = re.compile(rf'^{re.escape(prefix)}_\d{{8}}_\d{{6}}(\.\d+)?\.log(?:\.\d+)?$')
+
+    try:
+        for filename in os.listdir(log_dir):
+            filepath = os.path.join(log_dir, filename)
+            if not os.path.isfile(filepath):
+                continue
+            if not pattern.match(filename):
+                continue
+            try:
+                mtime = os.path.getmtime(filepath)
+                if mtime < cutoff_time:
+                    os.remove(filepath)
+                    removed_count += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+    return removed_count
+
+
+def find_latest_log_file_in_dir(log_dir: str,
+                                prefix: str = 'bankcheck') -> Optional[str]:
+    import re
+    if not os.path.isdir(log_dir):
+        return None
+
+    pattern = re.compile(rf'^{re.escape(prefix)}_\d{{8}}_\d{{6}}\.log$')
+    candidates = []
+    for filename in os.listdir(log_dir):
+        if pattern.match(filename):
+            filepath = os.path.join(log_dir, filename)
+            try:
+                mtime = os.path.getmtime(filepath)
+                candidates.append((mtime, filepath))
+            except OSError:
+                continue
+
+    if not candidates:
+        plain_log = os.path.join(os.path.dirname(log_dir), f'{prefix}.log')
+        if os.path.isfile(plain_log):
+            return plain_log
+        return None
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
 def setup_logging():
     """
     初始化日志系统（带 PII 脱敏）。
     - 控制台输出 INFO 级别及以上日志（严格脱敏）
-    - 日志文件（bankcheck.log）记录 DEBUG 级别及以上日志（部分脱敏）
-      文件保存在脚本/exe 所在目录下
+    - 日志文件按运行批次切分，格式: bankcheck_YYYYMMDD_HHMMSS.log
+      文件保存在脚本/exe 所在目录的 logs/ 子目录下
+    - 支持按大小轮转（默认 50MB）和按保留天数清理（默认 30 天）
     - 所有 handler 均附加 PIILogFilter，确保敏感字段不被落盘
     """
-    log_dir = get_script_dir()
-    log_file = os.path.join(log_dir, 'bankcheck.log')
+    global _CURRENT_BATCH_LOG_FILE
+    log_dir = get_log_dir()
+    log_filename = generate_batch_log_filename('bankcheck')
+    log_file = os.path.join(log_dir, log_filename)
+    _CURRENT_BATCH_LOG_FILE = log_file
+
+    try:
+        removed = cleanup_expired_logs(log_dir, retention_days=LOG_RETENTION_DAYS)
+    except Exception:
+        removed = 0
 
     if HAS_PII_CLASSIFIER:
         logger = setup_pii_aware_logging(
@@ -657,8 +752,13 @@ def setup_logging():
             log_file=log_file,
             console_level=logging.INFO,
             file_level=logging.DEBUG,
+            rotation_when=LOG_ROTATION_WHEN,
+            rotation_interval=LOG_ROTATION_INTERVAL,
+            backup_count=LOG_BACKUP_COUNT,
+            max_bytes=LOG_MAX_BYTES,
         )
     else:
+        from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
         logger = logging.getLogger('bankcheck')
         logger.setLevel(logging.DEBUG)
 
@@ -673,7 +773,22 @@ def setup_logging():
         )
         console_handler.setFormatter(console_fmt)
 
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        if LOG_MAX_BYTES and LOG_MAX_BYTES > 0:
+            file_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=LOG_MAX_BYTES,
+                backupCount=LOG_BACKUP_COUNT,
+                encoding='utf-8',
+            )
+        else:
+            file_handler = TimedRotatingFileHandler(
+                log_file,
+                when=LOG_ROTATION_WHEN,
+                interval=LOG_ROTATION_INTERVAL,
+                backupCount=LOG_BACKUP_COUNT,
+                encoding='utf-8',
+            )
+            file_handler.suffix = '%Y%m%d'
         file_handler.setLevel(logging.DEBUG)
         file_fmt = logging.Formatter(
             '[%(asctime)s] %(levelname)s [%(funcName)s] %(message)s',
@@ -685,6 +800,8 @@ def setup_logging():
         logger.addHandler(file_handler)
 
     logger.info('日志系统初始化完成，日志文件: %s', log_file)
+    if removed > 0:
+        logger.info('已清理 %d 个超过 %d 天保留期的历史日志文件', removed, LOG_RETENTION_DAYS)
     if not HAS_TKINTER:
         logger.info('未检测到 tkinter，将使用命令行交互模式')
     return logger
@@ -7759,7 +7876,7 @@ def run_pipeline_flow(script_dir):
 
         if batch_manager and batch_id:
             try:
-                log_file = os.path.join(script_dir, 'bankcheck.log')
+                log_file = get_current_log_file() or find_latest_log_file_in_dir(get_log_dir(script_dir))
                 result_data = {
                     'total_records': len(result.all_rows),
                     'new_records': result.new_record_count,

@@ -755,23 +755,35 @@ def setup_pii_aware_logging(
     log_file: Optional[str] = None,
     console_level: int = logging.INFO,
     file_level: int = logging.DEBUG,
+    rotation_when: str = 'midnight',
+    rotation_interval: int = 1,
+    backup_count: int = 30,
+    max_bytes: int = 0,
+    encoding: str = 'utf-8',
 ) -> logging.Logger:
     """
     初始化带 PII 脱敏的日志系统。
 
     对所有 handler 附加 PIILogFilter，确保无论级别如何，敏感字段都会被正确脱敏。
+    支持日志按时间/大小轮转和保留天数配置。
 
     Args:
         logger_name: logger 名称
         log_file: 日志文件路径（如为 None 则不添加 FileHandler）
         console_level: 控制台日志级别
         file_level: 文件日志级别
+        rotation_when: 时间轮转间隔类型 ('S','M','H','D','midnight','W0'-'W6')
+        rotation_interval: 轮转间隔（配合 when）
+        backup_count: 保留的备份文件数量（0 表示不限制，配合保留天数清理）
+        max_bytes: 按大小轮转的阈值字节数（0 表示仅按时间轮转）
+        encoding: 日志文件编码
 
     Returns:
         配置好的 logger 实例
     """
     import os
     import sys
+    from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
 
     logger = logging.getLogger(logger_name)
     logger.setLevel(logging.DEBUG)
@@ -797,7 +809,23 @@ def setup_pii_aware_logging(
         log_dir = os.path.dirname(log_file)
         if log_dir and not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+
+        if max_bytes and max_bytes > 0:
+            file_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding=encoding,
+            )
+        else:
+            file_handler = TimedRotatingFileHandler(
+                log_file,
+                when=rotation_when,
+                interval=rotation_interval,
+                backupCount=backup_count,
+                encoding=encoding,
+            )
+            file_handler.suffix = '%Y%m%d'
         file_handler.setLevel(file_level)
         file_fmt = logging.Formatter(
             '[%(asctime)s] %(levelname)s [%(funcName)s] %(message)s',
