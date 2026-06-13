@@ -2220,6 +2220,59 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         except Exception as e:
             logger.error('数据库持久化失败: %s', e, exc_info=True)
 
+    internal_transfer_path = None
+    _it_summary = {}
+    if final_rows:
+        try:
+            final_rows, _it_summary, _it_result = identify_and_tag_internal_transfers(
+                final_rows,
+            )
+            if _it_summary.get('match_pairs', 0) > 0:
+                logger.info(
+                    '跨账号内部划转识别: 总记录 %d, 识别 %d 对 (划出 %d + 划入 %d), '
+                    '涉及 %d 主体 %d 银行, 划转总金额 %.2f 元',
+                    _it_summary.get('total_records', 0),
+                    _it_summary.get('match_pairs', 0),
+                    _it_summary.get('marked_out_count', 0),
+                    _it_summary.get('marked_in_count', 0),
+                    len(_it_summary.get('involved_subjects', [])),
+                    len(_it_summary.get('involved_banks', [])),
+                    _it_summary.get('total_transfer_amount', 0.0),
+                )
+                if output_path:
+                    base_columns = get_summary_columns(final_rows, lookup_data)
+                    it_extra_cols = list(INTERNAL_TRANSFER_EXTRA_COLUMNS)
+                    _it_columns = base_columns + [
+                        col for col in it_extra_cols if col not in base_columns
+                    ]
+                    pd.DataFrame(final_rows, columns=_it_columns).to_excel(
+                        output_path, index=False, engine='openpyxl')
+                    logger.info('已将内部划转标记回写到总表: %s', output_path)
+
+                _it_out_dir = script_dir
+                if output_path:
+                    _it_out_dir = os.path.dirname(output_path) or _it_out_dir
+                if output_dir:
+                    _it_out_dir = output_dir or _it_out_dir
+                _it_src_info = {
+                    '数据来源': '主流程自动生成',
+                    '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                    '记录数': len(final_rows),
+                    '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                    '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                }
+                if _it_result.match_pairs > 0:
+                    _it_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    _it_out_path = os.path.join(_it_out_dir, f'内部划转识别报告_{_it_ts}.xlsx')
+                    internal_transfer_path = export_internal_transfer_report(
+                        _it_result, _it_out_path, _it_src_info,
+                    )
+                    if internal_transfer_path:
+                        logger.info('内部划转识别报告已自动生成: %s', internal_transfer_path)
+        except Exception as e:
+            logger.error('内部划转识别处理失败: %s', e, exc_info=True)
+            internal_transfer_path = None
+
     subject_summary_path = None
     balance_check_path = None
     if final_rows:
@@ -9833,6 +9886,59 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         except Exception as e:
             logger.error('数据库持久化失败: %s', e, exc_info=True)
 
+    internal_transfer_path = None
+    _it_summary = {}
+    if final_rows:
+        try:
+            final_rows, _it_summary, _it_result = identify_and_tag_internal_transfers(
+                final_rows,
+            )
+            if _it_summary.get('match_pairs', 0) > 0:
+                logger.info(
+                    '跨账号内部划转识别: 总记录 %d, 识别 %d 对 (划出 %d + 划入 %d), '
+                    '涉及 %d 主体 %d 银行, 划转总金额 %.2f 元',
+                    _it_summary.get('total_records', 0),
+                    _it_summary.get('match_pairs', 0),
+                    _it_summary.get('marked_out_count', 0),
+                    _it_summary.get('marked_in_count', 0),
+                    len(_it_summary.get('involved_subjects', [])),
+                    len(_it_summary.get('involved_banks', [])),
+                    _it_summary.get('total_transfer_amount', 0.0),
+                )
+                if output_path:
+                    base_columns = get_summary_columns(final_rows, lookup_data)
+                    it_extra_cols = list(INTERNAL_TRANSFER_EXTRA_COLUMNS)
+                    _it_columns = base_columns + [
+                        col for col in it_extra_cols if col not in base_columns
+                    ]
+                    pd.DataFrame(final_rows, columns=_it_columns).to_excel(
+                        output_path, index=False, engine='openpyxl')
+                    logger.info('已将内部划转标记回写到总表: %s', output_path)
+
+                _it_out_dir = script_dir
+                if output_path:
+                    _it_out_dir = os.path.dirname(output_path) or _it_out_dir
+                if output_dir:
+                    _it_out_dir = output_dir or _it_out_dir
+                _it_src_info = {
+                    '数据来源': '主流程自动生成',
+                    '总表文件': os.path.basename(output_path) if output_path else '内存数据',
+                    '记录数': len(final_rows),
+                    '运行模式': '增量合并' if actual_incremental else '全量覆盖',
+                    '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                }
+                if _it_result.match_pairs > 0:
+                    _it_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    _it_out_path = os.path.join(_it_out_dir, f'内部划转识别报告_{_it_ts}.xlsx')
+                    internal_transfer_path = export_internal_transfer_report(
+                        _it_result, _it_out_path, _it_src_info,
+                    )
+                    if internal_transfer_path:
+                        logger.info('内部划转识别报告已自动生成: %s', internal_transfer_path)
+        except Exception as e:
+            logger.error('内部划转识别处理失败: %s', e, exc_info=True)
+            internal_transfer_path = None
+
     subject_summary_path = None
     balance_check_path = None
     if final_rows:
@@ -11015,7 +11121,10 @@ def _extract_year_month(trade_date) -> str:
         return '未知'
 
 
-def summarize_transactions(records: List[Dict[str, Any]]) -> SubjectSummaryResult:
+def summarize_transactions(
+    records: List[Dict[str, Any]],
+    exclude_internal_transfers: bool = True,
+) -> SubjectSummaryResult:
     """
     对交易记录进行多维度汇总分析。
 
@@ -11031,6 +11140,7 @@ def summarize_transactions(records: List[Dict[str, Any]]) -> SubjectSummaryResul
 
     Args:
         records: 交易记录列表，每条包含 '主体', '银行', '交易日期', '付款', '收款' 等字段
+        exclude_internal_transfers: 是否排除内部划转记录（默认 True，避免主体汇总重复计算）
 
     Returns:
         SubjectSummaryResult: 多维度汇总结果
@@ -11045,6 +11155,20 @@ def summarize_transactions(records: List[Dict[str, Any]]) -> SubjectSummaryResul
 
     if not records:
         logger.warning('无交易记录可汇总')
+        return SubjectSummaryResult(overall_summary=empty_overall)
+
+    if exclude_internal_transfers:
+        original_count = len(records)
+        records = filter_internal_transfers_for_summary(records, exclude=True)
+        filtered_count = original_count - len(records)
+        if filtered_count > 0:
+            logger.info(
+                '主体汇总已排除 %d 条内部划转记录（划出+划入各 %d 条）',
+                filtered_count, filtered_count // 2 if filtered_count % 2 == 0 else filtered_count,
+            )
+
+    if not records:
+        logger.warning('排除内部划转后无交易记录可汇总')
         return SubjectSummaryResult(overall_summary=empty_overall)
 
     agg_3d: Dict[Tuple[str, str, str], SubjectDimensionSummary] = {}
@@ -11380,7 +11504,8 @@ def export_subject_summary(summary_result: SubjectSummaryResult,
 
 def generate_subject_summary_from_records(records: List[Dict[str, Any]],
                                           output_dir: Optional[str] = None,
-                                          source_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
+                                          source_info: Optional[Dict[str, Any]] = None,
+                                          exclude_internal_transfers: bool = True) -> Optional[str]:
     """
     从交易记录列表直接生成汇总分析 Excel 文件。
 
@@ -11388,6 +11513,7 @@ def generate_subject_summary_from_records(records: List[Dict[str, Any]],
         records: 交易记录列表
         output_dir: 输出目录，默认为当前脚本目录
         source_info: 数据源信息，会写入"汇总总览"Sheet
+        exclude_internal_transfers: 是否排除内部划转记录（默认 True）
 
     Returns:
         str: 生成的文件路径，如无数据则返回 None
@@ -11407,7 +11533,9 @@ def generate_subject_summary_from_records(records: List[Dict[str, Any]],
     filename = f'主体维度汇总分析_{timestamp}.xlsx'
     output_path = os.path.join(output_dir, filename)
 
-    summary_result = summarize_transactions(records)
+    summary_result = summarize_transactions(
+        records, exclude_internal_transfers=exclude_internal_transfers,
+    )
 
     if not summary_result.overall_summary.get('transaction_count'):
         logger.warning('汇总结果为空，跳过导出')
@@ -11417,13 +11545,15 @@ def generate_subject_summary_from_records(records: List[Dict[str, Any]],
 
 
 def generate_subject_summary_from_total(total_path: str,
-                                        output_dir: Optional[str] = None) -> Optional[str]:
+                                        output_dir: Optional[str] = None,
+                                        exclude_internal_transfers: bool = True) -> Optional[str]:
     """
     从银行流水总表文件生成汇总分析 Excel。
 
     Args:
         total_path: 银行流水总表 Excel 文件路径
         output_dir: 输出目录，默认为总表所在目录
+        exclude_internal_transfers: 是否排除内部划转记录（默认 True）
 
     Returns:
         str: 生成的文件路径，失败则返回 None
@@ -11444,7 +11574,10 @@ def generate_subject_summary_from_total(total_path: str,
         '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     }
 
-    return generate_subject_summary_from_records(records, output_dir, source_info)
+    return generate_subject_summary_from_records(
+        records, output_dir, source_info,
+        exclude_internal_transfers=exclude_internal_transfers,
+    )
 
 
 def run_subject_summary_flow(script_dir):
@@ -17336,6 +17469,552 @@ def get_cashflow_classification(records: List[Dict],
         records, script_dir=script_dir)
     summary = summarize_cashflow_by_category(classified_records, group_by='all')
     return classified_records, classification_summary, summary
+
+
+# ══════════════════════════════════════════════════════════════════
+# 跨账号内部划转识别模块
+# ══════════════════════════════════════════════════════════════════
+
+INTERNAL_TRANSFER_TAG_YES = '是'
+INTERNAL_TRANSFER_TAG_NO = ''
+INTERNAL_TRANSFER_DIRECTION_OUT = '划出'
+INTERNAL_TRANSFER_DIRECTION_IN = '划入'
+
+INTERNAL_TRANSFER_EXTRA_COLUMNS = [
+    '内部划转标记',
+    '内部划转配对ID',
+    '内部划转方向',
+    '内部划转备注',
+]
+
+
+@dataclass
+class InternalTransferMatch:
+    """一对匹配的内部划转记录"""
+    match_id: str
+    amount: float
+    out_record_id: str
+    in_record_id: str
+    out_subject: str
+    in_subject: str
+    out_bank: str
+    in_bank: str
+    out_date: str
+    in_date: str
+    days_diff: int
+    out_counterparty: str
+    in_counterparty: str
+
+
+@dataclass
+class InternalTransferResult:
+    """内部划转识别结果"""
+    marked_records: List[Dict[str, Any]]
+    matches: List[InternalTransferMatch]
+    total_records: int = 0
+    match_pairs: int = 0
+    marked_out_count: int = 0
+    marked_in_count: int = 0
+    involved_subjects: List[str] = field(default_factory=list)
+    involved_banks: List[str] = field(default_factory=list)
+
+
+def _build_subject_index(records: List[Dict[str, Any]]) -> Dict[str, List[int]]:
+    """
+    构建主体名称到记录索引列表的映射。
+    用于快速查找某主体的所有交易记录。
+    """
+    idx: Dict[str, List[int]] = {}
+    for i, rec in enumerate(records):
+        subject = str(rec.get('主体') or '').strip()
+        if subject:
+            idx.setdefault(subject, []).append(i)
+    return idx
+
+
+def _build_counterparty_subject_index(records: List[Dict[str, Any]]) -> Dict[str, List[int]]:
+    """
+    构建"对方户名==已知主体"的快速索引。
+    对方户名为 key，对应的记录索引列表为 value。
+    """
+    all_subjects = {str(r.get('主体') or '').strip() for r in records}
+    all_subjects.discard('')
+    idx: Dict[str, List[int]] = {}
+    for i, rec in enumerate(records):
+        cp = str(rec.get('对方户名') or '').strip()
+        if cp and cp in all_subjects:
+            idx.setdefault(cp, []).append(i)
+    return idx
+
+
+def _abs_amount_equal(a: float, b: float, tolerance: float = 0.01) -> bool:
+    """比较两个金额绝对值是否在容忍度范围内相等"""
+    return abs(abs(a) - abs(b)) <= tolerance
+
+
+def identify_internal_transfers(
+    records: List[Dict[str, Any]],
+    time_window_days: int = 7,
+    amount_tolerance: float = 0.01,
+    strict_counterparty_match: bool = True,
+) -> InternalTransferResult:
+    """
+    识别跨账号内部划转交易。
+
+    识别策略（三重匹配）：
+    1. 对方户名匹配：划出记录的对方户名 == 划入记录的主体名称
+                     划入记录的对方户名 == 划出记录的主体名称
+    2. 金额对称性：划出金额的绝对值 与 划入金额的绝对值 相等（容忍误差内）
+    3. 时间接近度：两笔交易的时间差不超过 time_window_days 天
+
+    Args:
+        records: 交易记录列表，每条包含 '主体','银行','交易日期','付款','收款','对方户名','唯一id'
+        time_window_days: 时间窗口（天），默认 7 天
+        amount_tolerance: 金额容忍度（元），默认 0.01 元
+        strict_counterparty_match: 是否严格要求双向对方户名匹配，默认 True
+                                   False 时只要求单向（划出->对方户名==划入主体）
+
+    Returns:
+        InternalTransferResult: 包含标记后的记录和所有匹配对
+    """
+    logger = get_logger()
+
+    if not records:
+        return InternalTransferResult(
+            marked_records=[], matches=[], total_records=0,
+        )
+
+    result_records: List[Dict[str, Any]] = []
+    for rec in records:
+        new_rec = dict(rec)
+        for col in INTERNAL_TRANSFER_EXTRA_COLUMNS:
+            new_rec.setdefault(col, '')
+        result_records.append(new_rec)
+
+    subject_index = _build_subject_index(result_records)
+    cp_subject_index = _build_counterparty_subject_index(result_records)
+
+    matches: List[InternalTransferMatch] = []
+    used_idx: set = set()
+    match_counter = 0
+
+    out_records_idx = []
+    for i, rec in enumerate(result_records):
+        payment = to_float(rec.get('付款'))
+        if payment is not None and payment < 0:
+            out_records_idx.append(i)
+
+    for out_idx in out_records_idx:
+        if out_idx in used_idx:
+            continue
+
+        out_rec = result_records[out_idx]
+        out_subject = str(out_rec.get('主体') or '').strip()
+        out_bank = str(out_rec.get('银行') or '').strip()
+        out_counterparty = str(out_rec.get('对方户名') or '').strip()
+        out_amount = abs(to_float(out_rec.get('付款')) or 0.0)
+        out_date_raw = out_rec.get('交易日期')
+        out_date_dt = _normalize_date(out_date_raw)
+        out_date_str = str(out_date_raw or '').strip()
+
+        if out_amount <= 0 or out_date_dt is None:
+            continue
+
+        candidate_in_idx = set()
+        if out_counterparty and out_counterparty in subject_index:
+            candidate_in_idx.update(subject_index[out_counterparty])
+
+        if not strict_counterparty_match:
+            if out_counterparty and out_counterparty in cp_subject_index:
+                for cidx in cp_subject_index[out_counterparty]:
+                    cand_subject = str(result_records[cidx].get('主体') or '').strip()
+                    if cand_subject == out_counterparty:
+                        candidate_in_idx.add(cidx)
+
+        best_in_idx = -1
+        best_days_diff = 10 ** 9
+
+        for in_idx in candidate_in_idx:
+            if in_idx == out_idx or in_idx in used_idx:
+                continue
+
+            in_rec = result_records[in_idx]
+            receipt = to_float(in_rec.get('收款'))
+            if receipt is None or receipt <= 0:
+                continue
+
+            in_subject = str(in_rec.get('主体') or '').strip()
+            in_counterparty = str(in_rec.get('对方户名') or '').strip()
+            in_amount = abs(receipt)
+            in_date_dt = _normalize_date(in_rec.get('交易日期'))
+
+            if in_date_dt is None:
+                continue
+
+            if strict_counterparty_match:
+                if in_counterparty != out_subject:
+                    continue
+                if out_counterparty != in_subject:
+                    continue
+            else:
+                if out_counterparty != in_subject and in_counterparty != out_subject:
+                    continue
+
+            if not _abs_amount_equal(out_amount, in_amount, amount_tolerance):
+                continue
+
+            days_diff = abs((out_date_dt - in_date_dt).days)
+            if days_diff > time_window_days:
+                continue
+
+            if days_diff < best_days_diff:
+                best_days_diff = days_diff
+                best_in_idx = in_idx
+
+        if best_in_idx < 0:
+            continue
+
+        in_rec = result_records[best_in_idx]
+        in_date_str = str(in_rec.get('交易日期') or '').strip()
+        in_bank = str(in_rec.get('银行') or '').strip()
+        in_counterparty_final = str(in_rec.get('对方户名') or '').strip()
+        in_subject_final = str(in_rec.get('主体') or '').strip()
+
+        match_counter += 1
+        match_id = f"IT{datetime.now().strftime('%Y%m%d')}{match_counter:05d}"
+
+        result_records[out_idx]['内部划转标记'] = INTERNAL_TRANSFER_TAG_YES
+        result_records[out_idx]['内部划转配对ID'] = match_id
+        result_records[out_idx]['内部划转方向'] = INTERNAL_TRANSFER_DIRECTION_OUT
+        result_records[out_idx]['内部划转备注'] = (
+            f"内部划转至[{in_subject_final}]({in_bank})，"
+            f"配对ID:{match_id}，时间差{best_days_diff}天"
+        )
+
+        result_records[best_in_idx]['内部划转标记'] = INTERNAL_TRANSFER_TAG_YES
+        result_records[best_in_idx]['内部划转配对ID'] = match_id
+        result_records[best_in_idx]['内部划转方向'] = INTERNAL_TRANSFER_DIRECTION_IN
+        result_records[best_in_idx]['内部划转备注'] = (
+            f"内部划转来自[{out_subject}]({out_bank})，"
+            f"配对ID:{match_id}，时间差{best_days_diff}天"
+        )
+
+        out_id = str(result_records[out_idx].get('唯一id') or '')
+        in_id = str(result_records[best_in_idx].get('唯一id') or '')
+
+        matches.append(InternalTransferMatch(
+            match_id=match_id,
+            amount=round(out_amount, 2),
+            out_record_id=out_id,
+            in_record_id=in_id,
+            out_subject=out_subject,
+            in_subject=in_subject_final,
+            out_bank=out_bank,
+            in_bank=in_bank,
+            out_date=out_date_str,
+            in_date=in_date_str,
+            days_diff=best_days_diff,
+            out_counterparty=out_counterparty,
+            in_counterparty=in_counterparty_final,
+        ))
+
+        used_idx.add(out_idx)
+        used_idx.add(best_in_idx)
+
+    involved_subjects_set = set()
+    involved_banks_set = set()
+    for m in matches:
+        involved_subjects_set.add(m.out_subject)
+        involved_subjects_set.add(m.in_subject)
+        involved_banks_set.add(m.out_bank)
+        involved_banks_set.add(m.in_bank)
+
+    marked_out_count = sum(
+        1 for r in result_records
+        if r.get('内部划转标记') == INTERNAL_TRANSFER_TAG_YES
+        and r.get('内部划转方向') == INTERNAL_TRANSFER_DIRECTION_OUT
+    )
+    marked_in_count = sum(
+        1 for r in result_records
+        if r.get('内部划转标记') == INTERNAL_TRANSFER_TAG_YES
+        and r.get('内部划转方向') == INTERNAL_TRANSFER_DIRECTION_IN
+    )
+
+    result = InternalTransferResult(
+        marked_records=result_records,
+        matches=matches,
+        total_records=len(result_records),
+        match_pairs=len(matches),
+        marked_out_count=marked_out_count,
+        marked_in_count=marked_in_count,
+        involved_subjects=sorted(involved_subjects_set),
+        involved_banks=sorted(involved_banks_set),
+    )
+
+    logger.info(
+        '内部划转识别完成: %d 条记录, 识别出 %d 对 (%d 划出 + %d 划入), '
+        '涉及 %d 个主体, %d 家银行',
+        result.total_records, result.match_pairs,
+        result.marked_out_count, result.marked_in_count,
+        len(result.involved_subjects), len(result.involved_banks),
+    )
+
+    return result
+
+
+def filter_internal_transfers_for_summary(
+    records: List[Dict[str, Any]],
+    exclude: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    在进行主体汇总前，过滤内部划转记录。
+
+    Args:
+        records: 交易记录列表
+        exclude: True 排除内部划转记录（默认，用于主体汇总避免重复计算）
+                 False 只保留内部划转记录（用于查看、审计）
+
+    Returns:
+        过滤后的记录列表
+    """
+    if exclude:
+        return [
+            r for r in records
+            if r.get('内部划转标记') != INTERNAL_TRANSFER_TAG_YES
+        ]
+    else:
+        return [
+            r for r in records
+            if r.get('内部划转标记') == INTERNAL_TRANSFER_TAG_YES
+        ]
+
+
+def export_internal_transfer_report(
+    it_result: InternalTransferResult,
+    output_path: str,
+    source_info: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    将内部划转识别结果导出为 Excel 报告。
+
+    输出 Sheet:
+    1. 识别总览 - 统计信息
+    2. 配对明细 - 每对内部划转的详细信息
+    3. 标记明细 - 被标记的所有原始记录（含标记字段）
+
+    Args:
+        it_result: identify_internal_transfers 返回的结果
+        output_path: 输出 Excel 路径
+        source_info: 可选的数据源信息
+
+    Returns:
+        输出文件路径
+    """
+    logger = get_logger()
+
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            overview_items = [
+                ('统计项', '数值'),
+                ('总记录数', it_result.total_records),
+                ('识别配对数', it_result.match_pairs),
+                ('划出记录数', it_result.marked_out_count),
+                ('划入记录数', it_result.marked_in_count),
+                ('涉及主体数', len(it_result.involved_subjects)),
+                ('涉及银行数', len(it_result.involved_banks)),
+                ('划转总金额(元)', round(sum(m.amount for m in it_result.matches), 2)),
+            ]
+            if source_info:
+                for k, v in source_info.items():
+                    overview_items.append((k, v))
+
+            overview_df = pd.DataFrame(overview_items[1:], columns=overview_items[0])
+            overview_df.to_excel(writer, sheet_name='识别总览', index=False)
+
+            if it_result.matches:
+                match_rows = []
+                for m in it_result.matches:
+                    match_rows.append({
+                        '配对ID': m.match_id,
+                        '划转金额(元)': m.amount,
+                        '划出主体': m.out_subject,
+                        '划出银行': m.out_bank,
+                        '划出日期': m.out_date,
+                        '划出记录唯一ID': m.out_record_id,
+                        '划出对方户名': m.out_counterparty,
+                        '划入主体': m.in_subject,
+                        '划入银行': m.in_bank,
+                        '划入日期': m.in_date,
+                        '划入记录唯一ID': m.in_record_id,
+                        '划入对方户名': m.in_counterparty,
+                        '时间差(天)': m.days_diff,
+                    })
+                match_df = pd.DataFrame(match_rows)
+                match_df.to_excel(writer, sheet_name='配对明细', index=False)
+
+            tagged_records = filter_internal_transfers_for_summary(
+                it_result.marked_records, exclude=False,
+            )
+            if tagged_records:
+                base_cols = list(STANDARD_COLUMNS)
+                extra_cols = [
+                    c for c in INTERNAL_TRANSFER_EXTRA_COLUMNS
+                    if c not in base_cols
+                ]
+                available_base = [c for c in base_cols if c in tagged_records[0]]
+                available_extra = [c for c in extra_cols if c in tagged_records[0]]
+                columns_order = available_base + available_extra
+                detail_df = pd.DataFrame(tagged_records, columns=columns_order)
+                detail_df.to_excel(writer, sheet_name='标记明细', index=False)
+
+        wb = openpyxl.load_workbook(output_path)
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            header_fill = openpyxl.styles.PatternFill(
+                start_color='4472C4', end_color='4472C4', fill_type='solid',
+            )
+            header_font = openpyxl.styles.Font(bold=True, color='FFFFFF')
+            for col_idx in range(1, ws.max_column + 1):
+                ws.cell(row=1, column=col_idx).fill = header_fill
+                ws.cell(row=1, column=col_idx).font = header_font
+
+            for col_idx in range(1, ws.max_column + 1):
+                max_len = 0
+                col_letter = openpyxl.utils.get_column_letter(col_idx)
+                for row_idx in range(1, ws.max_row + 1):
+                    try:
+                        val = str(ws.cell(row=row_idx, column=col_idx).value or '')
+                        if len(val) > max_len:
+                            max_len = len(val)
+                    except Exception:
+                        pass
+                ws.column_dimensions[col_letter].width = min(max_len + 4, 50)
+
+            if sheet_name in ('配对明细', '标记明细'):
+                amount_col_names = ['划转金额(元)', '付款', '收款', '余额']
+                for col_idx in range(1, ws.max_column + 1):
+                    col_name = str(ws.cell(row=1, column=col_idx).value or '')
+                    col_letter = openpyxl.utils.get_column_letter(col_idx)
+                    if any(ac in col_name for ac in amount_col_names):
+                        for row_idx in range(2, ws.max_row + 1):
+                            ws.cell(row=row_idx, column=col_idx).number_format = '#,##0.00'
+
+            if sheet_name == '识别总览':
+                for row_idx in range(2, ws.max_row + 1):
+                    cell = ws.cell(row=row_idx, column=2)
+                    val = cell.value
+                    if isinstance(val, float):
+                        cell.number_format = '#,##0.00'
+                    elif isinstance(val, int):
+                        cell.number_format = '#,##0'
+
+        wb.save(output_path)
+        wb.close()
+
+        logger.info('内部划转识别报告已导出: %s', output_path)
+        return output_path
+
+    except Exception as e:
+        logger.error('导出内部划转识别报告失败: %s', e, exc_info=True)
+        raise
+
+
+def generate_internal_transfer_from_records(
+    records: List[Dict[str, Any]],
+    output_dir: Optional[str] = None,
+    source_info: Optional[Dict[str, Any]] = None,
+    time_window_days: int = 7,
+    amount_tolerance: float = 0.01,
+    strict_counterparty_match: bool = True,
+) -> Optional[str]:
+    """
+    从交易记录列表一站式生成内部划转识别报告，并返回带标记的记录结果。
+
+    Args:
+        records: 交易记录列表
+        output_dir: 输出目录
+        source_info: 数据源信息，写入总览 Sheet
+        time_window_days: 时间窗口（天）
+        amount_tolerance: 金额容忍度（元）
+        strict_counterparty_match: 是否严格双向对方户名匹配
+
+    Returns:
+        (生成的报告文件路径, 标记后的记录列表) -> 这里只返回报告路径，
+        标记结果通过调用方自行从返回的 result 获取（请使用 identify_internal_transfers）
+    """
+    logger = get_logger()
+
+    if not records:
+        logger.warning('无交易记录，跳过内部划转识别')
+        return None
+
+    if output_dir is None:
+        output_dir = get_script_dir()
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'内部划转识别报告_{timestamp}.xlsx'
+    output_path = os.path.join(output_dir, filename)
+
+    it_result = identify_internal_transfers(
+        records,
+        time_window_days=time_window_days,
+        amount_tolerance=amount_tolerance,
+        strict_counterparty_match=strict_counterparty_match,
+    )
+
+    if it_result.match_pairs == 0:
+        logger.info('未识别到任何内部划转配对，跳过报告生成')
+        return None
+
+    source_info_final = dict(source_info or {})
+    source_info_final.setdefault('数据来源', '主流程自动生成')
+    source_info_final.setdefault('记录数', len(records))
+    source_info_final.setdefault('生成时间', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
+    return export_internal_transfer_report(it_result, output_path, source_info_final)
+
+
+def identify_and_tag_internal_transfers(
+    records: List[Dict[str, Any]],
+    time_window_days: int = 7,
+    amount_tolerance: float = 0.01,
+    strict_counterparty_match: bool = True,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any], InternalTransferResult]:
+    """
+    便捷函数：识别内部划转并返回 (标记后的记录, 摘要dict, 完整result对象)。
+
+    在主流程中调用此函数：
+        final_rows, tag_summary, it_result = identify_and_tag_internal_transfers(final_rows)
+
+    Args:
+        records: 原始记录列表
+        time_window_days: 时间窗口
+        amount_tolerance: 金额容忍度
+        strict_counterparty_match: 是否严格双向匹配
+
+    Returns:
+        (marked_records, summary_dict, it_result)
+    """
+    it_result = identify_internal_transfers(
+        records,
+        time_window_days=time_window_days,
+        amount_tolerance=amount_tolerance,
+        strict_counterparty_match=strict_counterparty_match,
+    )
+    summary = {
+        'total_records': it_result.total_records,
+        'match_pairs': it_result.match_pairs,
+        'marked_out_count': it_result.marked_out_count,
+        'marked_in_count': it_result.marked_in_count,
+        'involved_subjects': it_result.involved_subjects,
+        'involved_banks': it_result.involved_banks,
+        'total_transfer_amount': round(sum(m.amount for m in it_result.matches), 2),
+    }
+    return it_result.marked_records, summary, it_result
 
 
 if __name__ == '__main__':
