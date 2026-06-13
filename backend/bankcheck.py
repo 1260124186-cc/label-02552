@@ -15516,5 +15516,895 @@ def run_balance_reconciliation_flow(script_dir):
     logger.info('========== 期末余额与银行对账单核对结束 ==========')
 
 
+# ──────────────────────────────────────────────
+# 现金流分类模块
+# ──────────────────────────────────────────────
+
+CASHFLOW_CATEGORIES = {
+    'operating': '经营活动现金流',
+    'investing': '投资活动现金流',
+    'financing': '筹资活动现金流',
+    'unclassified': '未分类',
+}
+
+CASHFLOW_SUBCATEGORIES = {
+    'salary': '工资薪金',
+    'tax': '税费缴纳',
+    'supplier': '供应商付款',
+    'customer': '客户收款',
+    'operating_other': '其他经营活动',
+    'investment_in': '投资收回',
+    'investment_out': '投资支付',
+    'investment_income': '投资收益',
+    'fixed_asset': '固定资产',
+    'loan_in': '取得借款',
+    'loan_out': '偿还借款',
+    'interest': '利息支出',
+    'dividend': '分配股利',
+    'capital_in': '实收资本',
+    'financing_other': '其他筹资活动',
+    'transfer': '内部转账',
+    'unclassified': '未分类',
+}
+
+CASHFLOW_CATEGORY_HIERARCHY = {
+    'salary': 'operating',
+    'tax': 'operating',
+    'supplier': 'operating',
+    'customer': 'operating',
+    'operating_other': 'operating',
+    'investment_in': 'investing',
+    'investment_out': 'investing',
+    'investment_income': 'investing',
+    'fixed_asset': 'investing',
+    'loan_in': 'financing',
+    'loan_out': 'financing',
+    'interest': 'financing',
+    'dividend': 'financing',
+    'capital_in': 'financing',
+    'financing_other': 'financing',
+    'transfer': 'unclassified',
+    'unclassified': 'unclassified',
+}
+
+
+@dataclass
+class CashflowClassificationRule:
+    """现金流分类规则"""
+    rule_id: str
+    name: str
+    subcategory: str
+    summary_keywords: List[str] = field(default_factory=list)
+    counterpart_keywords: List[str] = field(default_factory=list)
+    match_mode: str = 'contains'
+    amount_direction: str = 'any'
+    priority: int = 100
+    enabled: bool = True
+    description: Optional[str] = None
+    created_at: str = ''
+    updated_at: str = ''
+    created_by: str = ''
+
+    @property
+    def main_category(self) -> str:
+        return CASHFLOW_CATEGORY_HIERARCHY.get(self.subcategory, 'unclassified')
+
+
+class CashflowRuleConfig:
+    """现金流分类规则配置管理"""
+
+    def __init__(self, script_dir=None):
+        self.script_dir = script_dir or get_script_dir()
+        self.config_path = os.path.join(self.script_dir, 'cashflow_rules.json')
+        self._rules: List[CashflowClassificationRule] = []
+        self.load_config()
+
+    def load_config(self):
+        logger = get_logger()
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                self._rules = [CashflowClassificationRule(**r) for r in data.get('rules', [])]
+                logger.info('现金流分类规则已加载: %d 条规则', len(self._rules))
+            except Exception as e:
+                logger.error('加载现金流分类规则失败: %s', e)
+                self._rules = []
+        else:
+            self._rules = []
+            self._init_default_rules()
+            self.save_config()
+
+    def _init_default_rules(self):
+        default_rules = get_default_cashflow_rules()
+        self._rules = default_rules
+
+    def save_config(self):
+        logger = get_logger()
+        try:
+            data = {
+                'rules': [vars(r) for r in self._rules],
+            }
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info('现金流分类规则已保存: %s', self.config_path)
+        except Exception as e:
+            logger.error('保存现金流分类规则失败: %s', e)
+
+    def get_rules(self, subcategory=None, enabled=None,
+                  main_category=None) -> List[CashflowClassificationRule]:
+        result = sorted(self._rules, key=lambda r: r.priority)
+        if subcategory is not None:
+            result = [r for r in result if r.subcategory == subcategory]
+        if enabled is not None:
+            result = [r for r in result if r.enabled == enabled]
+        if main_category is not None:
+            result = [r for r in result
+                      if CASHFLOW_CATEGORY_HIERARCHY.get(r.subcategory) == main_category]
+        return result
+
+    def add_rule(self, rule: CashflowClassificationRule) -> str:
+        if not rule.rule_id:
+            rule.rule_id = f"CFR{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if not rule.created_at:
+            rule.created_at = now
+        rule.updated_at = now
+        self._rules.append(rule)
+        self.save_config()
+        return rule.rule_id
+
+    def update_rule(self, rule_id: str, updates: dict) -> bool:
+        for i, r in enumerate(self._rules):
+            if r.rule_id == rule_id:
+                for k, v in updates.items():
+                    if hasattr(r, k):
+                        setattr(r, k, v)
+                r.updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.save_config()
+                return True
+        return False
+
+    def delete_rule(self, rule_id: str) -> bool:
+        original_len = len(self._rules)
+        self._rules = [r for r in self._rules if r.rule_id != rule_id]
+        if len(self._rules) < original_len:
+            self.save_config()
+            return True
+        return False
+
+    def toggle_rule(self, rule_id: str, enabled: bool) -> bool:
+        for r in self._rules:
+            if r.rule_id == rule_id:
+                r.enabled = enabled
+                r.updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.save_config()
+                return True
+        return False
+
+
+_cashflow_rule_config_instance = None
+
+
+def get_cashflow_rule_config(script_dir=None) -> CashflowRuleConfig:
+    global _cashflow_rule_config_instance
+    if _cashflow_rule_config_instance is None:
+        _cashflow_rule_config_instance = CashflowRuleConfig(script_dir)
+    return _cashflow_rule_config_instance
+
+
+def _reset_cashflow_singleton():
+    global _cashflow_rule_config_instance
+    _cashflow_rule_config_instance = None
+
+
+def get_default_cashflow_rules() -> List[CashflowClassificationRule]:
+    """获取预设的默认分类规则"""
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    rules = []
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='工资薪金',
+        subcategory='salary',
+        summary_keywords=['工资', '薪资', '薪酬', '奖金', '绩效', '年终奖', '薪', '代发工资'],
+        counterpart_keywords=[],
+        match_mode='contains',
+        amount_direction='payment',
+        priority=10,
+        enabled=True,
+        description='摘要包含工资、薪资等关键词的付款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='税费缴纳',
+        subcategory='tax',
+        summary_keywords=['税', '税费', '税金', '增值税', '所得税', '印花税', '城建税', '附加税',
+                           '个税', '社保', '公积金', '保险', '缴款', '缴税'],
+        counterpart_keywords=['税务局', '税务', '社保', '公积金', '国家税务总局'],
+        match_mode='contains',
+        amount_direction='payment',
+        priority=15,
+        enabled=True,
+        description='摘要或对方户名包含税费、社保、公积金等关键词',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='客户收款',
+        subcategory='customer',
+        summary_keywords=['货款', '销售', '收入', '营收', '应收账款', '回款', '结算', '工程款',
+                           '服务费', '咨询费', '技术服务费', '产品销售'],
+        counterpart_keywords=[],
+        match_mode='contains',
+        amount_direction='receipt',
+        priority=30,
+        enabled=True,
+        description='摘要包含货款、销售等关键词的收款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='供应商付款',
+        subcategory='supplier',
+        summary_keywords=['货款', '采购', '原材料', '库存商品', '应付账款', '进货', '采购款',
+                           '材料款', '设备款', '工程款', '劳务费'],
+        counterpart_keywords=[],
+        match_mode='contains',
+        amount_direction='payment',
+        priority=30,
+        enabled=True,
+        description='摘要包含采购、货款等关键词的付款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='投资支付',
+        subcategory='investment_out',
+        summary_keywords=['投资', '股权投资', '对外投资', '长期投资', '短期投资', '理财',
+                           '购买理财', '基金', '股票', '债券'],
+        counterpart_keywords=['证券公司', '基金公司', '理财', '投资公司'],
+        match_mode='contains',
+        amount_direction='payment',
+        priority=20,
+        enabled=True,
+        description='摘要或对方户名包含投资、理财等关键词的付款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='投资收回',
+        subcategory='investment_in',
+        summary_keywords=['投资收回', '赎回', '理财赎回', '基金赎回', '卖出股票', '处置投资',
+                           '投资回款', '撤资', '股权转让'],
+        counterpart_keywords=['证券公司', '基金公司'],
+        match_mode='contains',
+        amount_direction='receipt',
+        priority=20,
+        enabled=True,
+        description='摘要包含投资收回、赎回等关键词的收款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='投资收益',
+        subcategory='investment_income',
+        summary_keywords=['利息', '股息', '分红', '投资收益', '理财收益', '基金分红',
+                           '股票分红', '债券利息'],
+        counterpart_keywords=[],
+        match_mode='contains',
+        amount_direction='receipt',
+        priority=18,
+        enabled=True,
+        description='摘要包含利息、股息、分红等关键词的收款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='固定资产',
+        subcategory='fixed_asset',
+        summary_keywords=['固定资产', '设备', '房产', '土地', '车辆', '办公设备', '机器设备',
+                           '在建工程', '工程物资'],
+        counterpart_keywords=[],
+        match_mode='contains',
+        amount_direction='payment',
+        priority=25,
+        enabled=True,
+        description='摘要包含固定资产、设备等关键词的付款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='取得借款',
+        subcategory='loan_in',
+        summary_keywords=['借款', '贷款', '融资', '授信', '流动资金贷款', '项目贷款',
+                           '银行贷款', '发放贷款', '贷款到账', '借款到账'],
+        counterpart_keywords=['贷款公司', '小额贷款', '金融公司', '信托', '融资租赁'],
+        match_mode='contains',
+        amount_direction='receipt',
+        priority=15,
+        enabled=True,
+        description='摘要包含借款、贷款等关键词的收款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='偿还借款',
+        subcategory='loan_out',
+        summary_keywords=['还款', '偿还贷款', '归还借款', '还贷款', '还本付息', '偿还本金',
+                           '还贷', '归还贷款', '清偿贷款', '贷款还款', '偿还借款本金',
+                           '偿还银行贷款', '贷款本金', '归还本金', '偿付本金'],
+        counterpart_keywords=['贷款公司', '小额贷款', '金融公司', '信托', '融资租赁'],
+        match_mode='contains',
+        amount_direction='payment',
+        priority=15,
+        enabled=True,
+        description='摘要包含还款、还贷款等关键词的付款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='利息支出',
+        subcategory='interest',
+        summary_keywords=['利息', '贷款利息', '借款利息', '资金占用费', '财务费用', '罚息',
+                           '支付利息', '季度利息', '月度利息', '贷款利息支出', '利息支出'],
+        counterpart_keywords=['贷款公司', '小额贷款', '金融公司', '信托'],
+        match_mode='contains',
+        amount_direction='payment',
+        priority=12,
+        enabled=True,
+        description='摘要包含利息、财务费用等关键词的付款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='分配股利',
+        subcategory='dividend',
+        summary_keywords=['股利', '分红', '利润分配', '应付股利', '股东分红'],
+        counterpart_keywords=[],
+        match_mode='contains',
+        amount_direction='payment',
+        priority=18,
+        enabled=True,
+        description='摘要包含股利、分红等关键词的付款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='实收资本',
+        subcategory='capital_in',
+        summary_keywords=['投资款', '注册资本', '实收资本', '出资', '股东出资', '增资'],
+        counterpart_keywords=[],
+        match_mode='contains',
+        amount_direction='receipt',
+        priority=18,
+        enabled=True,
+        description='摘要包含投资款、注册资本等关键词的收款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='内部转账',
+        subcategory='transfer',
+        summary_keywords=['转账', '划转', '调拨', '内部划转', '账户划转', '同名转账',
+                           '转存', '提现', '存现', '划转至', '划转自'],
+        counterpart_keywords=[],
+        match_mode='contains',
+        amount_direction='any',
+        priority=60,
+        enabled=True,
+        description='摘要包含转账、划转等关键词的记录（不影响净现金流）',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='其他经营活动-收款',
+        subcategory='operating_other',
+        summary_keywords=['其他应收', '其他应付', '暂收', '暂付', '往来款', '备用金', '报销',
+                           '差旅费', '办公费', '招待费', '水电费', '物业费', '租金',
+                           '广告费', '宣传费', '培训费', '会议费'],
+        counterpart_keywords=[],
+        match_mode='contains',
+        amount_direction='receipt',
+        priority=50,
+        enabled=True,
+        description='其他经营活动相关的收款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    rules.append(CashflowClassificationRule(
+        rule_id='',
+        name='其他经营活动-付款',
+        subcategory='operating_other',
+        summary_keywords=['其他应收', '其他应付', '暂收', '暂付', '往来款', '备用金', '报销',
+                           '差旅费', '办公费', '招待费', '水电费', '物业费', '租金',
+                           '广告费', '宣传费', '培训费', '会议费'],
+        counterpart_keywords=[],
+        match_mode='contains',
+        amount_direction='payment',
+        priority=50,
+        enabled=True,
+        description='其他经营活动相关的付款记录',
+        created_at=now,
+        updated_at=now,
+        created_by='system',
+    ))
+
+    return rules
+
+
+def _match_cashflow_text(text: str, keywords: List[str],
+                         match_mode: str = 'contains') -> Optional[str]:
+    """匹配文本与关键词"""
+    if not text or not keywords:
+        return None
+    text = str(text).strip()
+    for kw in keywords:
+        kw = str(kw).strip()
+        if not kw:
+            continue
+        if match_mode == 'exact':
+            if text == kw:
+                return kw
+        elif match_mode == 'startswith':
+            if text.startswith(kw):
+                return kw
+        elif match_mode == 'endswith':
+            if text.endswith(kw):
+                return kw
+        elif match_mode == 'regex':
+            try:
+                if re.search(kw, text):
+                    return kw
+            except re.error:
+                pass
+        else:
+            if kw in text:
+                return kw
+    return None
+
+
+def _check_amount_direction(record: Dict, direction: str) -> bool:
+    """检查金额方向是否匹配"""
+    if direction == 'any':
+        return True
+    payment = record.get('付款')
+    receipt = record.get('收款')
+    is_payment = payment is not None and payment < 0
+    is_receipt = receipt is not None and receipt > 0
+    if direction == 'payment':
+        return is_payment
+    if direction == 'receipt':
+        return is_receipt
+    return True
+
+
+def apply_cashflow_classification(records: List[Dict],
+                                   script_dir=None) -> Tuple[List[Dict], Dict[str, Any]]:
+    """
+    对交易记录应用现金流分类规则
+
+    Args:
+        records: 交易记录列表
+        script_dir: 脚本目录
+
+    Returns:
+        (分类后的记录列表, 分类统计摘要)
+    """
+    logger = get_logger()
+    config = get_cashflow_rule_config(script_dir)
+    rules = config.get_rules(enabled=True)
+
+    classified_count = 0
+    unclassified_count = 0
+    category_counts: Dict[str, int] = {}
+    subcategory_counts: Dict[str, int] = {}
+    rule_hit_counts: Dict[str, int] = {}
+
+    for rec in records:
+        matched_rule = None
+        matched_kw = None
+        matched_source = None
+
+        for rule in rules:
+            if not _check_amount_direction(rec, rule.amount_direction):
+                continue
+
+            summary = rec.get('摘要', '')
+            counterpart = rec.get('对方户名', '')
+
+            kw = None
+            source = None
+
+            if rule.summary_keywords:
+                kw = _match_cashflow_text(summary, rule.summary_keywords, rule.match_mode)
+                if kw:
+                    source = 'summary'
+
+            if kw is None and rule.counterpart_keywords:
+                kw = _match_cashflow_text(counterpart, rule.counterpart_keywords, rule.match_mode)
+                if kw:
+                    source = 'counterpart'
+
+            if kw is not None:
+                matched_rule = rule
+                matched_kw = kw
+                matched_source = source
+                break
+
+        if matched_rule:
+            main_category = matched_rule.main_category
+            rec['现金流主类别'] = CASHFLOW_CATEGORIES.get(main_category, '未分类')
+            rec['现金流子类别'] = CASHFLOW_SUBCATEGORIES.get(matched_rule.subcategory, '未分类')
+            rec['现金流分类主类别编码'] = main_category
+            rec['现金流分类子类别编码'] = matched_rule.subcategory
+            rec['现金流分类规则名称'] = matched_rule.name
+            rec['现金流分类匹配关键词'] = matched_kw
+            rec['现金流分类匹配来源'] = matched_source
+            classified_count += 1
+            category_counts[main_category] = category_counts.get(main_category, 0) + 1
+            subcategory_counts[matched_rule.subcategory] = subcategory_counts.get(
+                matched_rule.subcategory, 0) + 1
+            rule_hit_counts[matched_rule.name] = rule_hit_counts.get(matched_rule.name, 0) + 1
+        else:
+            rec['现金流主类别'] = '未分类'
+            rec['现金流子类别'] = '未分类'
+            rec['现金流分类主类别编码'] = 'unclassified'
+            rec['现金流分类子类别编码'] = 'unclassified'
+            rec['现金流分类规则名称'] = ''
+            rec['现金流分类匹配关键词'] = ''
+            rec['现金流分类匹配来源'] = ''
+            unclassified_count += 1
+            category_counts['unclassified'] = category_counts.get('unclassified', 0) + 1
+            subcategory_counts['unclassified'] = subcategory_counts.get('unclassified', 0) + 1
+
+    summary = {
+        'total_records': len(records),
+        'classified_count': classified_count,
+        'unclassified_count': unclassified_count,
+        'classification_rate': round(
+            classified_count / len(records) * 100, 2) if records else 0,
+        'category_counts': category_counts,
+        'subcategory_counts': subcategory_counts,
+        'rule_hit_counts': rule_hit_counts,
+    }
+
+    logger.info(
+        '现金流分类完成: 总记录 %s, 已分类 %s, 未分类 %s, 分类率 %s%%',
+        str(summary['total_records']), str(summary['classified_count']),
+        str(summary['unclassified_count']), f"{summary['classification_rate']:.2f}",
+    )
+
+    return records, summary
+
+
+def summarize_cashflow_by_category(records: List[Dict],
+                                   group_by: str = 'subcategory'
+                                   ) -> List[Dict[str, Any]]:
+    """
+    按现金流类别汇总统计
+
+    Args:
+        records: 已分类的交易记录列表
+        group_by: 汇总维度 'main' 按主类别, 'sub' 按子类别, 'all' 按全部
+
+    Returns:
+        分类汇总列表
+    """
+    summary_map: Dict[str, Dict[str, Any]] = {}
+
+    for rec in records:
+        main_code = rec.get('现金流分类主类别编码', 'unclassified')
+        sub_code = rec.get('现金流分类子类别编码', 'unclassified')
+        main_name = rec.get('现金流主类别', '未分类')
+        sub_name = rec.get('现金流子类别', '未分类')
+
+        payment = rec.get('付款') or 0
+        receipt = rec.get('收款') or 0
+
+        if payment < 0:
+            outflow = abs(payment)
+            inflow = 0
+        else:
+            outflow = 0
+
+        if receipt > 0:
+            inflow = receipt
+        else:
+            inflow = 0
+
+        net_amount = inflow - outflow
+
+        if group_by in ['main', 'all']:
+            key = f"main:{main_code}"
+            if key not in summary_map:
+                summary_map[key] = {
+                    '汇总维度': '主类别',
+                    '主类别编码': main_code,
+                    '主类别名称': main_name,
+                    '子类别编码': '',
+                    '子类别名称': '',
+                    '交易笔数': 0,
+                    '流入金额': 0.0,
+                    '流出金额': 0.0,
+                    '净额': 0.0,
+                }
+            summary_map[key]['交易笔数'] += 1
+            summary_map[key]['流入金额'] += inflow
+            summary_map[key]['流出金额'] += outflow
+            summary_map[key]['净额'] += net_amount
+
+        if group_by in ['sub', 'subcategory', 'all']:
+            key = f"sub:{sub_code}"
+            if key not in summary_map:
+                summary_map[key] = {
+                    '汇总维度': '子类别',
+                    '主类别编码': CASHFLOW_CATEGORY_HIERARCHY.get(sub_code, 'unclassified'),
+                    '主类别名称': CASHFLOW_CATEGORIES.get(
+                        CASHFLOW_CATEGORY_HIERARCHY.get(sub_code, 'unclassified'), '未分类'),
+                    '子类别编码': sub_code,
+                    '子类别名称': sub_name,
+                    '交易笔数': 0,
+                    '流入金额': 0.0,
+                    '流出金额': 0.0,
+                    '净额': 0.0,
+                }
+            summary_map[key]['交易笔数'] += 1
+            summary_map[key]['流入金额'] += inflow
+            summary_map[key]['流出金额'] += outflow
+            summary_map[key]['净额'] += net_amount
+
+    result = sorted(summary_map.values(), key=lambda x: (x['主类别编码'], x['子类别编码']))
+
+    for item in result:
+        item['流入金额'] = round(item['流入金额'], 2)
+        item['流出金额'] = round(item['流出金额'], 2)
+        item['净额'] = round(item['净额'], 2)
+
+    return result
+
+
+def export_cashflow_summary(records: List[Dict], output_path: str,
+                            include_details: bool = True) -> str:
+    """
+    导出现金流分类汇总表
+
+    Args:
+        records: 已分类的交易记录列表
+        output_path: 输出文件路径
+        include_details: 是否包含明细数据
+
+    Returns:
+        输出文件路径
+    """
+    logger = get_logger()
+
+    main_summary = summarize_cashflow_by_category(records, group_by='main')
+    sub_summary = summarize_cashflow_by_category(records, group_by='sub')
+
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        df_main = pd.DataFrame(main_summary)
+        if not df_main.empty:
+            df_main = df_main[[
+                '主类别编码', '主类别名称', '交易笔数',
+                '流入金额', '流出金额', '净额'
+            ]]
+            df_main.columns = [
+                '主类别编码', '主类别名称', '交易笔数',
+                '流入金额(元)', '流出金额(元)', '净额(元)'
+            ]
+        df_main.to_excel(writer, sheet_name='主类别汇总', index=False)
+
+        df_sub = pd.DataFrame(sub_summary)
+        if not df_sub.empty:
+            df_sub = df_sub[[
+                '主类别编码', '主类别名称', '子类别编码', '子类别名称',
+                '交易笔数', '流入金额', '流出金额', '净额'
+            ]]
+            df_sub.columns = [
+                '主类别编码', '主类别名称', '子类别编码', '子类别名称',
+                '交易笔数', '流入金额(元)', '流出金额(元)', '净额(元)'
+            ]
+        df_sub.to_excel(writer, sheet_name='子类别汇总', index=False)
+
+        if include_details:
+            detail_cols = [
+                '唯一id', '银行', '银行账号', '主体', '交易日期',
+                '付款', '收款', '摘要', '对方户名', '余额',
+                '现金流主类别', '现金流子类别',
+                '现金流分类主类别编码', '现金流分类子类别编码',
+                '现金流分类规则名称', '现金流分类匹配关键词',
+                '现金流分类匹配来源', '交易流水号',
+            ]
+            available_cols = [c for c in detail_cols if c in records[0]] if records else []
+            df_detail = pd.DataFrame(records, columns=available_cols)
+            df_detail.to_excel(writer, sheet_name='交易明细', index=False)
+
+    wb = openpyxl.load_workbook(output_path)
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        if sheet_name == '交易明细':
+            for row_idx in range(2, ws.max_row + 1):
+                main_cat = str(ws.cell(row=row_idx, column=11).value or '')
+                if main_cat == '经营活动现金流':
+                    fill = openpyxl.styles.PatternFill(
+                        start_color='E6F3FF', end_color='E6F3FF', fill_type='solid')
+                elif main_cat == '投资活动现金流':
+                    fill = openpyxl.styles.PatternFill(
+                        start_color='FFF3E6', end_color='FFF3E6', fill_type='solid')
+                elif main_cat == '筹资活动现金流':
+                    fill = openpyxl.styles.PatternFill(
+                        start_color='F3E6FF', end_color='F3E6FF', fill_type='solid')
+                else:
+                    fill = openpyxl.styles.PatternFill(
+                        start_color='F5F5F5', end_color='F5F5F5', fill_type='solid')
+                for col_idx in range(1, ws.max_column + 1):
+                    ws.cell(row=row_idx, column=col_idx).fill = fill
+
+        for col_idx in range(1, ws.max_column + 1):
+            max_length = 0
+            column_letter = openpyxl.utils.get_column_letter(col_idx)
+            for row_idx in range(1, ws.max_row + 1):
+                try:
+                    cell_value = str(ws.cell(row=row_idx, column=col_idx).value or '')
+                    if len(cell_value) > max_length:
+                        max_length = len(cell_value)
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+
+        header_fill = openpyxl.styles.PatternFill(
+            start_color='4472C4', end_color='4472C4', fill_type='solid')
+        header_font = openpyxl.styles.Font(bold=True, color='FFFFFF')
+        for col_idx in range(1, ws.max_column + 1):
+            ws.cell(row=1, column=col_idx).fill = header_fill
+            ws.cell(row=1, column=col_idx).font = header_font
+
+        for sheet_name in ['主类别汇总', '子类别汇总']:
+            if sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                for col_idx in range(4, 7):
+                    for row_idx in range(2, ws.max_row + 1):
+                        cell = ws.cell(row=row_idx, column=col_idx)
+                        cell.number_format = '#,##0.00'
+
+    wb.save(output_path)
+    wb.close()
+
+    logger.info('现金流分类汇总表已导出: %s', output_path)
+    return output_path
+
+
+def add_cashflow_rule(name: str, subcategory: str,
+                      summary_keywords: Optional[List[str]] = None,
+                      counterpart_keywords: Optional[List[str]] = None,
+                      match_mode: str = 'contains',
+                      amount_direction: str = 'any',
+                      priority: int = 100,
+                      description: Optional[str] = None,
+                      script_dir=None,
+                      username=None) -> str:
+    """
+    便捷添加现金流分类规则
+
+    Args:
+        name: 规则名称
+        subcategory: 子类别编码
+        summary_keywords: 摘要关键词列表
+        counterpart_keywords: 对方户名关键词列表
+        match_mode: 匹配模式
+        amount_direction: 金额方向
+        priority: 优先级（数值越小越优先）
+        description: 规则描述
+        script_dir: 脚本目录
+        username: 用户名
+
+    Returns:
+        规则ID
+    """
+    config = get_cashflow_rule_config(script_dir)
+    rule = CashflowClassificationRule(
+        rule_id='',
+        name=name,
+        subcategory=subcategory,
+        summary_keywords=summary_keywords or [],
+        counterpart_keywords=counterpart_keywords or [],
+        match_mode=match_mode,
+        amount_direction=amount_direction,
+        priority=priority,
+        enabled=True,
+        description=description,
+        created_at='',
+        updated_at='',
+        created_by=username or get_current_user(),
+    )
+    return config.add_rule(rule)
+
+
+def init_default_cashflow_rules(script_dir=None) -> List[str]:
+    """
+    初始化默认现金流分类规则（会覆盖现有配置）
+
+    Args:
+        script_dir: 脚本目录
+
+    Returns:
+        新增的规则ID列表
+    """
+    config = CashflowRuleConfig(script_dir=script_dir)
+    default_rules = get_default_cashflow_rules()
+    rule_ids = []
+    for rule in default_rules:
+        rule.rule_id = ''
+        rule_id = config.add_rule(rule)
+        rule_ids.append(rule_id)
+    return rule_ids
+
+
+def get_cashflow_classification(records: List[Dict],
+                                script_dir=None) -> Tuple[List[Dict], Dict[str, Any], List[Dict]]:
+    """
+    一站式现金流分类：分类 + 汇总
+
+    Args:
+        records: 交易记录列表
+        script_dir: 脚本目录
+
+    Returns:
+        (分类后的记录, 分类统计摘要, 子类别汇总列表)
+    """
+    classified_records, classification_summary = apply_cashflow_classification(
+        records, script_dir=script_dir)
+    summary = summarize_cashflow_by_category(classified_records, group_by='all')
+    return classified_records, classification_summary, summary
+
+
 if __name__ == '__main__':
     main()
