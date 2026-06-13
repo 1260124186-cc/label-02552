@@ -1,5 +1,7 @@
 import os
+import sys
 import shutil
+import json
 
 import openpyxl
 import pandas as pd
@@ -941,3 +943,353 @@ class TestHolidayCheckIntegration:
         df = pd.read_excel(result.output_path, engine='openpyxl')
         assert '非工作日标签' in df.columns
         assert '节假日名称' in df.columns
+
+
+class TestBuildCliParser:
+
+    def test_parser_has_process_subcommand(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test_folder'])
+        assert args.command == 'process'
+        assert args.folder == '/tmp/test_folder'
+
+    def test_parser_has_validate_lookup_subcommand(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup'])
+        assert args.command == 'validate-lookup'
+
+    def test_parser_has_version_subcommand(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['version'])
+        assert args.command == 'version'
+
+    def test_process_no_incremental_flag(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test', '--no-incremental'])
+        assert args.no_incremental is True
+
+    def test_process_default_incremental(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test'])
+        assert args.no_incremental is False
+
+    def test_process_keep_strategy(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test', '--keep-strategy', 'keep_all'])
+        assert args.keep_strategy == 'keep_all'
+
+    def test_process_default_keep_strategy(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test'])
+        assert args.keep_strategy == 'keep_unprocessed'
+
+    def test_process_output_dir(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test', '--output-dir', '/tmp/out'])
+        assert args.output_dir == '/tmp/out'
+
+    def test_process_preset(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test', '--preset', 'my-preset'])
+        assert args.preset == 'my-preset'
+
+    def test_process_enabled_banks(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test', '--enabled-banks', '北京银行', '东亚银行'])
+        assert args.enabled_banks == ['北京银行', '东亚银行']
+
+    def test_process_date_filters(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args([
+            'process', '/tmp/test',
+            '--start-date', '2024-01-01',
+            '--end-date', '2024-12-31',
+        ])
+        assert args.start_date == '2024-01-01'
+        assert args.end_date == '2024-12-31'
+
+    def test_validate_lookup_json_flag(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup', '--json'])
+        assert args.json is True
+
+    def test_validate_lookup_strict_flag(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup', '--strict'])
+        assert args.strict is True
+
+    def test_validate_lookup_file_option(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup', '--lookup-file', '/path/to/lookup.xlsx'])
+        assert args.lookup_file == '/path/to/lookup.xlsx'
+
+    def test_no_command_returns_none(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args([])
+        assert args.command is None
+
+    def test_legacy_flags_preserved(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['--watch-dir', '/tmp/test', '--once'])
+        assert args.watch_dir == '/tmp/test'
+        assert args.once is True
+
+    def test_legacy_scheduler_flag(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['--scheduler'])
+        assert args.scheduler is True
+
+    def test_legacy_list_jobs_flag(self):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['--list-jobs'])
+        assert args.list_jobs is True
+
+
+class TestCmdProcess:
+
+    def _setup_folder(self, tmp_dir, script_dir):
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+        _create_beijing_bank_excel(os.path.join(source_folder, '北京银行_流水.xlsx'))
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+        return source_folder
+
+    def test_process_runs_pipeline(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir)
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', source])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: script_dir
+        try:
+            ret = bankcheck._cmd_process(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        assert ret == 0
+
+    def test_process_nonexistent_dir(self, tmp_dir):
+        nonexistent = os.path.join(tmp_dir, 'nonexistent_folder')
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', nonexistent])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: tmp_dir
+        try:
+            ret = bankcheck._cmd_process(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        assert ret == 1
+
+    def test_process_with_no_incremental(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir)
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', source, '--no-incremental'])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: script_dir
+        try:
+            ret = bankcheck._cmd_process(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        assert ret == 0
+
+    def test_process_with_keep_all(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir)
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', source, '--keep-strategy', 'keep_all'])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: script_dir
+        try:
+            ret = bankcheck._cmd_process(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        assert ret == 0
+
+
+class TestCmdValidateLookup:
+
+    def _setup_lookup(self, tmp_dir, mappings=None):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        lookup_path = os.path.join(script_dir, '主体查找表.xlsx')
+        _create_lookup_table(lookup_path, mappings)
+        return script_dir, lookup_path
+
+    def test_valid_lookup_returns_zero(self, tmp_dir):
+        script_dir, lookup_path = self._setup_lookup(tmp_dir)
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup', '--lookup-file', lookup_path])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: script_dir
+        try:
+            ret = bankcheck._cmd_validate_lookup(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        assert ret == 0
+
+    def test_missing_lookup_without_strict(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup'])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: script_dir
+        try:
+            ret = bankcheck._cmd_validate_lookup(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        assert ret == 0
+
+    def test_missing_lookup_with_strict(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup', '--strict'])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: script_dir
+        try:
+            ret = bankcheck._cmd_validate_lookup(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        assert ret == 1
+
+    def test_json_output(self, tmp_dir, capsys):
+        script_dir, lookup_path = self._setup_lookup(tmp_dir)
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup', '--lookup-file', lookup_path, '--json'])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: script_dir
+        try:
+            ret = bankcheck._cmd_validate_lookup(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        assert ret == 0
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert 'valid' in result
+        assert 'file' in result
+        assert 'total_entries' in result
+        assert 'unique_accounts' in result
+        assert result['valid'] is True
+
+    def test_empty_lookup_json(self, tmp_dir, capsys):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        empty_lookup = os.path.join(script_dir, '主体查找表.xlsx')
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = '主体映射'
+        ws['A1'] = '主体名称'
+        ws['B1'] = '银行账号'
+        wb.save(empty_lookup)
+        wb.close()
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup', '--lookup-file', empty_lookup, '--json'])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: script_dir
+        try:
+            ret = bankcheck._cmd_validate_lookup(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result['valid'] is False
+        assert len(result['issues']) > 0
+
+    def test_duplicate_account_mapping_detected(self, tmp_dir, capsys):
+        mappings = [
+            ('公司A', '1234567890'),
+            ('公司B', '1234567890'),
+        ]
+        script_dir, lookup_path = self._setup_lookup(tmp_dir, mappings)
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup', '--lookup-file', lookup_path, '--json'])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: script_dir
+        try:
+            ret = bankcheck._cmd_validate_lookup(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result['valid'] is False
+        assert len(result['duplicate_accounts']) > 0
+
+    def test_missing_lookup_json_output(self, tmp_dir, capsys):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['validate-lookup', '--json'])
+
+        original_get_script_dir = bankcheck.get_script_dir
+        bankcheck.get_script_dir = lambda: script_dir
+        try:
+            ret = bankcheck._cmd_validate_lookup(args)
+        finally:
+            bankcheck.get_script_dir = original_get_script_dir
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result['valid'] is False
+        assert '未找到主体查找表文件' in result['issues']
+
+
+class TestCmdVersion:
+
+    def test_version_returns_zero(self, capsys):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['version'])
+
+        ret = bankcheck._cmd_version(args)
+        assert ret == 0
+
+    def test_version_prints_banner(self, capsys):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['version'])
+
+        bankcheck._cmd_version(args)
+        captured = capsys.readouterr()
+        assert '银行流水检验工具' in captured.out
+        assert '版本' in captured.out
+
+    def test_version_prints_python_version(self, capsys):
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['version'])
+
+        bankcheck._cmd_version(args)
+        captured = capsys.readouterr()
+        assert 'Python' in captured.out

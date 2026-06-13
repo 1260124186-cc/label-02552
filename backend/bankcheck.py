@@ -9069,10 +9069,155 @@ def run_scheduler_flow(script_dir):
     logger.info('========== 定时调度管理关闭 ==========')
 
 
-def parse_args_and_run():
+def build_cli_parser():
     import argparse
 
-    parser = argparse.ArgumentParser(description='银行流水检验工具')
+    parser = argparse.ArgumentParser(
+        description='银行流水检验工具',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='示例:\n'
+               '  python bankcheck.py process /path/to/statement_folder\n'
+               '  python bankcheck.py process /path/to/folder --no-incremental\n'
+               '  python bankcheck.py validate-lookup\n'
+               '  python bankcheck.py validate-lookup --lookup-file /path/to/主体查找表.xlsx\n'
+               '  python bankcheck.py version\n',
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='可用子命令')
+
+    process_parser = subparsers.add_parser(
+        'process',
+        help='处理银行流水文件夹，输出总表及检验报告',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='示例:\n'
+               '  python bankcheck.py process /path/to/statement_folder\n'
+               '  python bankcheck.py process /path/to/folder --no-incremental --keep-strategy keep_all\n'
+               '  python bankcheck.py process /path/to/folder --output-dir /path/to/output\n'
+               '  python bankcheck.py process /path/to/folder --preset my-preset-id\n',
+    )
+    process_parser.add_argument(
+        'folder',
+        type=str,
+        help='银行流水文件夹路径',
+    )
+    process_parser.add_argument(
+        '--no-incremental',
+        action='store_true',
+        default=False,
+        help='禁用增量合并，使用全量覆盖模式',
+    )
+    process_parser.add_argument(
+        '--keep-strategy',
+        type=str,
+        choices=list(KEEP_STRATEGIES.keys()),
+        default='keep_unprocessed',
+        help='文件保留策略 (默认: keep_unprocessed)',
+    )
+    process_parser.add_argument(
+        '--output-dir',
+        type=str,
+        metavar='DIR',
+        default=None,
+        help='指定输出目录（默认: 流水文件夹同级目录）',
+    )
+    process_parser.add_argument(
+        '--preset',
+        type=str,
+        metavar='PRESET_ID',
+        default=None,
+        help='应用指定ID的预设配置',
+    )
+    process_parser.add_argument(
+        '--enabled-banks',
+        type=str,
+        nargs='+',
+        default=None,
+        help='仅处理指定银行（如: 北京银行 东亚银行）',
+    )
+    process_parser.add_argument(
+        '--start-date',
+        type=str,
+        default='',
+        help='筛选起始日期 (YYYY-MM-DD)',
+    )
+    process_parser.add_argument(
+        '--end-date',
+        type=str,
+        default='',
+        help='筛选截止日期 (YYYY-MM-DD)',
+    )
+    process_parser.add_argument(
+        '--batch-id',
+        type=str,
+        default=None,
+        help='指定批次ID',
+    )
+    process_parser.add_argument(
+        '--enable-signature',
+        action='store_true',
+        default=False,
+        help='启用数字签名',
+    )
+    process_parser.add_argument(
+        '--signature-password',
+        type=str,
+        default=None,
+        help='签名密钥密码',
+    )
+    process_parser.add_argument(
+        '--enable-encryption',
+        action='store_true',
+        default=False,
+        help='启用输出文件加密',
+    )
+    process_parser.add_argument(
+        '--encryption-password',
+        type=str,
+        default=None,
+        help='加密密码',
+    )
+    process_parser.add_argument(
+        '--encryption-mode',
+        type=str,
+        choices=['excel_password', 'aes'],
+        default='excel_password',
+        help='加密模式 (默认: excel_password)',
+    )
+
+    validate_parser = subparsers.add_parser(
+        'validate-lookup',
+        help='校验主体查找表的完整性与一致性',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='示例:\n'
+               '  python bankcheck.py validate-lookup\n'
+               '  python bankcheck.py validate-lookup --lookup-file /path/to/主体查找表.xlsx\n'
+               '  python bankcheck.py validate-lookup --json\n',
+    )
+    validate_parser.add_argument(
+        '--lookup-file',
+        type=str,
+        metavar='FILE',
+        default=None,
+        help='指定查找表文件路径（默认: 自动在程序目录下查找）',
+    )
+    validate_parser.add_argument(
+        '--json',
+        action='store_true',
+        default=False,
+        help='以 JSON 格式输出校验结果',
+    )
+    validate_parser.add_argument(
+        '--strict',
+        action='store_true',
+        default=False,
+        help='严格模式: 发现任何问题即返回非零退出码',
+    )
+
+    version_parser = subparsers.add_parser(
+        'version',
+        help='显示版本信息',
+    )
+
     parser.add_argument('--scheduler', action='store_true', help='启动定时调度器')
     parser.add_argument('--scheduler-menu', action='store_true', help='打开调度管理菜单')
     parser.add_argument('--run-job', type=str, metavar='JOB_ID', help='立即运行指定ID的定时任务')
@@ -9126,14 +9271,269 @@ def parse_args_and_run():
     parser.add_argument('--interest-fee-period', type=str, metavar='PERIOD',
                        help='指定汇总期间类型: month(月), quarter(季), year(年), week(周)，默认 month')
 
-    args = parser.parse_args()
+    return parser
+
+
+def _cmd_process(args):
+    logger = get_logger()
+    script_dir = get_script_dir()
+
+    folder = os.path.abspath(args.folder)
+    if not os.path.isdir(folder):
+        logger.error('目录不存在: %s', folder)
+        print(f'错误: 目录不存在 {folder}')
+        return 1
+
+    incremental = not args.no_incremental
+    keep_strategy = args.keep_strategy
+    output_dir = args.output_dir
+    enabled_banks = args.enabled_banks
+    start_date = args.start_date
+    end_date = args.end_date
+    batch_id = args.batch_id
+
+    if args.preset:
+        preset = load_preset(args.preset, script_dir)
+        if not preset:
+            logger.error('未找到预设ID: %s', args.preset)
+            print(f'错误: 未找到预设ID {args.preset}')
+            return 1
+        print(f'应用预设: {preset.get("name", "")} ({args.preset})')
+        print(f'处理目录: {folder}')
+        with AuditLogger('preset_pipeline', script_dir) as audit:
+            audit.record_input(folder)
+            audit.set_extra_info({'preset_id': args.preset, 'preset_name': preset.get('name', '')})
+            result = apply_preset_to_pipeline(preset, folder, script_dir)
+            audit.record_result(result)
+    else:
+        logger.info('CLI process: 目录=%s, 增量=%s, 保留策略=%s', folder, incremental, keep_strategy)
+
+        result = run_pipeline_with_options(
+            folder=folder,
+            script_dir=script_dir,
+            incremental=incremental,
+            enabled_banks=enabled_banks,
+            keep_strategy=keep_strategy,
+            start_date=start_date,
+            end_date=end_date,
+            batch_id=batch_id,
+            output_dir=output_dir,
+            enable_encryption=args.enable_encryption,
+            encryption_password=args.encryption_password,
+            encryption_mode=args.encryption_mode,
+        )
+
+    if result.folder_empty:
+        print(f'\n⚠️  文件夹中未发现任何 Excel 文件')
+        return 0
+
+    if result.all_rows:
+        print(f'\n✅ 处理完成！')
+        print(f'   总记录数: {len(result.all_rows)}')
+        print(f'   新增记录: {result.new_record_count}')
+        print(f'   已处理文件: {len(result.processed_files)}')
+        if result.output_path:
+            print(f'   输出文件: {result.output_path}')
+        if result.lookup_missing:
+            print(f'   ⚠️  未找到主体查找表，"主体"列为空')
+        if result.unprocessed_files:
+            print(f'   无法识别的文件: {len(result.unprocessed_files)} 个')
+        if result.error_files:
+            print(f'   处理出错的文件: {len(result.error_files)} 个')
+            for fpath, err in result.error_files:
+                print(f'     - {os.path.basename(fpath)}: {err}')
+        if result.balance_check_path:
+            print(f'   余额校验报告: {result.balance_check_path}')
+        if result.duplicate_check_path:
+            print(f'   重复交易报告: {result.duplicate_check_path}')
+        if result.interest_fee_check_path:
+            print(f'   利息手续费报告: {result.interest_fee_check_path}')
+        if result.holiday_check_path:
+            print(f'   非工作日交易报告: {result.holiday_check_path}')
+        if result.subject_summary_path:
+            print(f'   主体汇总分析: {result.subject_summary_path}')
+        return 0
+    else:
+        print(f'\n⚠️  未提取到任何银行流水记录')
+        if result.unprocessed_files:
+            print(f'   无法识别的文件: {len(result.unprocessed_files)} 个')
+        if result.error_files:
+            print(f'   处理出错的文件: {len(result.error_files)} 个')
+            for fpath, err in result.error_files:
+                print(f'     - {os.path.basename(fpath)}: {err}')
+        return 0
+
+
+def _cmd_validate_lookup(args):
+    import json as _json
 
     script_dir = get_script_dir()
+    logger = get_logger()
+
+    lookup_file = args.lookup_file
+    if lookup_file is None:
+        lookup_file = find_lookup_file(script_dir)
+
+    issues = []
+    warnings = []
+
+    if lookup_file is None or not os.path.isfile(lookup_file):
+        msg = '未找到主体查找表文件'
+        issues.append(msg)
+        if args.json:
+            print(_json.dumps({'valid': False, 'issues': issues, 'warnings': warnings},
+                              ensure_ascii=False, indent=2))
+        else:
+            print(f'❌ {msg}')
+        return 1 if args.strict else 0
+
+    if not args.json:
+        print(f'正在校验查找表: {lookup_file}')
+
+    try:
+        lookup_data = load_lookup_table(lookup_file)
+    except Exception as e:
+        msg = f'查找表加载失败: {e}'
+        issues.append(msg)
+        if args.json:
+            print(_json.dumps({'valid': False, 'issues': issues, 'warnings': warnings, 'file': lookup_file},
+                              ensure_ascii=False, indent=2))
+        else:
+            print(f'❌ {msg}')
+        return 1 if args.strict else 0
+
+    by_account = lookup_data.get('by_account', {})
+    all_entries = lookup_data.get('all_entries', [])
+
+    if not all_entries:
+        msg = '查找表为空，没有任何条目'
+        issues.append(msg)
+
+    empty_subject_count = 0
+    empty_account_count = 0
+    duplicate_account_entries = []
+
+    seen_account_keys = {}
+    for entry in all_entries:
+        subject = entry.get('subject', '').strip()
+        account_raw = str(entry.get('account_raw', '')).strip()
+        account_key = entry.get('account_key', '').strip()
+
+        if not subject:
+            empty_subject_count += 1
+        if not account_raw:
+            empty_account_count += 1
+
+        if account_key:
+            if account_key not in seen_account_keys:
+                seen_account_keys[account_key] = []
+            seen_account_keys[account_key].append(subject)
+
+    if empty_subject_count > 0:
+        msg = f'存在 {empty_subject_count} 条主体为空的记录'
+        issues.append(msg)
+
+    if empty_account_count > 0:
+        msg = f'存在 {empty_account_count} 条账号为空的记录'
+        issues.append(msg)
+
+    for account_key, subjects in seen_account_keys.items():
+        unique_subjects = list(set(s for s in subjects if s))
+        if len(unique_subjects) > 1:
+            duplicate_account_entries.append({
+                'account': account_key,
+                'subjects': unique_subjects,
+                'count': len(subjects),
+            })
+
+    if duplicate_account_entries:
+        msg = f'存在 {len(duplicate_account_entries)} 个账号映射到多个不同主体'
+        issues.append(msg)
+        for dup in duplicate_account_entries:
+            detail = f'  账号 {dup["account"]} -> {", ".join(dup["subjects"])}'
+            issues.append(detail)
+
+    try:
+        from lookup_manager import get_duplicate_entries as _get_dup_entries
+        dup_entries = _get_dup_entries(lookup_file)
+        if dup_entries and not duplicate_account_entries:
+            msg = f'查找表存在 {len(dup_entries)} 组重复账号条目'
+            warnings.append(msg)
+    except Exception:
+        pass
+
+    file_size = os.path.getsize(lookup_file)
+    if file_size == 0:
+        msg = '查找表文件大小为 0 字节'
+        issues.append(msg)
+
+    is_valid = len([i for i in issues if not i.startswith('  ')]) == 0
+
+    result = {
+        'valid': is_valid,
+        'file': lookup_file,
+        'total_entries': len(all_entries),
+        'unique_accounts': len(by_account),
+        'issues': [i for i in issues if not i.startswith('  ')],
+        'warnings': warnings,
+        'duplicate_accounts': duplicate_account_entries,
+    }
+
+    if args.json:
+        print(_json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        if is_valid:
+            print(f'✅ 查找表校验通过')
+        else:
+            print(f'❌ 查找表校验未通过')
+        print(f'   文件: {lookup_file}')
+        print(f'   总条目数: {len(all_entries)}')
+        print(f'   唯一账号数: {len(by_account)}')
+        if issues:
+            problem_issues = [i for i in issues if not i.startswith('  ')]
+            detail_issues = [i for i in issues if i.startswith('  ')]
+            if problem_issues:
+                print(f'   问题 ({len(problem_issues)} 个):')
+                for issue in problem_issues:
+                    print(f'     - {issue}')
+            if detail_issues:
+                for issue in detail_issues:
+                    print(f'     {issue}')
+        if warnings:
+            print(f'   警告 ({len(warnings)} 个):')
+            for w in warnings:
+                print(f'     - {w}')
+
+    return 0 if is_valid or not args.strict else 1
+
+
+def _cmd_version(args):
+    print(format_version_banner())
+    build_info = get_build_info()
+    print(f'  Python: {sys.version.split()[0]}')
+    print(f'  工作目录: {os.getcwd()}')
+    return 0
+
+
+def parse_args_and_run():
+    parser = build_cli_parser()
+    args = parser.parse_args()
+
     setup_logging()
     logger = get_logger()
+    script_dir = get_script_dir()
 
     init_audit_db(get_audit_db_path(script_dir))
     init_default_alert_rules(script_dir)
+
+    if args.command == 'process':
+        sys.exit(_cmd_process(args))
+
+    if args.command == 'validate-lookup':
+        sys.exit(_cmd_validate_lookup(args))
+
+    if args.command == 'version':
+        sys.exit(_cmd_version(args))
 
     if args.list_jobs:
         jobs = list_schedule_jobs(script_dir)
