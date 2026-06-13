@@ -50,6 +50,30 @@ except ImportError:
         return None
 
 try:
+    from build_info import (
+        get_version, get_build_time, get_build_info, get_build_platform, format_version_banner,
+    )
+    HAS_BUILD_INFO = True
+except ImportError:
+    HAS_BUILD_INFO = False
+    def get_version():
+        return "1.0.0"
+    def get_build_time():
+        return "unknown"
+    def get_build_platform():
+        import platform as _platform
+        return _platform.system()
+    def get_build_info():
+        return {'version': get_version(), 'build_time': get_build_time(), 'platform': get_build_platform()}
+    def format_version_banner(app_name="银行流水检验工具"):
+        v = get_version()
+        bt = get_build_time()
+        bp = get_build_platform()
+        pd = {"Windows": "Windows", "Darwin": "macOS", "Linux": "Linux"}.get(bp, bp)
+        line = "=" * 48
+        return f"{line}\n  {app_name}\n  版本: v{v}\n  构建时间: {bt}\n  构建平台: {pd}\n{line}"
+
+try:
     from pii_classifier import (
         setup_pii_aware_logging, PIILogFilter, build_safe_log_context,
         mask_value, _mask_bank_account, _mask_subject_name,
@@ -9873,6 +9897,10 @@ def open_voucher_attachments_for_transaction(transaction_id: str, script_dir=Non
 def main():
     script_dir = get_script_dir()
 
+    print()
+    print(format_version_banner())
+    print()
+
     try:
         from self_check import self_check_and_exit_if_failed
         self_check_and_exit_if_failed(
@@ -9890,6 +9918,7 @@ def main():
     setup_logging()
     logger = get_logger()
     logger.info('========== 银行流水检验工具启动 ==========')
+    logger.info('版本: v%s, 构建时间: %s', get_version(), get_build_time())
 
     if HAS_ONBOARDING and onboarding is not None:
         onboarding_result = onboarding.run_onboarding_flow(script_dir)
