@@ -248,6 +248,7 @@ def cli_askmode():
     print(t('cli.option_balance_check'))
     print(t('cli.option_duplicate_check'))
     print(t('cli.option_interest_fee_check'))
+    print(t('cli.option_balance_reconciliation'))
     choice = input(t('cli.enter_choice')).strip()
     if choice == '2':
         return 'diff'
@@ -273,6 +274,8 @@ def cli_askmode():
         return 'duplicate_check'
     elif choice == '13':
         return 'interest_fee_check'
+    elif choice == '14':
+        return 'balance_reconciliation'
     return 'pipeline'
 
 
@@ -314,7 +317,7 @@ def _gui_askmode_full():
         raise RuntimeError('Mock Tk detected')
 
     root.title(t('gui.mode_window_title'))
-    root.geometry('480x680')
+    root.geometry('480x730')
     root.resizable(False, False)
 
     result = {'mode': None}
@@ -338,6 +341,7 @@ def _gui_askmode_full():
         (t('modes.balance_check_name'), 'balance_check', t('modes.balance_check_desc'), '#8BC34A'),
         (t('modes.duplicate_check_name'), 'duplicate_check', t('modes.duplicate_check_desc'), '#F44336'),
         (t('modes.interest_fee_check_name'), 'interest_fee_check', t('modes.interest_fee_check_desc'), '#009688'),
+        (t('modes.balance_reconciliation_name'), 'balance_reconciliation', t('modes.balance_reconciliation_desc'), '#9C27B0'),
         (t('modes.db_query_name'), 'db_query', t('modes.db_query_desc'), '#00BCD4'),
         (t('modes.db_stats_name'), 'db_stats', t('modes.db_stats_desc'), '#795548'),
         (t('modes.batch_history_name'), 'batch_history', t('modes.batch_history_desc'), '#E91E63'),
@@ -8892,6 +8896,8 @@ def main():
         run_duplicate_check_flow(script_dir)
     elif mode == 'interest_fee_check':
         run_interest_fee_check_flow(script_dir)
+    elif mode == 'balance_reconciliation':
+        run_balance_reconciliation_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
@@ -14411,6 +14417,1103 @@ def trigger_bank_download(
         logger = get_logger()
         logger.error('触发银行下载失败: %s', e)
         return False, f'触发失败: {e}'
+
+
+# ──────────────────────────────────────────────
+# 期末余额与银行对账单核对模块
+# ──────────────────────────────────────────────
+
+BALANCE_RECONCILIATION_FILENAME = '期末余额与银行对账单核对报告.xlsx'
+
+try:
+    import pdfplumber
+    HAS_PDFPLUMBER = True
+except ImportError:
+    HAS_PDFPLUMBER = False
+
+try:
+    from PIL import Image
+    import pytesseract
+    HAS_PYTESSERACT = True
+except ImportError:
+    HAS_PYTESSERACT = False
+
+
+@dataclass
+class BankStatementBalance:
+    """银行对账单余额记录（从官方文件提取）"""
+    bank_account: str
+    bank_name: str = ''
+    subject: str = ''
+    statement_balance: float = 0.0
+    statement_date: Optional[str] = None
+    source_type: str = 'manual'
+    source_file: str = ''
+    extracted_at: str = ''
+    remark: str = ''
+
+
+@dataclass
+class AccountEndBalance:
+    """总表期末余额记录"""
+    bank_account: str
+    bank_name: str = ''
+    subject: str = ''
+    end_balance: float = 0.0
+    end_date: Optional[str] = None
+    transaction_count: int = 0
+    last_transaction_id: str = ''
+
+
+@dataclass
+class BalanceReconciliationRecord:
+    """单条余额比对记录"""
+    bank_account: str
+    bank_name: str = ''
+    subject: str = ''
+    total_balance: float = 0.0
+    statement_balance: float = 0.0
+    diff_amount: float = 0.0
+    status: str = 'pending'
+    diff_note: str = ''
+    total_end_date: Optional[str] = None
+    statement_date: Optional[str] = None
+    source_file: str = ''
+
+
+@dataclass
+class BalanceReconciliationResult:
+    """余额比对结果汇总"""
+    total_accounts: int = 0
+    matched_accounts: int = 0
+    diff_accounts: int = 0
+    missing_statement: int = 0
+    missing_total: int = 0
+    total_diff_amount: float = 0.0
+    records: List[BalanceReconciliationRecord] = field(default_factory=list)
+    check_summary: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def match_rate(self) -> str:
+        if self.total_accounts > 0:
+            return f'{(self.matched_accounts / self.total_accounts * 100):.1f}%'
+        return '0%'
+
+
+def _parse_amount_from_text(text: str) -> Optional[float]:
+    """
+    从文本中解析金额，支持千分位、正负号、货币符号等格式。
+
+    Args:
+        text: 包含金额的文本
+
+    Returns:
+        float: 解析后的金额，解析失败返回 None
+    """
+    if not text:
+        return None
+
+    text = text.strip()
+
+    patterns = [
+        r'[-+]?\s*[¥￥$€£]?\s*[\d,，]+(?:\.\d{1,2})?',
+        r'[-+]?\s*\d+(?:\.\d{1,2})?',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            amount_str = match.group(0)
+            amount_str = amount_str.replace(',', '').replace('，', '')
+            amount_str = re.sub(r'[¥￥$€£\s]', '', amount_str)
+            try:
+                return float(amount_str)
+            except (ValueError, TypeError):
+                continue
+
+    return None
+
+
+def _parse_account_from_text(text: str) -> Optional[str]:
+    """
+    从文本中解析银行账号，支持带分隔符的账号格式。
+
+    Args:
+        text: 包含账号的文本
+
+    Returns:
+        str: 解析后的账号，解析失败返回 None
+    """
+    if not text:
+        return None
+
+    patterns = [
+        r'账号[：:\s]\s*([\d\- ]+)',
+        r'账户[：:\s]\s*([\d\- ]+)',
+        r'卡号[：:\s]\s*([\d\- ]+)',
+        r'Account\s*[No\.]+\s*([\d\- ]+)',
+        r'A/C\s*[No\.]+\s*([\d\- ]+)',
+        r'\b(\d{10,25})\b',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            account = match.group(1)
+            account = re.sub(r'[\- ]', '', account)
+            if len(account) >= 10:
+                return account
+
+    return None
+
+
+def _parse_date_from_text(text: str) -> Optional[str]:
+    """
+    从文本中解析日期，支持多种格式。
+
+    Args:
+        text: 包含日期的文本
+
+    Returns:
+        str: YYYY-MM-DD 格式的日期，解析失败返回 None
+    """
+    if not text:
+        return None
+
+    date_patterns = [
+        (r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})', lambda m: f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"),
+        (r'(\d{4})(\d{2})(\d{2})', lambda m: f"{m.group(1)}-{m.group(2)}-{m.group(3)}"),
+        (r'(\d{2})[-/](\d{2})[-/](\d{4})', lambda m: f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"),
+        (r'(\d{1,2})[-/月](\d{1,2})[-/日](\d{4})', lambda m: f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"),
+    ]
+
+    for pattern, formatter in date_patterns:
+        match = re.search(pattern, text)
+        if match:
+            try:
+                return formatter(match)
+            except (ValueError, IndexError):
+                continue
+
+    return None
+
+
+def extract_end_balances_from_total(records: List[Dict[str, Any]]) -> Dict[str, AccountEndBalance]:
+    """
+    从交易记录中提取各账号的期末余额。
+
+    按账号分组后，取每组中交易日期最新的记录的余额作为期末余额。
+    如果日期相同，则取交易流水号排序后的最后一条。
+
+    Args:
+        records: 交易记录列表
+
+    Returns:
+        Dict[str, AccountEndBalance]: 账号到期末余额的映射字典
+    """
+    logger = get_logger()
+
+    if not records:
+        logger.warning('无交易记录，无法提取期末余额')
+        return {}
+
+    account_groups: Dict[str, List[Dict[str, Any]]] = {}
+    for record in records:
+        account = str(record.get('银行账号', '')).strip()
+        if not account:
+            continue
+        if account not in account_groups:
+            account_groups[account] = []
+        account_groups[account].append(record)
+
+    end_balances: Dict[str, AccountEndBalance] = {}
+
+    for account, group_records in account_groups.items():
+        def _sort_key(r):
+            date_str = str(r.get('交易日期', '') or '')
+            txn_id = str(r.get('交易流水号', '') or '')
+            return (date_str, txn_id)
+
+        sorted_records = sorted(group_records, key=_sort_key)
+        last_record = sorted_records[-1]
+
+        balance = to_float(last_record.get('余额'))
+        if balance is None:
+            logger.warning('账号 %s 最后一条记录无有效余额，跳过', account)
+            continue
+
+        end_balance = AccountEndBalance(
+            bank_account=account,
+            bank_name=str(last_record.get('银行', '')),
+            subject=str(last_record.get('主体', '')),
+            end_balance=balance,
+            end_date=str(last_record.get('交易日期', '')) if last_record.get('交易日期') else None,
+            transaction_count=len(group_records),
+            last_transaction_id=str(last_record.get('交易流水号', '')),
+        )
+        end_balances[account] = end_balance
+        logger.info('账号 %s 期末余额: %s (日期: %s, 笔数: %d)',
+                    account, f'{balance:.2f}', end_balance.end_date, end_balance.transaction_count)
+
+    logger.info('共提取 %d 个账号的期末余额', len(end_balances))
+    return end_balances
+
+
+def parse_bank_statement_pdf(pdf_path: str) -> Optional[BankStatementBalance]:
+    """
+    从PDF银行对账单中提取账号和期末余额。
+
+    Args:
+        pdf_path: PDF文件路径
+
+    Returns:
+        Optional[BankStatementBalance]: 解析成功返回余额记录，失败返回 None
+    """
+    logger = get_logger()
+
+    if not HAS_PDFPLUMBER:
+        logger.warning('未安装 pdfplumber 库，无法解析PDF文件。请运行: pip install pdfplumber')
+        return None
+
+    if not os.path.exists(pdf_path):
+        logger.error('PDF文件不存在: %s', pdf_path)
+        return None
+
+    try:
+        full_text = ''
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ''
+                full_text += text + '\n'
+
+        if not full_text.strip():
+            logger.warning('PDF文件 %s 未提取到文本内容', pdf_path)
+            return None
+
+        account = _parse_account_from_text(full_text)
+        if not account:
+            logger.warning('未从PDF %s 中解析到银行账号', pdf_path)
+            return None
+
+        balance_patterns = [
+            r'期末余额[：:]\s*([^\n]+)',
+            r'余额[：:]\s*([^\n]+)',
+            r'可用余额[：:]\s*([^\n]+)',
+            r'账户余额[：:]\s*([^\n]+)',
+            r'Closing\s*Balance[：:]\s*([^\n]+)',
+            r'Ending\s*Balance[：:]\s*([^\n]+)',
+            r'Balance[：:]\s*([^\n]+)',
+        ]
+
+        statement_balance = None
+        for pattern in balance_patterns:
+            match = re.search(pattern, full_text, re.IGNORECASE)
+            if match:
+                statement_balance = _parse_amount_from_text(match.group(1))
+                if statement_balance is not None:
+                    break
+
+        if statement_balance is None:
+            lines = full_text.split('\n')
+            for line in reversed(lines[-50:]):
+                if any(keyword in line for keyword in ['余额', 'Balance', 'balance']):
+                    statement_balance = _parse_amount_from_text(line)
+                    if statement_balance is not None:
+                        break
+
+        if statement_balance is None:
+            logger.warning('未从PDF %s 中解析到期末余额', pdf_path)
+            return None
+
+        statement_date = _parse_date_from_text(full_text)
+
+        bank_name = ''
+        bank_patterns = [
+            r'^(.+?)银行',
+            r'(.+?)银行股份有限公司',
+            r'^(.+?)(?:BANK|Bank)',
+        ]
+        for pattern in bank_patterns:
+            match = re.search(pattern, full_text)
+            if match:
+                bank_name = match.group(1).strip()
+                if '银行' not in bank_name:
+                    bank_name += '银行'
+                break
+
+        record = BankStatementBalance(
+            bank_account=account,
+            bank_name=bank_name,
+            statement_balance=statement_balance,
+            statement_date=statement_date,
+            source_type='pdf',
+            source_file=os.path.basename(pdf_path),
+            extracted_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        )
+
+        logger.info('PDF解析成功: 账号 %s, 余额 %.2f, 日期 %s',
+                    account, statement_balance, statement_date)
+        return record
+
+    except Exception as e:
+        logger.error('解析PDF文件失败 %s: %s', pdf_path, e, exc_info=True)
+        return None
+
+
+def parse_bank_statement_image(image_path: str) -> Optional[BankStatementBalance]:
+    """
+    从银行余额截图中通过OCR提取账号和期末余额。
+
+    Args:
+        image_path: 图片文件路径
+
+    Returns:
+        Optional[BankStatementBalance]: 解析成功返回余额记录，失败返回 None
+    """
+    logger = get_logger()
+
+    if not HAS_PYTESSERACT:
+        logger.warning('未安装 pytesseract 和 PIL 库，无法进行OCR识别。'
+                      '请运行: pip install pytesseract pillow')
+        return None
+
+    if not os.path.exists(image_path):
+        logger.error('图片文件不存在: %s', image_path)
+        return None
+
+    try:
+        image = Image.open(image_path)
+
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+
+        ocr_text = pytesseract.image_to_string(image, lang='chi_sim+eng')
+
+        if not ocr_text.strip():
+            logger.warning('图片 %s OCR识别未提取到文本', image_path)
+            return None
+
+        account = _parse_account_from_text(ocr_text)
+        if not account:
+            logger.warning('未从图片 %s OCR结果中解析到银行账号', image_path)
+            return None
+
+        balance_keywords = ['期末余额', '余额', '可用余额', '账户余额', 'Balance', 'balance']
+        statement_balance = None
+
+        lines = ocr_text.split('\n')
+        for line in lines:
+            if any(keyword in line for keyword in balance_keywords):
+                statement_balance = _parse_amount_from_text(line)
+                if statement_balance is not None:
+                    break
+
+        if statement_balance is None:
+            for line in reversed(lines):
+                statement_balance = _parse_amount_from_text(line)
+                if statement_balance is not None and abs(statement_balance) >= 1:
+                    break
+
+        if statement_balance is None:
+            logger.warning('未从图片 %s OCR结果中解析到期末余额', image_path)
+            return None
+
+        statement_date = _parse_date_from_text(ocr_text)
+
+        bank_name = ''
+        for line in lines[:10]:
+            if '银行' in line:
+                match = re.search(r'(.+?银行)', line)
+                if match:
+                    bank_name = match.group(1).strip()
+                    break
+
+        record = BankStatementBalance(
+            bank_account=account,
+            bank_name=bank_name,
+            statement_balance=statement_balance,
+            statement_date=statement_date,
+            source_type='image',
+            source_file=os.path.basename(image_path),
+            extracted_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        )
+
+        logger.info('图片OCR解析成功: 账号 %s, 余额 %.2f, 日期 %s',
+                    account, statement_balance, statement_date)
+        return record
+
+    except Exception as e:
+        logger.error('解析图片文件失败 %s: %s', image_path, e, exc_info=True)
+        return None
+
+
+def manual_input_balance(account: str, balance: float,
+                         bank_name: str = '', subject: str = '',
+                         statement_date: Optional[str] = None) -> BankStatementBalance:
+    """
+    手动输入银行对账单余额。
+
+    Args:
+        account: 银行账号
+        balance: 期末余额
+        bank_name: 银行名称
+        subject: 主体名称
+        statement_date: 对账单日期
+
+    Returns:
+        BankStatementBalance: 手动输入的余额记录
+    """
+    return BankStatementBalance(
+        bank_account=account,
+        bank_name=bank_name,
+        subject=subject,
+        statement_balance=float(balance),
+        statement_date=statement_date,
+        source_type='manual',
+        source_file='manual_input',
+        extracted_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    )
+
+
+def reconcile_balances(total_balances: Dict[str, AccountEndBalance],
+                       statement_balances: Dict[str, BankStatementBalance],
+                       tolerance: float = 0.01) -> BalanceReconciliationResult:
+    """
+    比对总表期末余额与银行对账单余额。
+
+    比对逻辑：
+    1. 按账号匹配总表余额和对账单余额
+    2. 计算差异金额
+    3. 根据容差判断是否一致
+    4. 生成差异说明
+
+    Args:
+        total_balances: 总表期末余额字典（账号 -> AccountEndBalance）
+        statement_balances: 银行对账单余额字典（账号 -> BankStatementBalance）
+        tolerance: 容差，默认0.01元
+
+    Returns:
+        BalanceReconciliationResult: 比对结果
+    """
+    logger = get_logger()
+    result = BalanceReconciliationResult()
+
+    all_accounts = set(total_balances.keys()) | set(statement_balances.keys())
+    result.total_accounts = len(all_accounts)
+
+    if not all_accounts:
+        logger.warning('无账号可比对')
+        result.check_summary = {'status': '无数据'}
+        return result
+
+    records: List[BalanceReconciliationRecord] = []
+
+    for account in sorted(all_accounts):
+        total_info = total_balances.get(account)
+        statement_info = statement_balances.get(account)
+
+        if total_info is None and statement_info is None:
+            continue
+
+        record = BalanceReconciliationRecord(
+            bank_account=account,
+        )
+
+        if total_info is not None:
+            record.bank_name = total_info.bank_name
+            record.subject = total_info.subject
+            record.total_balance = total_info.end_balance
+            record.total_end_date = total_info.end_date
+
+        if statement_info is not None:
+            if not record.bank_name:
+                record.bank_name = statement_info.bank_name
+            if not record.subject:
+                record.subject = statement_info.subject
+            record.statement_balance = statement_info.statement_balance
+            record.statement_date = statement_info.statement_date
+            record.source_file = statement_info.source_file
+
+        if total_info is None:
+            record.status = 'missing_total'
+            record.diff_note = '总表中无此账号记录，无法比对'
+            result.missing_total += 1
+        elif statement_info is None:
+            record.status = 'missing_statement'
+            record.diff_note = '缺少该账号的银行对账单，请导入后重新比对'
+            result.missing_statement += 1
+        else:
+            record.diff_amount = round(record.total_balance - record.statement_balance, 2)
+            result.total_diff_amount += abs(record.diff_amount)
+
+            if abs(record.diff_amount) <= tolerance:
+                record.status = 'matched'
+                record.diff_note = '余额一致，核对通过'
+                result.matched_accounts += 1
+            else:
+                record.status = 'diff'
+                result.diff_accounts += 1
+
+                diff_notes = []
+                diff_notes.append(f'总表余额: {record.total_balance:,.2f} 元')
+                diff_notes.append(f'对账单余额: {record.statement_balance:,.2f} 元')
+                diff_notes.append(f'差异金额: {record.diff_amount:,.2f} 元')
+
+                if record.total_end_date and record.statement_date:
+                    if record.total_end_date != record.statement_date:
+                        diff_notes.append(f'⚠️  日期不一致: 总表日期 {record.total_end_date}，对账单日期 {record.statement_date}')
+
+                if abs(record.diff_amount) > 10000:
+                    diff_notes.append('⚠️  差异金额较大，建议逐笔核对交易明细')
+                elif abs(record.diff_amount) > 1000:
+                    diff_notes.append('⚠️  差异金额中等，建议检查是否有未达账项')
+
+                record.diff_note = '；'.join(diff_notes)
+
+        records.append(record)
+
+    result.records = records
+    result.total_diff_amount = round(result.total_diff_amount, 2)
+
+    result.check_summary = {
+        'total_accounts': result.total_accounts,
+        'matched_accounts': result.matched_accounts,
+        'diff_accounts': result.diff_accounts,
+        'missing_statement': result.missing_statement,
+        'missing_total': result.missing_total,
+        'total_diff_amount': result.total_diff_amount,
+        'match_rate': f'{(result.matched_accounts / result.total_accounts * 100):.1f}%' if result.total_accounts > 0 else '0%',
+        'tolerance': tolerance,
+    }
+
+    logger.info('余额比对完成: 总账号 %d, 一致 %d, 差异 %d, 缺对账单 %d, 缺总表 %d, 累计差异 %s 元',
+                result.total_accounts, result.matched_accounts, result.diff_accounts,
+                result.missing_statement, result.missing_total, f'{result.total_diff_amount:.2f}')
+
+    return result
+
+
+def export_balance_reconciliation_result(recon_result: BalanceReconciliationResult,
+                                         output_path: str,
+                                         source_info: Optional[Dict[str, Any]] = None) -> str:
+    """
+    导出资余额核对结果为 Excel 文件。
+
+    输出的 Sheet 包括：
+    1. 核对总览 - 整体统计信息
+    2. 比对明细 - 所有账号的比对详情
+    3. 差异账号清单 - 存在余额差异的账号
+    4. 待完善清单 - 缺少对账单或总表记录的账号
+
+    Args:
+        recon_result: 比对结果
+        output_path: 输出文件路径
+        source_info: 数据源信息
+
+    Returns:
+        str: 输出文件路径
+    """
+    logger = get_logger()
+
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            overview_data = []
+            overview_data.append({'核对项': '核对账号总数', '数值': recon_result.total_accounts})
+            overview_data.append({'核对项': '余额一致账号数', '数值': recon_result.matched_accounts})
+            overview_data.append({'核对项': '余额差异账号数', '数值': recon_result.diff_accounts})
+            overview_data.append({'核对项': '缺少银行对账单账号数', '数值': recon_result.missing_statement})
+            overview_data.append({'核对项': '总表无记录账号数', '数值': recon_result.missing_total})
+            overview_data.append({'核对项': '累计差异金额(元)', '数值': recon_result.total_diff_amount})
+            overview_data.append({'核对项': '核对一致率', '数值': recon_result.check_summary.get('match_rate', '0%')})
+            overview_data.append({'核对项': '容差(元)', '数值': recon_result.check_summary.get('tolerance', 0.01)})
+
+            if source_info:
+                for key, value in source_info.items():
+                    overview_data.append({'核对项': str(key), '数值': str(value)})
+
+            overview_data.append({'核对项': '生成时间', '数值': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+
+            overview_df = pd.DataFrame(overview_data)
+            overview_df.to_excel(writer, sheet_name='核对总览', index=False)
+
+            detail_data = []
+            for idx, record in enumerate(recon_result.records, 1):
+                status_text = {
+                    'matched': '✅ 一致',
+                    'diff': '❌ 差异',
+                    'missing_statement': '⚠️  缺对账单',
+                    'missing_total': '⚠️  缺总表',
+                    'pending': '待处理',
+                }.get(record.status, record.status)
+
+                detail_data.append({
+                    '序号': idx,
+                    '主体': record.subject,
+                    '银行': record.bank_name,
+                    '银行账号': record.bank_account,
+                    '总表期末余额(元)': record.total_balance,
+                    '银行对账单余额(元)': record.statement_balance,
+                    '差异金额(元)': record.diff_amount,
+                    '比对状态': status_text,
+                    '总表期末日期': record.total_end_date or '',
+                    '对账单日期': record.statement_date or '',
+                    '来源文件': record.source_file,
+                    '差异说明': record.diff_note,
+                })
+
+            detail_df = pd.DataFrame(detail_data)
+            detail_df.to_excel(writer, sheet_name='比对明细', index=False)
+
+            diff_records = [r for r in recon_result.records if r.status == 'diff']
+            if diff_records:
+                diff_data = []
+                for idx, record in enumerate(diff_records, 1):
+                    diff_data.append({
+                        '序号': idx,
+                        '主体': record.subject,
+                        '银行': record.bank_name,
+                        '银行账号': record.bank_account,
+                        '总表余额(元)': record.total_balance,
+                        '对账单余额(元)': record.statement_balance,
+                        '差异金额(元)': record.diff_amount,
+                        '总表日期': record.total_end_date or '',
+                        '对账单日期': record.statement_date or '',
+                        '差异说明': record.diff_note,
+                    })
+                diff_df = pd.DataFrame(diff_data)
+                diff_df.to_excel(writer, sheet_name='差异账号清单', index=False)
+
+            pending_records = [r for r in recon_result.records
+                             if r.status in ('missing_statement', 'missing_total')]
+            if pending_records:
+                pending_data = []
+                for idx, record in enumerate(pending_records, 1):
+                    pending_type = '缺少银行对账单' if record.status == 'missing_statement' else '总表无此账号'
+                    pending_data.append({
+                        '序号': idx,
+                        '主体': record.subject,
+                        '银行': record.bank_name,
+                        '银行账号': record.bank_account,
+                        '问题类型': pending_type,
+                        '总表余额(元)': record.total_balance,
+                        '对账单余额(元)': record.statement_balance,
+                        '说明': record.diff_note,
+                    })
+                pending_df = pd.DataFrame(pending_data)
+                pending_df.to_excel(writer, sheet_name='待完善清单', index=False)
+
+            for sheet_name in writer.sheets:
+                ws = writer.sheets[sheet_name]
+                df = None
+                if sheet_name == '核对总览':
+                    df = overview_df
+                elif sheet_name == '比对明细':
+                    df = detail_df
+                elif sheet_name == '差异账号清单':
+                    df = diff_df if diff_records else None
+                elif sheet_name == '待完善清单':
+                    df = pending_df if pending_records else None
+
+                if df is not None and len(df) > 0:
+                    amount_cols = set()
+                    count_cols = set()
+                    for col_idx, col_name in enumerate(df.columns, 1):
+                        col_letter = openpyxl.utils.get_column_letter(col_idx)
+                        col_name_str = str(col_name)
+                        if '金额' in col_name_str or '余额' in col_name_str:
+                            amount_cols.add(col_letter)
+                        elif '序号' in col_name_str or '数' in col_name_str:
+                            count_cols.add(col_letter)
+
+                        max_len = max(
+                            len(col_name_str),
+                            max((len(str(v)) for v in df.iloc[:, col_idx - 1].astype(str)), default=0)
+                        )
+                        ws.column_dimensions[col_letter].width = min(max_len + 4, 50)
+
+                    for row in ws.iter_rows(min_row=2):
+                        for cell in row:
+                            col_letter = cell.column_letter
+                            if col_letter in amount_cols and isinstance(cell.value, (int, float)):
+                                cell.number_format = '#,##0.00'
+                            elif col_letter in count_cols and isinstance(cell.value, int):
+                                cell.number_format = '#,##0'
+
+        logger.info('期末余额与银行对账单核对报告已导出: %s', output_path)
+        return output_path
+
+    except Exception as e:
+        logger.error('导出余额核对报告失败: %s', e, exc_info=True)
+        raise
+
+
+def generate_balance_reconciliation_from_total(total_input,
+                                               statement_files: Optional[List[str]] = None,
+                                               statement_balances: Optional[Dict[str, BankStatementBalance]] = None,
+                                               output_dir: Optional[str] = None,
+                                               tolerance: float = 0.01) -> Optional[str]:
+    """
+    从总表文件或交易记录生成期末余额与银行对账单核对报告。
+
+    Args:
+        total_input: 银行流水总表文件路径（str）或交易记录列表（List[Dict]）
+        statement_files: 银行对账单文件列表（PDF或图片）
+        statement_balances: 手动输入的银行对账单余额字典
+        output_dir: 输出目录
+        tolerance: 容差
+
+    Returns:
+        Optional[str]: 生成的报告文件路径，失败返回 None
+    """
+    logger = get_logger()
+
+    total_path = None
+    if isinstance(total_input, str):
+        total_path = total_input
+        records = load_total_table(total_path)
+    else:
+        records = total_input
+
+    if not records:
+        if total_path:
+            logger.warning('总表无数据: %s', total_path)
+        else:
+            logger.warning('交易记录为空')
+        return None
+
+    total_balances = extract_end_balances_from_total(records)
+    if not total_balances:
+        logger.warning('未从总表提取到任何账号的期末余额')
+        return None
+
+    all_statement_balances: Dict[str, BankStatementBalance] = {}
+
+    if statement_balances:
+        all_statement_balances.update(statement_balances)
+
+    if statement_files:
+        for file_path in statement_files:
+            record = None
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext == '.pdf':
+                record = parse_bank_statement_pdf(file_path)
+            elif ext in ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'):
+                record = parse_bank_statement_image(file_path)
+            else:
+                logger.warning('不支持的文件类型: %s', file_path)
+                continue
+
+            if record:
+                account_key = _account_key(record.bank_account)
+                if account_key in all_statement_balances:
+                    logger.warning('账号 %s 已有对账单记录，将覆盖', record.bank_account)
+                all_statement_balances[account_key] = record
+
+    normalized_total_balances: Dict[str, AccountEndBalance] = {}
+    for account, balance_info in total_balances.items():
+        key = _account_key(account)
+        normalized_total_balances[key] = balance_info
+
+    recon_result = reconcile_balances(
+        normalized_total_balances,
+        all_statement_balances,
+        tolerance=tolerance
+    )
+
+    if output_dir is None:
+        output_dir = os.path.dirname(total_path) if total_path else get_script_dir()
+
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_path = os.path.join(output_dir, f'期末余额与银行对账单核对报告_{timestamp}.xlsx')
+
+    source_info = {
+        '总表文件': os.path.basename(total_path) if total_path else '内存数据',
+        '总表记录数': len(records),
+        '总表账号数': len(total_balances),
+        '对账单文件数': len(statement_files or []),
+        '手动输入账号数': len(statement_balances or {}),
+        '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    return export_balance_reconciliation_result(recon_result, output_path, source_info)
+
+
+def _scan_statement_files(folder: str) -> List[str]:
+    """
+    扫描文件夹中的银行对账单文件（PDF和图片）。
+
+    Args:
+        folder: 文件夹路径
+
+    Returns:
+        List[str]: 对账单文件路径列表
+    """
+    logger = get_logger()
+    statement_files = []
+
+    if not os.path.exists(folder):
+        return statement_files
+
+    supported_ext = ('.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')
+
+    for root, dirs, files in os.walk(folder):
+        for f in files:
+            if f.lower().endswith(supported_ext):
+                full_path = os.path.join(root, f)
+                statement_files.append(full_path)
+                logger.debug('发现对账单文件: %s', full_path)
+
+    logger.info('共扫描到 %d 个对账单文件', len(statement_files))
+    return statement_files
+
+
+def run_balance_reconciliation_flow(script_dir):
+    """期末余额与银行对账单核对 CLI 流程"""
+    logger = get_logger()
+    logger.info('========== 期末余额与银行对账单核对开始 ==========')
+
+    print('\n' + '=' * 70)
+    print('期末余额与银行对账单核对 - 导入官方对账单，与总表按账号比对')
+    print('=' * 70)
+
+    total_path = ask_file('请选择【银行流水总表】文件')
+    if not total_path:
+        show_info('提示', '未选择总表文件，返回。')
+        return
+    logger.info('用户选择总表文件: %s', total_path)
+
+    records = load_total_table(total_path)
+    if not records:
+        show_warning('错误', '总表文件无数据或读取失败。')
+        return
+
+    total_balances = extract_end_balances_from_total(records)
+    if not total_balances:
+        show_warning('错误', '未从总表提取到任何账号的期末余额。')
+        return
+
+    print(f'\n从总表提取到 {len(total_balances)} 个账号的期末余额：')
+    for i, (account, info) in enumerate(sorted(total_balances.items()), 1):
+        print(f'  {i:2d}. {info.subject or "未知主体"} - {info.bank_name or "未知银行"} '
+              f'{account}: {info.end_balance:,.2f} 元 (日期: {info.end_date or "未知"})')
+
+    print('\n' + '=' * 70)
+    print('请选择银行对账单导入方式：')
+    print('  1) 从文件夹批量导入（PDF/截图）')
+    print('  2) 选择单个文件导入（PDF/截图）')
+    print('  3) 手动输入对账单余额')
+    print('  4) 混合模式（批量导入 + 手动补充）')
+    print('  0) 返回主菜单')
+
+    choice = input('\n请输入选项（默认 1）: ').strip() or '1'
+
+    if choice == '0':
+        return
+
+    statement_balances: Dict[str, BankStatementBalance] = {}
+    statement_files: List[str] = []
+
+    if choice in ('1', '4'):
+        print('\n请选择包含银行对账单的文件夹（PDF或截图）：')
+        folder = ask_directory()
+        if folder:
+            statement_files = _scan_statement_files(folder)
+            print(f'\n扫描到 {len(statement_files)} 个对账单文件')
+            for f in statement_files:
+                print(f'  - {os.path.basename(f)}')
+
+            if not HAS_PDFPLUMBER:
+                print('\n⚠️  未安装 pdfplumber，无法解析PDF文件。')
+                print('   请运行: pip install pdfplumber')
+
+            if not HAS_PYTESSERACT:
+                print('\n⚠️  未安装 pytesseract，无法进行图片OCR。')
+                print('   请运行: pip install pytesseract pillow')
+
+    if choice in ('2', '4'):
+        print('\n请选择对账单文件（PDF或截图）：')
+        if HAS_TKINTER:
+            root = tk.Tk()
+            root.withdraw()
+            files = filedialog.askopenfilenames(
+                title='选择银行对账单文件',
+                filetypes=[
+                    ('PDF和图片文件', '*.pdf *.png *.jpg *.jpeg *.bmp *.tiff *.webp'),
+                    ('PDF文件', '*.pdf'),
+                    ('图片文件', '*.png *.jpg *.jpeg *.bmp *.tiff *.webp'),
+                    ('所有文件', '*.*'),
+                ]
+            )
+            root.destroy()
+            for f in files:
+                if f not in statement_files:
+                    statement_files.append(f)
+        else:
+            while True:
+                f = cli_askfile('请输入对账单文件路径（直接回车结束）: ')
+                if not f:
+                    break
+                if f not in statement_files:
+                    statement_files.append(f)
+
+        if statement_files:
+            print(f'\n共选择 {len(statement_files)} 个文件')
+
+    if choice in ('3', '4'):
+        print('\n=== 手动输入银行对账单余额 ===')
+        print('（直接回车跳过输入）')
+        while True:
+            account = input('\n请输入银行账号: ').strip()
+            if not account:
+                break
+
+            balance_input = input('请输入期末余额: ').strip()
+            if not balance_input:
+                continue
+
+            try:
+                balance = float(balance_input.replace(',', ''))
+            except ValueError:
+                print('⚠️  金额格式无效，请重新输入')
+                continue
+
+            bank_name = input('请输入银行名称（可选）: ').strip()
+            subject = input('请输入主体名称（可选）: ').strip()
+            statement_date = input('请输入对账单日期 YYYY-MM-DD（可选）: ').strip() or None
+
+            record = manual_input_balance(
+                account=account,
+                balance=balance,
+                bank_name=bank_name,
+                subject=subject,
+                statement_date=statement_date,
+            )
+            key = _account_key(account)
+            statement_balances[key] = record
+            print(f'✅ 已录入: {account} - 余额 {balance:,.2f} 元')
+
+            more = input('\n是否继续录入？(y/N): ').strip().lower()
+            if more != 'y':
+                break
+
+    if statement_files:
+        print(f'\n开始解析 {len(statement_files)} 个对账单文件...')
+        for i, file_path in enumerate(statement_files, 1):
+            print(f'  [{i}/{len(statement_files)}] 正在解析: {os.path.basename(file_path)}')
+            ext = os.path.splitext(file_path)[1].lower()
+            record = None
+
+            if ext == '.pdf':
+                record = parse_bank_statement_pdf(file_path)
+            elif ext in ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'):
+                record = parse_bank_statement_image(file_path)
+
+            if record:
+                key = _account_key(record.bank_account)
+                if key in statement_balances:
+                    print(f'    ⚠️  账号 {record.bank_account} 已存在，将覆盖')
+                statement_balances[key] = record
+                print(f'    ✅ 解析成功: 账号 {record.bank_account}, 余额 {record.statement_balance:,.2f} 元')
+            else:
+                print(f'    ❌ 解析失败，请尝试手动录入')
+
+    if not statement_balances:
+        print('\n⚠️  未导入任何银行对账单余额，无法进行比对。')
+        confirm = input('是否直接导出包含"待完善清单"的报告？(y/N): ').strip().lower()
+        if confirm != 'y':
+            return
+
+    print(f'\n共导入 {len(statement_balances)} 个账号的银行对账单余额')
+
+    tolerance_input = input('\n请输入容差（元，直接回车默认 0.01）: ').strip()
+    tolerance = 0.01
+    if tolerance_input:
+        try:
+            tolerance = float(tolerance_input)
+        except ValueError:
+            print('输入无效，使用默认容差 0.01 元')
+            tolerance = 0.01
+
+    print(f'\n开始比对，容差: {tolerance} 元...')
+
+    normalized_total_balances: Dict[str, AccountEndBalance] = {}
+    for account, balance_info in total_balances.items():
+        key = _account_key(account)
+        normalized_total_balances[key] = balance_info
+
+    recon_result = reconcile_balances(
+        normalized_total_balances,
+        statement_balances,
+        tolerance=tolerance
+    )
+
+    summary = recon_result.check_summary
+
+    print('\n' + '=' * 70)
+    print('比对结果总览')
+    print('=' * 70)
+    print(f'  核对账号总数:   {summary["total_accounts"]:,}')
+    print(f'  余额一致账号:   {summary["matched_accounts"]:,}')
+    print(f'  余额差异账号:   {summary["diff_accounts"]:,}')
+    print(f'  缺少对账单:     {summary["missing_statement"]:,}')
+    print(f'  总表无记录:     {summary["missing_total"]:,}')
+    print(f'  核对一致率:     {summary["match_rate"]}')
+    print(f'  累计差异金额:   {summary["total_diff_amount"]:,.2f} 元')
+
+    if recon_result.diff_accounts > 0:
+        print(f'\n  ⚠️  发现 {recon_result.diff_accounts} 个账号余额存在差异')
+        diff_records = [r for r in recon_result.records if r.status == 'diff']
+        for record in diff_records[:10]:
+            print(f'    - {record.bank_account} ({record.subject}): '
+                  f'总表 {record.total_balance:,.2f} vs 对账单 {record.statement_balance:,.2f}, '
+                  f'差异 {record.diff_amount:,.2f} 元')
+        if len(diff_records) > 10:
+            print(f'    ... 还有 {len(diff_records) - 10} 个账号，详见导出文件')
+
+    if recon_result.missing_statement > 0:
+        print(f'\n  ⚠️  {recon_result.missing_statement} 个账号缺少银行对账单')
+        missing_records = [r for r in recon_result.records if r.status == 'missing_statement']
+        for record in missing_records[:10]:
+            print(f'    - {record.bank_account} ({record.subject} - {record.bank_name}): '
+                  f'总表余额 {record.total_balance:,.2f} 元')
+        if len(missing_records) > 10:
+            print(f'    ... 还有 {len(missing_records) - 10} 个账号，详见导出文件')
+
+    if recon_result.matched_accounts == recon_result.total_accounts and recon_result.total_accounts > 0:
+        print(f'\n  ✅ 太棒了！所有账号余额核对完全一致！')
+
+    output_dir = input('\n请输入输出目录（直接回车默认当前目录）: ').strip()
+    if not output_dir:
+        output_dir = script_dir
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_path = os.path.join(output_dir, f'期末余额与银行对账单核对报告_{timestamp}.xlsx')
+
+    source_info = {
+        '总表文件': os.path.basename(total_path),
+        '总表记录数': len(records),
+        '总表账号数': len(total_balances),
+        '对账单文件数': len(statement_files),
+        '手动输入账号数': sum(1 for r in statement_balances.values() if r.source_type == 'manual'),
+        'PDF解析账号数': sum(1 for r in statement_balances.values() if r.source_type == 'pdf'),
+        'OCR识别账号数': sum(1 for r in statement_balances.values() if r.source_type == 'image'),
+        '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+    try:
+        export_balance_reconciliation_result(recon_result, output_path, source_info)
+        msg = f'核对报告已导出！\n\n输出文件：{output_path}'
+        show_info('导出成功', msg)
+        logger.info('期末余额与银行对账单核对报告导出完成: %s', output_path)
+    except Exception as e:
+        msg = f'导出失败：{e}'
+        show_warning('导出失败', msg)
+        logger.error('期末余额与银行对账单核对报告导出失败: %s', e, exc_info=True)
+
+    logger.info('========== 期末余额与银行对账单核对结束 ==========')
 
 
 if __name__ == '__main__':

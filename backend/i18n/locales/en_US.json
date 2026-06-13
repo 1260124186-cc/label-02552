@@ -42,7 +42,8 @@
     "option_balance_check": "  11)Balance Check: Verify balance continuity, detect gaps",
     "option_duplicate_check": "  12)Duplicate Check: Cross-file dedup and duplicate marking",
     "option_interest_fee_check": "  13)Interest&Fee Check: Filter interest/fee transactions, rate comparison and anomaly detection",
-    "enter_choice": "Enter option (1-13, default 1): ",
+    "option_balance_reconciliation": "  14)Balance Reconciliation: Import bank statement balances, compare with summary and generate variance notes",
+    "enter_choice": "Enter option (1-14, default 1): ",
     "select_incremental_mode": "Please select run mode:",
     "option_incremental": "  1) Incremental (Recommended): Detect history, append new data only",
     "option_full": "  2) Full Overwrite: Regenerate summary, overwrite history",
@@ -165,6 +166,7 @@
     "balance_check_generated": "Balance continuity check report auto-generated: {path}",
     "duplicate_check_generated": "Duplicate transaction check report auto-generated: {path}",
     "interest_fee_check_generated": "Interest & Fee check report auto-generated: {path}",
+    "balance_reconciliation_generated": "Balance reconciliation report auto-generated: {path}",
     "accounting_period_generated": "Accounting period summary auto-generated: {path}",
     "inspection_report_generated": "Inspection report generated: {path}",
     "report_generated": "Report generated!",
@@ -429,7 +431,10 @@
     "batch_history_desc": "History and version rollback",
     "preset_name": "Preset Management",
     "preset": "Preset Management",
-    "preset_desc": "Manage task presets"
+    "preset_desc": "Manage task presets",
+    "balance_reconciliation_name": "Balance Reconciliation",
+    "balance_reconciliation": "Balance Reconciliation",
+    "balance_reconciliation_desc": "Import bank statements, reconcile balances with summary"
   },
   "diff": {
     "summary": "Diff Summary: {added} added, {removed} removed, {modified} modified",

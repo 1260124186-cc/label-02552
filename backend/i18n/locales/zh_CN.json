@@ -42,7 +42,8 @@
     "option_balance_check": "  11)余额连续性校验：逐笔核对余额连续性，识别断裂或跳变",
     "option_duplicate_check": "  12)重复交易检测：跨文件去重与疑似重复标记",
     "option_interest_fee_check": "  13)利息手续费核对：筛选利息手续费交易，费率对比与异常检测",
-    "enter_choice": "请输入选项（1-13，直接回车默认为 1）: ",
+    "option_balance_reconciliation": "  14)余额对账：导入银行对账单余额，与总表按账号比对并生成差异说明",
+    "enter_choice": "请输入选项（1-14，直接回车默认为 1）: ",
     "select_incremental_mode": "请选择运行模式：",
     "option_incremental": "  1) 增量合并（推荐）：检测历史记录，仅追加新增数据",
     "option_full": "  2) 全量覆盖：重新生成总表，覆盖历史数据",
@@ -165,6 +166,7 @@
     "balance_check_generated": "余额连续性校验报告已自动生成: {path}",
     "duplicate_check_generated": "重复交易检测报告已自动生成: {path}",
     "interest_fee_check_generated": "利息手续费核对报告已自动生成: {path}",
+    "balance_reconciliation_generated": "期末余额与银行对账单核对报告已自动生成: {path}",
     "accounting_period_generated": "会计期间总表已自动生成: {path}",
     "inspection_report_generated": "检验报告已生成: {path}",
     "report_generated": "报告已生成！",
@@ -429,7 +431,10 @@
     "batch_history_desc": "历史批次与版本回溯",
     "preset_name": "预设管理",
     "preset": "预设管理",
-    "preset_desc": "管理任务配置预设"
+    "preset_desc": "管理任务配置预设",
+    "balance_reconciliation_name": "余额对账",
+    "balance_reconciliation": "余额对账",
+    "balance_reconciliation_desc": "导入银行对账单，与总表比对余额差异"
   },
   "diff": {
     "summary": "变更汇总：新增 {added} 条，删除 {removed} 条，变更 {modified} 条",
