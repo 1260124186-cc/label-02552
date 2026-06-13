@@ -23,11 +23,18 @@
     "excel_files": "Excel Files",
     "all_files": "All Files",
     "select_language": "Select Language",
-    "language": "Language"
+    "language": "Language",
+    "recent_folders_title": "Recent Folders",
+    "recent_folders_subtitle": "Double-click to select quickly, or click Browse to choose a new folder",
+    "use_selected": "Use Selected",
+    "browse_other": "Browse Other",
+    "please_select_recent": "Please select a recent folder first"
   },
   "cli": {
-    "enter_folder_path": "Enter folder path: ",
+    "enter_folder_path": "Enter folder path or number: ",
     "enter_file_path": "Enter file path: ",
+    "recent_folders": "Recent folders:",
+    "select_recent_hint": "Enter a number to select quickly, or enter a new path",
     "select_mode": "Please select run mode:",
     "option_pipeline": "  1) Main: Process bank statement folder, output summary",
     "option_diff": "  2) Diff: Compare two summaries (add/delete/modify)",

@@ -23,11 +23,18 @@
     "excel_files": "Excel 文件",
     "all_files": "所有文件",
     "select_language": "选择语言",
-    "language": "语言"
+    "language": "语言",
+    "recent_folders_title": "最近使用的文件夹",
+    "recent_folders_subtitle": "双击快速选择，或点击浏览其他选择新文件夹",
+    "use_selected": "使用选中",
+    "browse_other": "浏览其他",
+    "please_select_recent": "请先选择一个最近使用的文件夹"
   },
   "cli": {
-    "enter_folder_path": "请输入文件夹路径: ",
+    "enter_folder_path": "请输入文件夹路径或序号: ",
     "enter_file_path": "请输入文件路径: ",
+    "recent_folders": "最近使用的文件夹：",
+    "select_recent_hint": "输入序号快速选择，或直接输入新路径",
     "select_mode": "请选择运行模式：",
     "option_pipeline": "  1) 主流程：处理银行流水文件夹，输出总表",
     "option_diff": "  2) 变更对比：对比两次总表的差异（新增/删除/变更）",

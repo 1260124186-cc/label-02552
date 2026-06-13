@@ -155,13 +155,87 @@ except (ImportError, ModuleNotFoundError):
     tk = None
 
 
-def cli_askdirectory(title=None):
-    """命令行模式下让用户输入文件夹路径"""
+# ──────────────────────────────────────────────
+# 最近使用文件夹历史记录
+# ──────────────────────────────────────────────
+
+RECENT_FOLDERS_FILENAME = 'recent_folders.json'
+MAX_RECENT_FOLDERS = 10
+
+
+def get_recent_folders_path(script_dir=None):
+    """获取最近文件夹历史记录文件路径"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    return os.path.join(script_dir, RECENT_FOLDERS_FILENAME)
+
+
+def load_recent_folders(script_dir=None):
+    """加载最近使用的文件夹列表"""
+    path = get_recent_folders_path(script_dir)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            folders = data.get('folders', [])
+            return [f for f in folders if os.path.isdir(f)]
+    except Exception:
+        return []
+
+
+def save_recent_folders(folders, script_dir=None):
+    """保存最近使用的文件夹列表"""
+    path = get_recent_folders_path(script_dir)
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'folders': folders[:MAX_RECENT_FOLDERS]}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger = get_logger()
+        logger.warning('保存最近文件夹历史失败: %s', e)
+
+
+def add_to_recent_folders(folder, script_dir=None):
+    """将文件夹添加到最近使用列表（去重，最新的在前）"""
+    if not folder or not os.path.isdir(folder):
+        return
+    folders = load_recent_folders(script_dir)
+    if folder in folders:
+        folders.remove(folder)
+    folders.insert(0, folder)
+    save_recent_folders(folders, script_dir)
+
+
+def get_last_used_folder(script_dir=None):
+    """获取最近使用的文件夹（第一个）"""
+    folders = load_recent_folders(script_dir)
+    return folders[0] if folders else None
+
+
+def cli_askdirectory(title=None, use_history=True):
+    """命令行模式下让用户输入文件夹路径，支持最近使用历史"""
     if title is None:
         title = t('gui.select_folder')
     print(f'\n{title}')
+
+    if use_history:
+        recent = load_recent_folders()
+        if recent:
+            print(t('cli.recent_folders'))
+            for i, folder in enumerate(recent[:MAX_RECENT_FOLDERS], 1):
+                print(f'  {i}) {folder}')
+            print(t('cli.select_recent_hint'))
+
     path = input(t('cli.enter_folder_path')).strip().strip('"').strip("'")
+
+    if use_history and path and path.isdigit():
+        idx = int(path) - 1
+        recent = load_recent_folders()
+        if 0 <= idx < len(recent):
+            path = recent[idx]
+
     if path and os.path.isdir(path):
+        add_to_recent_folders(path)
         return path
     return ''
 
@@ -187,17 +261,128 @@ def cli_askfile(title=None):
     return ''
 
 
-def gui_askdirectory(title=None):
-    """GUI 模式选择文件夹"""
+def gui_askdirectory(title=None, initialdir=None, use_history=True, show_recent_dialog=True):
+    """GUI 模式选择文件夹，支持最近使用历史
+
+    Args:
+        title: 对话框标题
+        initialdir: 初始打开目录，默认使用最近使用的文件夹
+        use_history: 是否使用历史记录
+        show_recent_dialog: 是否显示最近文件夹快速选择对话框
+    """
     if title is None:
         title = t('gui.select_folder')
+
+    if use_history and initialdir is None:
+        initialdir = get_last_used_folder()
+
+    if show_recent_dialog and use_history:
+        recent = load_recent_folders()
+        if recent:
+            folder = _gui_show_recent_folders_dialog(title, recent, initialdir)
+            if folder is not None:
+                if folder:
+                    add_to_recent_folders(folder)
+                return folder
+
     root = tk.Tk()
     root.withdraw()
-    folder = filedialog.askdirectory(title=title)
+    folder = filedialog.askdirectory(title=title, initialdir=initialdir or '')
     if not folder:
         messagebox.showinfo(t('gui.info'), t('gui.no_folder_selected'))
+    else:
+        if use_history:
+            add_to_recent_folders(folder)
     root.destroy()
     return folder
+
+
+def _gui_show_recent_folders_dialog(title, recent_folders, initialdir=None):
+    """显示最近使用文件夹快速选择对话框
+
+    Returns:
+        str: 选择的文件夹路径，空字符串表示取消，None 表示用户选择"浏览其他"
+    """
+    result = {'folder': None}
+
+    try:
+        root = tk.Tk()
+        root.title(title)
+        root.geometry('560x480')
+        root.resizable(False, False)
+
+        tk.Label(root, text=t('gui.recent_folders_title'),
+                 font=('Arial', 14, 'bold')).pack(pady=(15, 5))
+        tk.Label(root, text=t('gui.recent_folders_subtitle'),
+                 font=('Arial', 10), fg='#666').pack(pady=(0, 10))
+
+        list_frame = tk.Frame(root)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=5)
+
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        listbox = tk.Listbox(list_frame, font=('Arial', 11),
+                            yscrollcommand=scrollbar.set, activestyle='dotbox')
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        for folder in recent_folders:
+            display_name = os.path.basename(folder)
+            listbox.insert(tk.END, f'  {display_name}')
+            listbox.insert(tk.END, f'      {folder}')
+            listbox.insert(tk.END, '')
+
+        def on_select(event):
+            idx = listbox.curselection()
+            if idx:
+                folder_idx = idx[0] // 3
+                if folder_idx < len(recent_folders):
+                    result['folder'] = recent_folders[folder_idx]
+                    root.destroy()
+
+        listbox.bind('<Double-1>', on_select)
+
+        btn_frame = tk.Frame(root)
+        btn_frame.pack(fill=tk.X, padx=20, pady=15)
+
+        def select_from_list():
+            idx = listbox.curselection()
+            if not idx:
+                messagebox.showinfo(t('gui.info'), t('gui.please_select_recent'))
+                return
+            folder_idx = idx[0] // 3
+            if folder_idx < len(recent_folders):
+                result['folder'] = recent_folders[folder_idx]
+                root.destroy()
+
+        def browse_other():
+            root.destroy()
+            result['folder'] = None
+
+        def cancel():
+            result['folder'] = ''
+            root.destroy()
+
+        tk.Button(btn_frame, text=t('gui.use_selected'),
+                  width=12, command=select_from_list,
+                  bg='#4CAF50', fg='white', font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text=t('gui.browse_other'),
+                  width=12, command=browse_other,
+                  bg='#2196F3', fg='white', font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text=t('gui.cancel'),
+                  width=10, command=cancel,
+                  bg='#f44336', fg='white', font=('Arial', 10, 'bold')).pack(side=tk.RIGHT, padx=5)
+
+        root.protocol('WM_DELETE_WINDOW', cancel)
+        root.mainloop()
+
+        return result['folder']
+
+    except Exception as e:
+        logger = get_logger()
+        logger.warning('显示最近文件夹对话框失败: %s', e)
+        return None
 
 
 def gui_showinfo(title, message):
@@ -10919,7 +11104,7 @@ def gui_preset_manager(script_dir):
         if not preset:
             return
 
-        folder = filedialog.askdirectory(title='请选择银行流水文件夹')
+        folder = gui_askdirectory(title='请选择银行流水文件夹')
         if not folder:
             return
 
@@ -11025,7 +11210,7 @@ class PresetEditorDialog:
         tk.Entry(output_frame, textvariable=self.output_var, font=('Arial', 11)).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         def browse_output():
-            d = filedialog.askdirectory(title='选择输出目录')
+            d = gui_askdirectory(title='选择输出目录', show_recent_dialog=False)
             if d:
                 self.output_var.set(d)
 
