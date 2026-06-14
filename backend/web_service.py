@@ -438,6 +438,7 @@ def _run_pipeline_async(task: WebTask, cancel_event: threading.Event):
             'incremental_mode': result.incremental_mode,
             'output_folder': task_output_dir,
             'summary_table_path': result.output_path or '',
+            'pending_list_path': result.pending_list_path or '',
             'log_file_path': bankcheck.get_current_log_file() or bankcheck.find_latest_log_file_in_dir(bankcheck.get_log_dir(BACKEND_DIR), prefix='bankcheck') or '',
         }
         bm.finish_batch(batch_info.batch_id, result_data, status='success')

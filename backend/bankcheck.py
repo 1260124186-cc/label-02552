@@ -2633,6 +2633,7 @@ class ProcessingResult:
     accounting_period_path: Optional[str] = None
     perf_report_path: Optional[str] = None
     collab_template_path: Optional[str] = None
+    pending_list_path: Optional[str] = None
     lookup_missing: bool = False
     folder_empty: bool = False
     incremental_mode: bool = False
@@ -3551,6 +3552,14 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
     elif enable_encryption and dry_run:
         logger.info('[试运行] 跳过输出文件加密操作')
 
+    pending_list_path = None
+    if (unprocessed_files or error_files) and not dry_run:
+        pending_list_path = generate_pending_list_xlsx(
+            unprocessed_files, error_files, script_dir
+        )
+    elif (unprocessed_files or error_files) and dry_run:
+        logger.info('[试运行] 跳过待处理清单生成')
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -3566,6 +3575,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         accounting_period_path=accounting_period_path,
         perf_report_path=perf_report_path,
         collab_template_path=collab_template_path,
+        pending_list_path=pending_list_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),
@@ -3707,7 +3717,69 @@ def format_result_message(result):
         err_info = '\n  '.join(f'{os.path.basename(f)}: {e}' for f, e in result.error_files)
         msg += f'\n\n处理出错的文件（{len(result.error_files)} 个，已保留）：\n  {err_info}'
 
+    if result.pending_list_path:
+        msg += f'\n\n待处理清单：{result.pending_list_path}'
+        msg += '\n（请根据清单修正文件后重新导入）'
+    elif result.dry_run and (result.unprocessed_files or result.error_files):
+        msg += '\n\n待处理清单：(试运行未生成)'
+
     return msg
+
+
+def generate_pending_list_xlsx(unprocessed_files, error_files, script_dir,
+                                output_dir=None):
+    """
+    生成待处理清单.xlsx，列出无法识别和处理出错的文件。
+
+    清单包含三列：
+    - 文件路径：待处理文件的完整路径
+    - 识别结果：无法识别银行类型 / 处理出错
+    - 错误信息：具体的错误描述（无法识别的文件此项为空）
+
+    Args:
+        unprocessed_files: 无法识别银行类型的文件路径列表
+        error_files: 处理出错的文件列表，每个元素为 (文件路径, 错误信息) 元组
+        script_dir: 脚本目录，用于默认输出路径
+        output_dir: 可选的输出目录，不指定时使用 script_dir
+
+    Returns:
+        生成的待处理清单文件路径，如果没有待处理文件则返回 None
+    """
+    logger = get_logger()
+
+    if not unprocessed_files and not error_files:
+        logger.info('没有待处理的文件，无需生成待处理清单')
+        return None
+
+    rows = []
+    for filepath in unprocessed_files:
+        rows.append({
+            '文件路径': filepath,
+            '识别结果': '无法识别银行类型',
+            '错误信息': '',
+        })
+    for filepath, error_msg in error_files:
+        rows.append({
+            '文件路径': filepath,
+            '识别结果': '处理出错',
+            '错误信息': error_msg,
+        })
+
+    columns = ['文件路径', '识别结果', '错误信息']
+    df = pd.DataFrame(rows, columns=columns)
+
+    base_dir = output_dir or script_dir
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'待处理清单_{timestamp}.xlsx'
+    output_path = os.path.join(base_dir, filename)
+
+    try:
+        df.to_excel(output_path, index=False, engine='openpyxl')
+        logger.info('待处理清单已生成: %s（共 %d 条记录）', output_path, len(rows))
+        return output_path
+    except Exception as e:
+        logger.error('生成待处理清单失败: %s', e, exc_info=True)
+        return None
 
 
 def delete_processed_files(excel_files, keep_set):
@@ -3972,6 +4044,12 @@ def commit_pipeline_changes(result: ProcessingResult) -> ProcessingResult:
             logger.error('[提交] 输出文件加密失败: %s', e, exc_info=True)
     result.encryption_result = encryption_result
     result.encrypted_files = encrypted_files
+
+    if result.unprocessed_files or result.error_files:
+        pending_list_path = generate_pending_list_xlsx(
+            result.unprocessed_files, result.error_files, script_dir
+        )
+        result.pending_list_path = pending_list_path
 
     result.dry_run = False
     result.changes_committed = True
@@ -12279,6 +12357,14 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     elif enable_encryption and dry_run:
         logger.info('[试运行] 跳过输出文件加密操作')
 
+    pending_list_path = None
+    if (unprocessed_files or error_files) and not dry_run:
+        pending_list_path = generate_pending_list_xlsx(
+            unprocessed_files, error_files, script_dir, output_dir
+        )
+    elif (unprocessed_files or error_files) and dry_run:
+        logger.info('[试运行] 跳过待处理清单生成')
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -12291,6 +12377,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         duplicate_check_path=duplicate_check_path,
         interest_fee_check_path=interest_fee_check_path_opt,
         holiday_check_path=holiday_check_path_opt,
+        pending_list_path=pending_list_path,
         lookup_missing=lookup_missing,
         incremental_mode=actual_incremental,
         existing_record_count=len(existing_records),

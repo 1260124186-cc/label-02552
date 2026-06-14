@@ -289,6 +289,217 @@ class TestFormatResultMessage:
         assert '无法识别的文件' in msg
         assert '处理出错的文件' in msg
 
+    def test_pending_list_path_in_message(self):
+        result = bankcheck.ProcessingResult(
+            all_rows=[{'银行': '北京银行'}],
+            processed_files=['/path/a.xlsx'],
+            unprocessed_files=['/path/未知银行_流水.xlsx'],
+            error_files=[('/path/北京银行_坏.xlsx', 'parse error')],
+            output_path='/path/to/银行流水总表.xlsx',
+            pending_list_path='/path/to/待处理清单_20260614_120000.xlsx',
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '待处理清单：/path/to/待处理清单_20260614_120000.xlsx' in msg
+        assert '请根据清单修正文件后重新导入' in msg
+
+    def test_dry_run_pending_list_not_generated_in_message(self):
+        result = bankcheck.ProcessingResult(
+            dry_run=True,
+            all_rows=[{'银行': '北京银行'}],
+            processed_files=['/path/a.xlsx'],
+            unprocessed_files=['/path/未知银行_流水.xlsx'],
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '待处理清单：(试运行未生成)' in msg
+
+
+class TestGeneratePendingList:
+
+    def test_generate_pending_list_with_error_and_unprocessed(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        unprocessed = ['/tmp/流水/未知银行_流水.xlsx', '/tmp/流水/某某银行.xlsx']
+        errors = [('/tmp/流水/北京银行_坏.xlsx', 'File is corrupt'),
+                   ('/tmp/流水/东亚银行_损坏.xlsx', 'Sheet not found')]
+
+        output_path = bankcheck.generate_pending_list_xlsx(
+            unprocessed, errors, script_dir
+        )
+
+        assert output_path is not None
+        assert os.path.exists(output_path)
+        assert '待处理清单' in os.path.basename(output_path)
+        assert output_path.endswith('.xlsx')
+
+        df = pd.read_excel(output_path, engine='openpyxl')
+        assert list(df.columns) == ['文件路径', '识别结果', '错误信息']
+        assert len(df) == 4
+
+        paths = df['文件路径'].tolist()
+        assert '/tmp/流水/未知银行_流水.xlsx' in paths
+        assert '/tmp/流水/北京银行_坏.xlsx' in paths
+
+        unproc_rows = df[df['识别结果'] == '无法识别银行类型']
+        assert len(unproc_rows) == 2
+        error_info_list = unproc_rows['错误信息'].fillna('').tolist()
+        assert error_info_list == ['', '']
+
+        err_rows = df[df['识别结果'] == '处理出错']
+        assert len(err_rows) == 2
+        assert 'File is corrupt' in err_rows['错误信息'].tolist()
+        assert 'Sheet not found' in err_rows['错误信息'].tolist()
+
+    def test_generate_pending_list_no_files_returns_none(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        output_path = bankcheck.generate_pending_list_xlsx([], [], script_dir)
+        assert output_path is None
+
+    def test_generate_pending_list_only_unprocessed(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        unprocessed = ['/tmp/流水/未知银行_流水.xlsx']
+        output_path = bankcheck.generate_pending_list_xlsx(
+            unprocessed, [], script_dir
+        )
+
+        assert output_path is not None
+        df = pd.read_excel(output_path, engine='openpyxl')
+        assert len(df) == 1
+        assert df.iloc[0]['识别结果'] == '无法识别银行类型'
+        error_info = df.iloc[0]['错误信息']
+        assert error_info == '' or pd.isna(error_info)
+
+    def test_generate_pending_list_only_errors(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+
+        errors = [('/tmp/流水/北京银行_坏.xlsx', 'parse error')]
+        output_path = bankcheck.generate_pending_list_xlsx(
+            [], errors, script_dir
+        )
+
+        assert output_path is not None
+        df = pd.read_excel(output_path, engine='openpyxl')
+        assert len(df) == 1
+        assert df.iloc[0]['识别结果'] == '处理出错'
+        assert df.iloc[0]['错误信息'] == 'parse error'
+
+    def test_generate_pending_list_custom_output_dir(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        output_dir = os.path.join(tmp_dir, 'output')
+        os.makedirs(script_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
+
+        errors = [('/tmp/流水/北京银行_坏.xlsx', 'parse error')]
+        output_path = bankcheck.generate_pending_list_xlsx(
+            [], errors, script_dir, output_dir=output_dir
+        )
+
+        assert output_path is not None
+        assert os.path.dirname(output_path) == output_dir
+
+
+class TestRunPipelinePendingList:
+
+    def test_pipeline_with_error_files_generates_pending_list(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+
+        corrupt_path = os.path.join(source_folder, '北京银行_坏.xlsx')
+        with open(corrupt_path, 'wb') as f:
+            f.write(b'not a valid excel file')
+
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+
+        assert len(result.error_files) == 1
+        assert result.pending_list_path is not None
+        assert os.path.exists(result.pending_list_path)
+        assert '待处理清单' in os.path.basename(result.pending_list_path)
+
+        df = pd.read_excel(result.pending_list_path, engine='openpyxl')
+        assert len(df) == 1
+        assert df.iloc[0]['识别结果'] == '处理出错'
+        assert '北京银行_坏.xlsx' in df.iloc[0]['文件路径']
+
+    def test_pipeline_with_unprocessed_files_generates_pending_list(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws['A1'] = 'unknown'
+        wb.save(os.path.join(source_folder, '未知银行_流水.xlsx'))
+        wb.close()
+
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+
+        assert len(result.unprocessed_files) == 1
+        assert result.pending_list_path is not None
+        assert os.path.exists(result.pending_list_path)
+
+        df = pd.read_excel(result.pending_list_path, engine='openpyxl')
+        assert len(df) == 1
+        assert df.iloc[0]['识别结果'] == '无法识别银行类型'
+
+    def test_pipeline_with_mixed_files_generates_pending_list(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+
+        _create_beijing_bank_excel(os.path.join(source_folder, '北京银行_正常.xlsx'))
+        corrupt_path = os.path.join(source_folder, '北京银行_坏.xlsx')
+        with open(corrupt_path, 'wb') as f:
+            f.write(b'corrupt')
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws['A1'] = 'unknown'
+        wb.save(os.path.join(source_folder, '未知银行_流水.xlsx'))
+        wb.close()
+
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+
+        assert len(result.processed_files) == 1
+        assert len(result.error_files) == 1
+        assert len(result.unprocessed_files) == 1
+        assert result.pending_list_path is not None
+
+        df = pd.read_excel(result.pending_list_path, engine='openpyxl')
+        assert len(df) == 2
+        results = df['识别结果'].tolist()
+        assert '处理出错' in results
+        assert '无法识别银行类型' in results
+
+    def test_pipeline_no_errors_no_pending_list(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+
+        _create_beijing_bank_excel(os.path.join(source_folder, '北京银行_正常.xlsx'))
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+
+        assert len(result.processed_files) == 1
+        assert len(result.error_files) == 0
+        assert len(result.unprocessed_files) == 0
+        assert result.pending_list_path is None
+
 
 class TestDeleteProcessedFiles:
 
