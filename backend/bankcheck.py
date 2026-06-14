@@ -2669,6 +2669,8 @@ class ProcessingResult:
     pending_holiday_tag_summary: Dict[str, Any] = field(default_factory=dict)
     pending_internal_transfer_summary: Dict[str, Any] = field(default_factory=dict)
     pending_internal_transfer_result: Any = None
+    pending_keep_strategy: str = 'keep_unprocessed'
+    pending_archive_dir_name: str = '已处理归档'
     changes_committed: bool = False
 
 
@@ -2952,6 +2954,26 @@ def cli_ask_incremental_mode():
     return choice != '2'
 
 
+def cli_ask_keep_strategy():
+    """命令行模式下询问用户文件保留策略"""
+    print('\n请选择文件保留策略：')
+    strategies = [
+        ('keep_unprocessed', '1) 仅保留未处理文件（默认）：删除已处理成功的文件，保留错误与未识别文件'),
+        ('keep_all', '2) 保留所有文件：不删除或移动任何文件'),
+        ('delete_all', '3) 删除所有文件：无论处理状态，删除所有源文件'),
+        ('move_to_archive', '4) 归档已处理文件：将成功处理的文件移动到「已处理归档」子目录'),
+    ]
+    for _, desc in strategies:
+        print(f'  {desc}')
+    choice = input('请输入选项（直接回车默认为 1）: ').strip()
+    mapping = {'1': 'keep_unprocessed', '2': 'keep_all', '3': 'delete_all', '4': 'move_to_archive'}
+    if choice in mapping:
+        return mapping[choice]
+    if choice in [k for k, _ in strategies]:
+        return choice
+    return 'keep_unprocessed'
+
+
 def gui_ask_incremental_mode():
     """GUI 模式下询问用户是否启用增量合并"""
     root = tk.Tk()
@@ -2977,7 +2999,7 @@ else:
 def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                  enable_signature=False, signature_password=None, auto_generate_key=True,
                  enable_encryption=False, encryption_password=None, encryption_mode='excel_password',
-                 dry_run=False):
+                 dry_run=False, keep_strategy='keep_unprocessed', archive_dir_name='已处理归档'):
     logger = get_logger()
     if dry_run:
         logger.info('===== 试运行模式已启用（不执行删除与写盘操作）=====')
@@ -3112,7 +3134,10 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
     if dry_run:
         logger.info('[试运行] 跳过删除文件操作，待删除文件 %d 个', len(pending_deletion_files))
     else:
-        delete_processed_files(all_files, keep_set)
+        delete_processed_files(
+            all_files, processed_files, error_files, unprocessed_files,
+            strategy=keep_strategy, archive_dir_name=archive_dir_name
+        )
 
     output_path = None
     final_rows = []
@@ -3609,6 +3634,8 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         pending_holiday_tag_summary=_holiday_tag_summary,
         pending_internal_transfer_summary=_it_summary,
         pending_internal_transfer_result=_it_result,
+        pending_keep_strategy=keep_strategy,
+        pending_archive_dir_name=archive_dir_name,
     )
 
 
@@ -3782,13 +3809,95 @@ def generate_pending_list_xlsx(unprocessed_files, error_files, script_dir,
         return None
 
 
-def delete_processed_files(excel_files, keep_set):
+def delete_processed_files(excel_files, processed_files, error_files, unprocessed_files,
+                           strategy='keep_unprocessed', archive_dir_name='已处理归档'):
+    """
+    根据策略处理已处理成功的 Excel 文件。
+
+    策略说明:
+    - keep_unprocessed: 仅保留未处理/有错误的文件，删除已处理成功的文件（默认）
+    - keep_all: 保留所有文件，不做任何删除或移动
+    - delete_all: 删除所有文件（无论处理状态）
+    - move_to_archive: 将已处理成功的文件移动到归档子目录，保留未处理/有错误的文件
+
+    Args:
+        excel_files: 所有待处理的 Excel 文件列表
+        processed_files: 已成功处理的文件列表
+        error_files: 处理出错的文件列表 [(path, error_msg), ...]
+        unprocessed_files: 未识别/未处理的文件列表
+        strategy: 文件保留策略，默认为 'keep_unprocessed'
+        archive_dir_name: 归档目录名（仅 move_to_archive 策略使用），默认为 '已处理归档'
+    """
     logger = get_logger()
+
+    if not excel_files:
+        return
+
+    if strategy not in KEEP_STRATEGIES:
+        logger.warning('未知的保留策略「%s」，回退到默认 keep_unprocessed', strategy)
+        strategy = 'keep_unprocessed'
+
+    if strategy == 'keep_all':
+        logger.debug('保留策略 keep_all：跳过所有文件操作')
+        return
+
+    error_file_paths = {f for f, _ in error_files}
+    processed_set = set(processed_files)
+    keep_set = set(unprocessed_files) | error_file_paths
+
+    def _get_common_parent_dir(files):
+        dirs = [os.path.dirname(os.path.abspath(f)) for f in files if f]
+        if not dirs:
+            return None
+        if len(set(dirs)) == 1:
+            return dirs[0]
+        return os.path.commonpath(dirs)
+
+    if strategy == 'move_to_archive':
+        working_dir = _get_common_parent_dir(excel_files)
+        if not working_dir:
+            logger.error('无法确定归档目录的父路径，跳过归档操作')
+            return
+        archive_dir = os.path.join(working_dir, archive_dir_name)
+        try:
+            os.makedirs(archive_dir, exist_ok=True)
+        except OSError as e:
+            logger.error('创建归档目录失败「%s」: %s', archive_dir, e)
+            return
+
+        for filepath in excel_files:
+            if filepath in processed_set and filepath not in error_file_paths:
+                try:
+                    if not os.path.exists(filepath):
+                        logger.debug('归档目标不存在，跳过: %s', filepath)
+                        continue
+                    base_name = os.path.basename(filepath)
+                    target_path = os.path.join(archive_dir, base_name)
+                    counter = 1
+                    while os.path.exists(target_path):
+                        name, ext = os.path.splitext(base_name)
+                        target_path = os.path.join(archive_dir, f'{name}_{counter}{ext}')
+                        counter += 1
+                    import shutil as _shutil
+                    _shutil.move(filepath, target_path)
+                    logger.debug('已归档文件: %s -> %s', filepath, target_path)
+                except OSError as e:
+                    logger.error('归档文件「%s」失败: %s', filepath, e)
+        return
+
+    if strategy == 'keep_unprocessed':
+        delete_set = processed_set - error_file_paths
+    elif strategy == 'delete_all':
+        delete_set = set(excel_files)
+    else:
+        delete_set = processed_set - error_file_paths
+
     for filepath in excel_files:
-        if filepath not in keep_set:
+        if filepath in delete_set:
             try:
-                os.remove(filepath)
-                logger.debug('已删除文件: %s', filepath)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    logger.debug('已删除文件: %s', filepath)
             except OSError as e:
                 logger.error('删除文件「%s」失败: %s', filepath, e)
 
@@ -3854,7 +3963,14 @@ def commit_pipeline_changes(result: ProcessingResult) -> ProcessingResult:
 
     if result.pending_deletion_files:
         logger.info('[提交] 执行文件删除操作，待删除 %d 个文件', len(result.pending_deletion_files))
-        delete_processed_files(all_files, keep_set)
+        delete_processed_files(
+            all_files,
+            result.processed_files,
+            result.error_files,
+            result.unprocessed_files,
+            strategy=result.pending_keep_strategy,
+            archive_dir_name=result.pending_archive_dir_name,
+        )
     else:
         logger.info('[提交] 无待删除文件')
 
@@ -9894,6 +10010,12 @@ def build_cli_parser():
         help='文件保留策略 (默认: keep_unprocessed)',
     )
     process_parser.add_argument(
+        '--archive-dir-name',
+        type=str,
+        default='已处理归档',
+        help='归档子目录名称（仅 move_to_archive 策略使用，默认: 已处理归档）',
+    )
+    process_parser.add_argument(
         '--output-dir',
         type=str,
         metavar='DIR',
@@ -10080,6 +10202,7 @@ def _cmd_process(args):
 
     incremental = not args.no_incremental
     keep_strategy = args.keep_strategy
+    archive_dir_name = args.archive_dir_name
     output_dir = args.output_dir
     enabled_banks = args.enabled_banks
     start_date = args.start_date
@@ -10125,6 +10248,7 @@ def _cmd_process(args):
             encryption_password=args.encryption_password,
             encryption_mode=args.encryption_mode,
             dry_run=dry_run,
+            archive_dir_name=archive_dir_name,
         )
 
     if result.folder_empty:
@@ -11706,6 +11830,7 @@ KEEP_STRATEGIES = {
     'keep_unprocessed': '仅保留未处理文件',
     'keep_all': '保留所有文件',
     'delete_all': '删除所有已处理文件',
+    'move_to_archive': '归档已处理文件到「已处理归档」子目录',
 }
 
 
@@ -11879,7 +12004,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                               enabled_banks=None, keep_strategy='keep_unprocessed',
                               start_date='', end_date='', batch_id=None, output_dir=None,
                               enable_encryption=False, encryption_password=None, encryption_mode='excel_password',
-                              dry_run=False):
+                              dry_run=False, archive_dir_name='已处理归档'):
     logger = get_logger()
     if dry_run:
         logger.info('===== 试运行模式已启用（不执行删除与写盘操作）=====')
@@ -12013,14 +12138,21 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     elif keep_strategy == 'delete_all':
         keep_set = set()
         logger.info('保留策略：删除所有已处理文件')
+    elif keep_strategy == 'move_to_archive':
+        logger.info('保留策略：归档已处理文件到「%s」子目录', archive_dir_name)
     else:
         logger.info('保留策略：仅保留未处理文件')
 
-    pending_deletion_files = [f for f in excel_files if f not in keep_set]
+    pending_deletion_files = [f for f in excel_files if f not in keep_set] if keep_strategy != 'move_to_archive' else [
+        f for f in processed_files if f not in error_file_paths
+    ]
     if dry_run:
         logger.info('[试运行] 跳过删除文件操作，待删除文件 %d 个', len(pending_deletion_files))
     else:
-        delete_processed_files(excel_files, keep_set)
+        delete_processed_files(
+            excel_files, processed_files, error_files, unprocessed_files,
+            strategy=keep_strategy, archive_dir_name=archive_dir_name
+        )
 
     output_path = None
     final_rows = []
@@ -12405,6 +12537,8 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         pending_cp_tag_summary=_cp_tag_summary,
         pending_internal_transfer_summary=_it_summary,
         pending_internal_transfer_result=_it_result,
+        pending_keep_strategy=keep_strategy,
+        pending_archive_dir_name=archive_dir_name,
     )
 
 

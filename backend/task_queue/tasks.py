@@ -582,11 +582,26 @@ def task_cleanup(payload: CleanupTaskPayload) -> TaskResult:
         unprocessed_set = set(payload.unprocessed_files) | error_file_paths
 
         if payload.strategy == 'keep_unprocessed':
-            bankcheck.delete_processed_files(payload.excel_files, unprocessed_set)
+            bankcheck.delete_processed_files(
+                payload.excel_files, payload.processed_files, payload.error_files,
+                payload.unprocessed_files, strategy='keep_unprocessed'
+            )
         elif payload.strategy == 'keep_all':
-            pass
+            bankcheck.delete_processed_files(
+                payload.excel_files, payload.processed_files, payload.error_files,
+                payload.unprocessed_files, strategy='keep_all'
+            )
         elif payload.strategy == 'delete_all':
-            bankcheck.delete_processed_files(payload.excel_files, set())
+            bankcheck.delete_processed_files(
+                payload.excel_files, payload.processed_files, payload.error_files,
+                payload.unprocessed_files, strategy='delete_all'
+            )
+        elif payload.strategy == 'move_to_archive':
+            bankcheck.delete_processed_files(
+                payload.excel_files, payload.processed_files, payload.error_files,
+                payload.unprocessed_files, strategy='move_to_archive',
+                archive_dir_name=payload.archive_dir_name
+            )
 
         logger.info('文件清理完成，策略=%s', payload.strategy)
 
