@@ -442,14 +442,18 @@ class TestGetExtensionFormat:
         assert get_extension_format('TEST.XLSX') == 'xlsx'
         assert get_extension_format('TEST.XLS') == 'xls'
 
+    def test_csv_extension(self):
+        assert get_extension_format('test.csv') == 'csv'
+
     def test_unknown_extension(self):
-        assert get_extension_format('test.csv') == 'unknown'
         assert get_extension_format('test.txt') == 'unknown'
+        assert get_extension_format('test.doc') == 'unknown'
         assert get_extension_format('test') == 'unknown'
 
     def test_path_with_directory(self):
         assert get_extension_format('/path/to/test.xlsx') == 'xlsx'
         assert get_extension_format('/path/to/test.xls') == 'xls'
+        assert get_extension_format('/path/to/test.csv') == 'csv'
 
     def test_xlsx_not_confused_with_xls(self):
         assert get_extension_format('test.xlsx') != 'xls'

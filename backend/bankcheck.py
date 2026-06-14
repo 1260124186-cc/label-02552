@@ -954,39 +954,67 @@ def get_logger():
 
 
 # ──────────────────────────────────────────────
-# 文件格式检测：基于 Magic Bytes
+# 支持的银行导出文件格式
 # ──────────────────────────────────────────────
+
+SUPPORTED_BANK_FILE_EXTENSIONS = ('.xlsx', '.xls', '.xlsm', '.csv')
+
+EXCEL_EXTENSIONS = ('.xlsx', '.xls', '.xlsm')
+CSV_EXTENSIONS = ('.csv',)
 
 XLSX_MAGIC_BYTES = b'PK\x03\x04'
 XLS_MAGIC_BYTES = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
 
 
-def detect_excel_format(filepath):
+def is_supported_bank_file(filepath):
     """
-    通过文件头 Magic Bytes 检测 Excel 文件的真实格式。
+    判断文件是否为支持的银行导出文件格式。
 
     Args:
-        filepath: Excel 文件路径
+        filepath: 文件路径
 
     Returns:
-        str: 'xlsx' 或 'xls' 或 'unknown'
+        bool: 是否为支持的格式
+    """
+    lower_path = filepath.lower()
+    return lower_path.endswith(SUPPORTED_BANK_FILE_EXTENSIONS)
+
+
+def detect_file_format(filepath):
+    """
+    通过文件头 Magic Bytes 检测文件的真实格式。
+    支持检测 xlsx/xlsm (ZIP/OOXML)、xls (OLE/BIFF)、csv (纯文本)。
+
+    Args:
+        filepath: 文件路径
+
+    Returns:
+        str: 'xlsx' / 'xls' / 'csv' / 'unknown'
     """
     logger = get_logger()
     try:
         with open(filepath, 'rb') as f:
-            header = f.read(8)
+            header = f.read(512)
 
         if len(header) < 4:
             logger.debug('文件 %s 头部数据不足，无法检测格式', filepath)
             return 'unknown'
 
         if header.startswith(XLSX_MAGIC_BYTES):
+            lower_path = filepath.lower()
+            if lower_path.endswith('.xlsm'):
+                logger.debug('文件 %s Magic Bytes 检测为 xlsm 格式 (ZIP/OOXML with macros)', filepath)
+                return 'xlsx'
             logger.debug('文件 %s Magic Bytes 检测为 xlsx 格式 (ZIP/OOXML)', filepath)
             return 'xlsx'
 
         if header.startswith(XLS_MAGIC_BYTES):
             logger.debug('文件 %s Magic Bytes 检测为 xls 格式 (OLE/BIFF)', filepath)
             return 'xls'
+
+        if _looks_like_csv(header):
+            logger.debug('文件 %s 检测为 csv 格式 (纯文本)', filepath)
+            return 'csv'
 
         logger.debug('文件 %s 未识别的 Magic Bytes: %s', filepath, header[:4].hex())
         return 'unknown'
@@ -995,9 +1023,40 @@ def detect_excel_format(filepath):
         return 'unknown'
 
 
-def get_extension_format(filepath):
+def _looks_like_csv(header_bytes):
     """
-    根据文件扩展名判断 Excel 格式。
+    判断文件头是否看起来像 CSV 纯文本文件。
+
+    Args:
+        header_bytes: 文件头部字节
+
+    Returns:
+        bool: 是否可能是 CSV 文件
+    """
+    try:
+        text = header_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            text = header_bytes.decode('gbk')
+        except UnicodeDecodeError:
+            return False
+
+    if not text or len(text.strip()) == 0:
+        return False
+
+    printable_count = sum(1 for c in text if c.isprintable() or c in '\r\n\t,;"\'')
+    printable_ratio = printable_count / len(text) if len(text) > 0 else 0
+
+    has_comma = ',' in text
+    has_newline = '\n' in text or '\r' in text
+
+    return printable_ratio > 0.9 and (has_comma or has_newline)
+
+
+def detect_excel_format(filepath):
+    """
+    通过文件头 Magic Bytes 检测 Excel 文件的真实格式。
+    保留此函数用于向后兼容。
 
     Args:
         filepath: Excel 文件路径
@@ -1005,12 +1064,246 @@ def get_extension_format(filepath):
     Returns:
         str: 'xlsx' 或 'xls' 或 'unknown'
     """
+    fmt = detect_file_format(filepath)
+    if fmt in ('xlsx', 'xls'):
+        return fmt
+    return 'unknown'
+
+
+def get_extension_format(filepath):
+    """
+    根据文件扩展名判断文件格式。
+    支持 xlsx/xlsm/xls/csv 格式。
+
+    Args:
+        filepath: 文件路径
+
+    Returns:
+        str: 'xlsx' / 'xls' / 'csv' / 'unknown'
+    """
     lower_path = filepath.lower()
-    if lower_path.endswith('.xlsx') or lower_path.endswith('.xlsm'):
+    if lower_path.endswith(('.xlsx', '.xlsm')):
         return 'xlsx'
     if lower_path.endswith('.xls') and not lower_path.endswith('.xlsx'):
         return 'xls'
+    if lower_path.endswith('.csv'):
+        return 'csv'
     return 'unknown'
+
+
+# ──────────────────────────────────────────────
+# CSV 文件适配器：模拟 openpyxl 接口
+# ──────────────────────────────────────────────
+
+class CsvCell:
+    """模拟 openpyxl Cell 对象"""
+    def __init__(self, value=None):
+        self.value = value
+
+
+class CsvWorksheet:
+    """模拟 openpyxl Worksheet 对象，用于 CSV 文件读取"""
+
+    def __init__(self, title='Sheet1', rows=None):
+        self.title = title
+        self._rows = rows or []
+        self._compute_dimensions()
+        self.merged_cells = type('MergedCells', (), {'ranges': []})()
+
+    def _compute_dimensions(self):
+        """计算工作表的行列维度"""
+        if not self._rows:
+            self.max_row = 0
+            self.max_column = 0
+            return
+        self.max_row = len(self._rows)
+        self.max_column = max(len(row) for row in self._rows) if self._rows else 0
+
+    def cell(self, row, column, value=None):
+        """
+        获取或设置单元格值。
+        row 和 column 都是 1-based。
+        """
+        if value is not None:
+            while len(self._rows) < row:
+                self._rows.append([])
+            while len(self._rows[row - 1]) < column:
+                self._rows[row - 1].append(None)
+            self._rows[row - 1][column - 1] = value
+            self._compute_dimensions()
+            return CsvCell(value)
+
+        if row < 1 or column < 1:
+            return CsvCell(None)
+        if row > len(self._rows):
+            return CsvCell(None)
+        row_data = self._rows[row - 1]
+        if column > len(row_data):
+            return CsvCell(None)
+        return CsvCell(row_data[column - 1])
+
+    def iter_rows(self, min_row=1, max_row=None, values_only=False):
+        """
+        迭代行数据。
+        与 openpyxl 的 iter_rows 接口兼容。
+        """
+        if max_row is None:
+            max_row = self.max_row
+
+        for row_idx in range(min_row, max_row + 1):
+            if row_idx > len(self._rows):
+                row_data = []
+            else:
+                row_data = list(self._rows[row_idx - 1])
+
+            while len(row_data) < self.max_column:
+                row_data.append(None)
+
+            if values_only:
+                yield tuple(row_data)
+            else:
+                yield tuple(CsvCell(v) for v in row_data)
+
+
+class CsvWorkbook:
+    """模拟 openpyxl Workbook 对象，用于 CSV 文件读取"""
+
+    def __init__(self):
+        self.worksheets = []
+        self._active_sheet_index = 0
+
+    @property
+    def active(self):
+        """获取活动工作表"""
+        if not self.worksheets:
+            return None
+        return self.worksheets[self._active_sheet_index]
+
+    def create_sheet(self, title=None, index=None):
+        """创建新工作表"""
+        if title is None:
+            title = f'Sheet{len(self.worksheets) + 1}'
+        ws = CsvWorksheet(title=title)
+        if index is None:
+            self.worksheets.append(ws)
+        else:
+            self.worksheets.insert(index, ws)
+        return ws
+
+    def close(self):
+        """关闭工作簿（CSV 无需特殊操作）"""
+        pass
+
+    def __getitem__(self, key):
+        """通过名称或索引获取工作表"""
+        if isinstance(key, int):
+            return self.worksheets[key]
+        for ws in self.worksheets:
+            if ws.title == key:
+                return ws
+        raise KeyError(f'Worksheet {key} not found')
+
+    def __contains__(self, key):
+        """检查工作表是否存在"""
+        if isinstance(key, int):
+            return 0 <= key < len(self.worksheets)
+        return any(ws.title == key for ws in self.worksheets)
+
+
+def _detect_csv_encoding(filepath):
+    """
+    检测 CSV 文件的编码格式。
+    优先尝试 UTF-8，然后是 GBK，再尝试其他常见编码。
+    """
+    encodings_to_try = ['utf-8-sig', 'utf-8', 'gbk', 'gb2312', 'gb18030', 'big5', 'latin-1']
+
+    for encoding in encodings_to_try:
+        try:
+            with open(filepath, 'r', encoding=encoding) as f:
+                f.read(1024)
+            return encoding
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+
+    return 'utf-8'
+
+
+def _detect_csv_delimiter(filepath, encoding='utf-8'):
+    """
+    检测 CSV 文件的分隔符。
+    支持逗号、分号、制表符等常见分隔符。
+    """
+    import csv
+
+    try:
+        with open(filepath, 'r', encoding=encoding, newline='') as f:
+            sample = f.read(4096)
+
+        if not sample:
+            return ','
+
+        sniffer = csv.Sniffer()
+        try:
+            dialect = sniffer.sniff(sample)
+            return dialect.delimiter
+        except csv.Error:
+            pass
+
+        delimiters = [',', ';', '\t', '|']
+        delimiter_counts = {}
+        for d in delimiters:
+            delimiter_counts[d] = sample.count(d)
+
+        if delimiter_counts:
+            best_delimiter = max(delimiter_counts, key=delimiter_counts.get)
+            if delimiter_counts[best_delimiter] > 0:
+                return best_delimiter
+
+        return ','
+    except Exception:
+        return ','
+
+
+def read_csv_as_workbook(filepath, encoding=None, delimiter=None):
+    """
+    读取 CSV 文件并返回 CsvWorkbook 对象，模拟 openpyxl 接口。
+
+    Args:
+        filepath: CSV 文件路径
+        encoding: 文件编码，None 表示自动检测
+        delimiter: 分隔符，None 表示自动检测
+
+    Returns:
+        CsvWorkbook 对象
+    """
+    import csv
+
+    logger = get_logger()
+
+    if encoding is None:
+        encoding = _detect_csv_encoding(filepath)
+        logger.debug('CSV 文件自动检测编码: %s (%s)', encoding, os.path.basename(filepath))
+
+    if delimiter is None:
+        delimiter = _detect_csv_delimiter(filepath, encoding)
+        logger.debug('CSV 文件自动检测分隔符: %r (%s)', delimiter, os.path.basename(filepath))
+
+    wb = CsvWorkbook()
+    ws = wb.create_sheet(title='Sheet1')
+
+    try:
+        with open(filepath, 'r', encoding=encoding, newline='') as f:
+            reader = csv.reader(f, delimiter=delimiter)
+            for row_idx, row in enumerate(reader, start=1):
+                for col_idx, value in enumerate(row, start=1):
+                    if value == '':
+                        value = None
+                    ws.cell(row=row_idx, column=col_idx, value=value)
+    except Exception as e:
+        logger.error('读取 CSV 文件失败 %s: %s', filepath, e)
+        raise
+
+    return wb
 
 
 # ──────────────────────────────────────────────
@@ -1065,25 +1358,28 @@ def convert_xls_to_xlsx(xls_path):
 
 def open_workbook_compat(filepath, read_only=False):
     """
-    兼容打开 .xlsx 和 .xls 文件，统一返回 (openpyxl.Workbook, 临时文件路径或None)。
-    如果是 .xls 文件，先转换为 .xlsx 再打开。
-    支持基于 Magic Bytes 的自动格式检测，当扩展名与实际格式不一致时按真实格式处理。
+    兼容打开 .xlsx/.xls/.xlsm/.csv 文件，统一返回 (Workbook, 临时文件路径或None)。
+    - 如果是 .xls 文件，先转换为 .xlsx 再打开。
+    - 如果是 .csv 文件，返回 CsvWorkbook 对象模拟 openpyxl 接口。
+    - 支持基于 Magic Bytes 的自动格式检测，当扩展名与实际格式不一致时按真实格式处理。
     调用方负责在使用完毕后清理临时文件。
 
     Args:
-        filepath: Excel 文件路径
+        filepath: 文件路径
         read_only: 是否以只读模式打开。只读模式下 openpyxl 采用惰性加载，
                    适合大文件以降低内存占用。注意：只读模式下部分操作
                    （如随机单元格访问、修改）受限，应配合 iter_rows 使用。
+                   CSV 文件不受此参数影响。
 
     Returns:
-        tuple: (openpyxl.Workbook, 临时文件路径或 None)
+        tuple: (Workbook对象, 临时文件路径或 None)
+               Workbook 可能是 openpyxl.Workbook 或 CsvWorkbook
     """
     logger = get_logger()
     tmp_path = None
 
     ext_format = get_extension_format(filepath)
-    magic_format = detect_excel_format(filepath)
+    magic_format = detect_file_format(filepath)
 
     actual_format = magic_format if magic_format != 'unknown' else ext_format
 
@@ -1101,12 +1397,14 @@ def open_workbook_compat(filepath, read_only=False):
         _profiler_ctx.__enter__()
 
     try:
-        load_kwargs = {'data_only': True, 'read_only': read_only}
-        if actual_format == 'xls':
+        if actual_format == 'csv':
+            wb = read_csv_as_workbook(filepath)
+        elif actual_format == 'xls':
             tmp_path = convert_xls_to_xlsx(filepath)
-            wb = openpyxl.load_workbook(tmp_path, **load_kwargs)
+            wb = openpyxl.load_workbook(tmp_path, data_only=True, read_only=read_only)
         else:
-            if ext_format == 'xlsx' or ext_format == 'unknown':
+            load_kwargs = {'data_only': True, 'read_only': read_only}
+            if ext_format in ('xlsx', 'unknown'):
                 wb = openpyxl.load_workbook(filepath, **load_kwargs)
             else:
                 with open(filepath, 'rb') as f:
@@ -1405,19 +1703,44 @@ def get_cell_value_with_merge(ws, row, col, merged_map=None):
 # ──────────────────────────────────────────────
 
 def scan_excel_files(folder):
-    """递归扫描文件夹中的所有 Excel 文件（.xlsx 和 .xls），排除临时文件"""
+    """
+    递归扫描文件夹中的所有支持的银行导出文件，排除临时文件。
+    支持格式：.xlsx, .xls, .xlsm, .csv
+
+    保留此函数名用于向后兼容。
+
+    Args:
+        folder: 要扫描的文件夹路径
+
+    Returns:
+        list: 找到的文件路径列表
+    """
+    return scan_bank_files(folder)
+
+
+def scan_bank_files(folder):
+    """
+    递归扫描文件夹中的所有支持的银行导出文件，排除临时文件。
+    支持格式：.xlsx, .xls, .xlsm, .csv
+
+    Args:
+        folder: 要扫描的文件夹路径
+
+    Returns:
+        list: 找到的文件路径列表
+    """
     logger = get_logger()
-    excel_files = []
+    bank_files = []
     for root, _dirs, files in os.walk(folder):
         for f in files:
             if f.startswith('~$'):
                 continue
-            if f.lower().endswith(('.xlsx', '.xls')):
+            if is_supported_bank_file(f):
                 full_path = os.path.join(root, f)
-                excel_files.append(full_path)
-                logger.debug('发现 Excel 文件: %s', full_path)
-    logger.info('共扫描到 %d 个 Excel 文件', len(excel_files))
-    return excel_files
+                bank_files.append(full_path)
+                logger.debug('发现银行导出文件: %s', full_path)
+    logger.info('共扫描到 %d 个银行导出文件', len(bank_files))
+    return bank_files
 
 
 def compute_excel_content_hash(filepath, chunk_size=8192):
@@ -2592,18 +2915,20 @@ def _safe_get_cell_value(ws, cell_ref: str):
 
 def _identify_bank_by_content(filepath: str) -> Optional[str]:
     """
-    根据 Excel 内容辅助识别银行：
+    根据文件内容辅助识别银行：
     从各银行配置读取 account_cell，逐一检查对应单元格是否包含账号格式内容。
     当且仅当唯一匹配一个银行时返回结果，否则返回 None。
+    支持 xlsx/xls/xlsm/csv 等格式。
     """
     logger = get_logger()
     if not os.path.isfile(filepath):
         return None
-    if not filepath.lower().endswith(('.xlsx', '.xls')):
+    if not is_supported_bank_file(filepath):
         return None
 
+    tmp_path = None
     try:
-        wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+        wb, tmp_path = open_workbook_compat(filepath, read_only=True)
         try:
             ws = wb.active
             if ws is None:
@@ -2641,6 +2966,8 @@ def _identify_bank_by_content(filepath: str) -> Optional[str]:
             wb.close()
     except Exception as e:
         logger.debug('内容辅助识别失败「%s」: %s', os.path.basename(filepath), e)
+    finally:
+        cleanup_temp_file(tmp_path)
 
     return None
 
@@ -2648,9 +2975,10 @@ def _identify_bank_by_content(filepath: str) -> Optional[str]:
 def _get_file_debug_info(filepath: str, max_rows: int = 10, max_cols: int = 10) -> Dict[str, Any]:
     """
     获取文件调试信息，用于银行识别失败时的人工排查。
+    支持 xlsx/xls/xlsm/csv 等格式。
 
     Args:
-        filepath: Excel 文件路径
+        filepath: 银行导出文件路径
         max_rows: 最多读取的行数（用于快照）
         max_cols: 最多读取的列数（用于快照）
 
