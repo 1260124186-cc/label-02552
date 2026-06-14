@@ -1293,3 +1293,275 @@ class TestCmdVersion:
         bankcheck._cmd_version(args)
         captured = capsys.readouterr()
         assert 'Python' in captured.out
+
+
+class TestDryRunTwoPhase:
+    """试运行两阶段机制测试：试运行不写盘，确认后正式写盘"""
+
+    def _setup_folder(self, tmp_dir, script_dir, files=None):
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+        if files is None:
+            files = ['北京银行', '东亚银行']
+        for bank in files:
+            if bank == '北京银行':
+                _create_beijing_bank_excel(os.path.join(source_folder, '北京银行_流水.xlsx'))
+            elif bank == '东亚银行':
+                _create_east_asia_bank_excel(os.path.join(source_folder, '东亚银行_流水.xlsx'))
+            elif bank == '未知':
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws['A1'] = '未知银行数据'
+                wb.save(os.path.join(source_folder, '未知银行_流水.xlsx'))
+                wb.close()
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+        return source_folder
+
+    def test_dry_run_flag_set_in_result(self, tmp_dir):
+        """试运行模式结果中 dry_run 标志应为 True"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+
+        assert result.dry_run is True
+        assert result.changes_committed is False
+
+    def test_dry_run_no_summary_table_written(self, tmp_dir):
+        """试运行模式不应写入总表文件"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+
+        assert result.output_path is None
+        summary_path = bankcheck.get_summary_table_path(script_dir)
+        assert not os.path.exists(summary_path), '试运行模式不应生成总表文件'
+
+    def test_dry_run_no_masked_table_written(self, tmp_dir):
+        """试运行模式不应写入脱敏版总表"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+
+        assert result.masked_output_path is None
+        masked_path = bankcheck.get_masked_summary_table_path(script_dir)
+        assert not os.path.exists(masked_path), '试运行模式不应生成脱敏版总表'
+
+    def test_dry_run_processed_files_not_deleted(self, tmp_dir):
+        """试运行模式不应删除已处理成功的文件"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行', '未知'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+
+        new_folder = source + '＋检验版'
+        remaining = bankcheck.scan_excel_files(new_folder)
+        assert len(remaining) == 2, '试运行模式应保留所有文件'
+        assert len(result.pending_deletion_files) == 1, '应记录1个待删除文件'
+
+    def test_dry_run_still_generates_reports(self, tmp_dir):
+        """试运行模式仍应生成统计/异常报告"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行', '东亚银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+
+        assert len(result.all_rows) == 4
+        assert result.subject_summary_path is not None
+        assert result.balance_check_path is not None
+        assert result.duplicate_check_path is not None
+        assert os.path.exists(result.subject_summary_path)
+        assert os.path.exists(result.balance_check_path)
+        assert os.path.exists(result.duplicate_check_path)
+
+    def test_dry_run_pending_fields_populated(self, tmp_dir):
+        """试运行结果中应正确填充待执行字段"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+
+        assert result.pending_script_dir == script_dir
+        assert result.pending_input_folder == source
+        assert len(result.pending_final_rows) == 2
+        assert len(result.pending_all_files) >= 1
+        assert len(result.pending_deletion_files) >= 0
+
+    def test_commit_writes_summary_table(self, tmp_dir):
+        """提交后应写入总表文件"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+        result = bankcheck.commit_pipeline_changes(result)
+
+        assert result.output_path is not None
+        assert os.path.exists(result.output_path)
+        df_read = pd.read_excel(result.output_path, engine='openpyxl')
+        assert len(df_read) == 2
+
+    def test_commit_deletes_processed_files(self, tmp_dir):
+        """提交后应删除已处理成功的文件"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行', '未知'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+        result = bankcheck.commit_pipeline_changes(result)
+
+        new_folder = source + '＋检验版'
+        remaining = bankcheck.scan_excel_files(new_folder)
+        assert len(remaining) == 1
+        assert '未知银行' in os.path.basename(remaining[0])
+
+    def test_commit_writes_masked_table(self, tmp_dir):
+        """提交后应写入脱敏版总表"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+        result = bankcheck.commit_pipeline_changes(result)
+
+        assert result.masked_output_path is not None
+        assert os.path.exists(result.masked_output_path)
+
+    def test_commit_sets_flags_correctly(self, tmp_dir):
+        """提交后应正确更新 dry_run 和 changes_committed 标志"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+        assert result.dry_run is True
+        assert result.changes_committed is False
+
+        result = bankcheck.commit_pipeline_changes(result)
+        assert result.dry_run is False
+        assert result.changes_committed is True
+
+    def test_double_commit_is_noop(self, tmp_dir):
+        """重复提交应被安全跳过（幂等性）"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+        result = bankcheck.commit_pipeline_changes(result)
+        first_mtime = os.path.getmtime(result.output_path)
+
+        import time
+        time.sleep(0.01)
+        result = bankcheck.commit_pipeline_changes(result)
+        second_mtime = os.path.getmtime(result.output_path)
+
+        assert first_mtime == second_mtime, '重复提交不应重新写盘'
+
+    def test_commit_non_dry_run_is_noop(self, tmp_dir):
+        """对非试运行结果提交应被安全跳过"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=False)
+        output_path_before = result.output_path
+
+        result = bankcheck.commit_pipeline_changes(result)
+
+        assert result.output_path == output_path_before
+        assert result.changes_committed is False
+
+    def test_format_result_message_shows_dry_run_banner(self, tmp_dir):
+        """format_result_message 应在试运行模式下显示专用横幅"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+        msg = bankcheck.format_result_message(result)
+
+        assert '试运行模式' in msg
+        assert '未执行删除与写盘操作' in msg
+        assert '试运行未写盘' in msg
+
+    def test_format_result_message_shows_pending_deletions(self, tmp_dir):
+        """试运行消息中应显示待删除文件"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行', '未知'])
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+        msg = bankcheck.format_result_message(result)
+
+        assert '待删除文件' in msg
+
+    def test_commit_empty_folder_is_noop(self, tmp_dir):
+        """空文件夹结果不应执行任何提交操作"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = os.path.join(tmp_dir, '空文件夹')
+        os.makedirs(source, exist_ok=True)
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source, script_dir, dry_run=True)
+        assert result.folder_empty is True
+
+        result = bankcheck.commit_pipeline_changes(result)
+        assert result.changes_committed is True
+        assert result.output_path is None
+
+    def test_dry_run_with_incremental_mode(self, tmp_dir):
+        """试运行增量模式应正确填充 pending 字段"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result1 = bankcheck.run_pipeline(source, script_dir, incremental=True, dry_run=False)
+        assert result1.output_path is not None
+
+        source2 = self._setup_folder(tmp_dir, script_dir, ['东亚银行'])
+        import shutil as _shutil
+        src2 = os.path.join(tmp_dir, '流水文件夹2')
+        if os.path.exists(src2):
+            _shutil.rmtree(src2)
+        os.rename(source2, src2)
+
+        result2 = bankcheck.run_pipeline(src2, script_dir, incremental=True, dry_run=True)
+        assert result2.dry_run is True
+        assert len(result2.pending_existing_records) == 2
+        assert len(result2.pending_incremental_rows) == 2
+
+        result2 = bankcheck.commit_pipeline_changes(result2)
+        assert result2.output_path is not None
+        df_read = pd.read_excel(result2.output_path, engine='openpyxl')
+        assert len(df_read) == 4
+
+    def test_cli_dry_run_arg_parsed(self):
+        """CLI 解析器应正确识别 --dry-run 参数"""
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test', '--dry-run'])
+        assert args.dry_run is True
+        assert args.auto_commit is False
+
+    def test_cli_dry_run_with_auto_commit(self):
+        """CLI 解析器应正确识别 --dry-run --yes 组合"""
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test', '--dry-run', '--yes'])
+        assert args.dry_run is True
+        assert args.auto_commit is True
+
+    def test_cli_dry_run_with_commit_alias(self):
+        """CLI 解析器应识别 --commit 作为 --yes 的别名"""
+        parser = bankcheck.build_cli_parser()
+        args = parser.parse_args(['process', '/tmp/test', '--dry-run', '--commit'])
+        assert args.dry_run is True
+        assert args.auto_commit is True

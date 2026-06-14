@@ -2643,6 +2643,29 @@ class ProcessingResult:
     signature_info: Optional[Dict[str, Any]] = None
     encryption_result: Optional[Any] = None
     encrypted_files: List[str] = field(default_factory=list)
+    dry_run: bool = False
+    pending_deletion_files: List[str] = field(default_factory=list)
+    pending_keep_set: Set[str] = field(default_factory=set)
+    pending_all_files: List[str] = field(default_factory=list)
+    pending_final_rows: List[dict] = field(default_factory=list)
+    pending_existing_records: List[dict] = field(default_factory=list)
+    pending_incremental_rows: List[dict] = field(default_factory=list)
+    pending_script_dir: Optional[str] = None
+    pending_output_dir: Optional[str] = None
+    pending_lookup_source: Any = None
+    pending_enable_signature: bool = False
+    pending_signature_password: Optional[str] = None
+    pending_auto_generate_key: bool = True
+    pending_enable_encryption: bool = False
+    pending_encryption_password: Optional[str] = None
+    pending_encryption_mode: str = 'excel_password'
+    pending_batch_id: Optional[str] = None
+    pending_input_folder: Optional[str] = None
+    pending_cp_tag_summary: Dict[str, Any] = field(default_factory=dict)
+    pending_holiday_tag_summary: Dict[str, Any] = field(default_factory=dict)
+    pending_internal_transfer_summary: Dict[str, Any] = field(default_factory=dict)
+    pending_internal_transfer_result: Any = None
+    changes_committed: bool = False
 
 
 # ──────────────────────────────────────────────
@@ -2944,8 +2967,11 @@ else:
 
 def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                  enable_signature=False, signature_password=None, auto_generate_key=True,
-                 enable_encryption=False, encryption_password=None, encryption_mode='excel_password'):
+                 enable_encryption=False, encryption_password=None, encryption_mode='excel_password',
+                 dry_run=False):
     logger = get_logger()
+    if dry_run:
+        logger.info('===== 试运行模式已启用（不执行删除与写盘操作）=====')
 
     _profiler = None
     if HAS_PERF_PROFILER:
@@ -3020,6 +3046,9 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
             folder_empty=True,
             incremental_mode=actual_incremental,
             existing_record_count=len(existing_records),
+            dry_run=dry_run,
+            pending_script_dir=script_dir if dry_run else None,
+            pending_input_folder=folder if dry_run else None,
         )
 
     _phase_process_start = None
@@ -3068,34 +3097,58 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                                f'处理 {len(all_files)} 个文件')
 
     error_file_paths = {f for f, _ in error_files}
-    delete_processed_files(all_files, set(unprocessed_files) | error_file_paths)
+    keep_set = set(unprocessed_files) | error_file_paths
+    pending_deletion_files = [f for f in all_files if f not in keep_set]
+
+    if dry_run:
+        logger.info('[试运行] 跳过删除文件操作，待删除文件 %d 个', len(pending_deletion_files))
+    else:
+        delete_processed_files(all_files, keep_set)
 
     output_path = None
     final_rows = []
+    incremental_rows = []
+    _cp_tag_summary = {}
+    _holiday_tag_summary = {}
+    _it_summary = {}
+    _it_result = None
 
     if all_rows:
         if actual_incremental:
             incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
             new_record_count = len(incremental_rows)
-            output_path = merge_and_export_summary(
-                existing_records, incremental_rows, script_dir, lookup_source=lookup_data
-            )
-            final_rows = existing_records + incremental_rows
+            if dry_run:
+                logger.info('[试运行] 跳过总表写盘，模式=增量合并，历史 %d 条 + 新增 %d 条',
+                            len(existing_records), len(incremental_rows))
+                final_rows = existing_records + incremental_rows
+            else:
+                output_path = merge_and_export_summary(
+                    existing_records, incremental_rows, script_dir, lookup_source=lookup_data
+                )
+                final_rows = existing_records + incremental_rows
         else:
-            columns = get_summary_columns(all_rows, lookup_data)
-            df = pd.DataFrame(all_rows, columns=columns)
-            output_path = get_summary_table_path(script_dir)
-            df.to_excel(output_path, index=False, engine='openpyxl')
-            logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
-            final_rows = all_rows
+            if dry_run:
+                logger.info('[试运行] 跳过总表写盘，模式=全量覆盖，共 %d 条记录', len(all_rows))
+                final_rows = all_rows
+            else:
+                columns = get_summary_columns(all_rows, lookup_data)
+                df = pd.DataFrame(all_rows, columns=columns)
+                output_path = get_summary_table_path(script_dir)
+                df.to_excel(output_path, index=False, engine='openpyxl')
+                logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
+                final_rows = all_rows
             new_record_count = len(all_rows)
     else:
         logger.warning('未提取到任何银行流水记录')
         if existing_records:
-            output_path = merge_and_export_summary(
-                existing_records, [], script_dir, lookup_source=lookup_data
-            )
-            final_rows = existing_records
+            if dry_run:
+                logger.info('[试运行] 跳过总表写盘，仅使用历史记录 %d 条', len(existing_records))
+                final_rows = existing_records
+            else:
+                output_path = merge_and_export_summary(
+                    existing_records, [], script_dir, lookup_source=lookup_data
+                )
+                final_rows = existing_records
 
     if final_rows:
         final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
@@ -3105,7 +3158,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                         _cp_tag_summary.get('tagged_count', 0),
                         _cp_tag_summary.get('blacklist_hits', 0),
                         _cp_tag_summary.get('whitelist_hits', 0))
-            if output_path:
+            if output_path and not dry_run:
                 base_columns = get_summary_columns(final_rows, lookup_data)
                 cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
                 _cp_columns = base_columns + [
@@ -3114,8 +3167,9 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                 pd.DataFrame(final_rows, columns=_cp_columns).to_excel(
                     output_path, index=False, engine='openpyxl')
                 logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
+            elif dry_run:
+                logger.info('[试运行] 跳过黑白名单打标结果回写总表')
 
-    _holiday_tag_summary = {}
     if final_rows:
         final_rows, _holiday_tag_summary = apply_holiday_tags(final_rows)
         if _holiday_tag_summary.get('tagged_count', 0) > 0:
@@ -3124,7 +3178,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                         _holiday_tag_summary.get('tagged_count', 0),
                         _holiday_tag_summary.get('weekend_count', 0),
                         _holiday_tag_summary.get('holiday_count', 0))
-            if output_path:
+            if output_path and not dry_run:
                 base_columns = get_summary_columns(final_rows, lookup_data)
                 holiday_extra_cols = ['非工作日标签', '节假日名称']
                 _holiday_columns = base_columns + [
@@ -3133,9 +3187,11 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                 pd.DataFrame(final_rows, columns=_holiday_columns).to_excel(
                     output_path, index=False, engine='openpyxl')
                 logger.info('已将非工作日打标结果回写到总表: %s', output_path)
+            elif dry_run:
+                logger.info('[试运行] 跳过非工作日打标结果回写总表')
 
     masked_output_path = None
-    if final_rows and output_path:
+    if final_rows and not dry_run:
         try:
             output_dir = os.path.dirname(output_path) or script_dir
             _masked_columns = get_summary_columns(final_rows, lookup_data)
@@ -3154,10 +3210,12 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         except Exception as e:
             logger.error('生成脱敏版总表失败: %s', e, exc_info=True)
             masked_output_path = None
+    elif final_rows and dry_run:
+        logger.info('[试运行] 跳过生成脱敏版总表')
 
     db_inserted = 0
     db_duplicates = 0
-    if HAS_DATABASE and final_rows:
+    if HAS_DATABASE and final_rows and not dry_run:
         try:
             if batch_id is None:
                 batch_id = f"BATCH{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -3173,9 +3231,10 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
             )
         except Exception as e:
             logger.error('数据库持久化失败: %s', e, exc_info=True)
+    elif HAS_DATABASE and final_rows and dry_run:
+        logger.info('[试运行] 跳过数据库持久化操作')
 
     internal_transfer_path = None
-    _it_summary = {}
     if final_rows:
         try:
             final_rows, _it_summary, _it_result = identify_and_tag_internal_transfers(
@@ -3193,7 +3252,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                     len(_it_summary.get('involved_banks', [])),
                     _it_summary.get('total_transfer_amount', 0.0),
                 )
-                if output_path:
+                if output_path and not dry_run:
                     base_columns = get_summary_columns(final_rows, lookup_data)
                     it_extra_cols = list(INTERNAL_TRANSFER_EXTRA_COLUMNS)
                     _it_columns = base_columns + [
@@ -3202,6 +3261,8 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                     pd.DataFrame(final_rows, columns=_it_columns).to_excel(
                         output_path, index=False, engine='openpyxl')
                     logger.info('已将内部划转标记回写到总表: %s', output_path)
+                elif dry_run:
+                    logger.info('[试运行] 跳过内部划转标记回写总表')
 
                 _it_out_dir = script_dir
                 if output_path:
@@ -3371,7 +3432,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
             logger.error('生成性能剖析报告失败: %s', e, exc_info=True)
 
     collab_template_path = None
-    if output_path and final_rows:
+    if output_path and final_rows and not dry_run:
         try:
             collab_output_dir = os.path.dirname(output_path) or script_dir
             collab_template_path = generate_collab_template(
@@ -3384,12 +3445,14 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         except Exception as e:
             logger.error('自动生成协同编辑模板失败: %s', e, exc_info=True)
             collab_template_path = None
+    elif dry_run and final_rows:
+        logger.info('[试运行] 跳过生成财务协同编辑模板')
 
     output_hash = None
     signature_id = None
     signature_info = None
 
-    if output_path and enable_signature and HAS_CRYPTOGRAPHY:
+    if output_path and enable_signature and HAS_CRYPTOGRAPHY and not dry_run:
         try:
             output_hash = compute_file_hash(output_path)
 
@@ -3420,11 +3483,13 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         except Exception as e:
             logger.error('数字签名失败: %s', e, exc_info=True)
             signature_info = None
+    elif enable_signature and dry_run:
+        logger.info('[试运行] 跳过数字签名操作')
 
     encryption_result = None
     encrypted_files = []
 
-    if enable_encryption and encryption_password and HAS_FILE_ENCRYPTION:
+    if enable_encryption and encryption_password and HAS_FILE_ENCRYPTION and not dry_run:
         try:
             output_dir = script_dir
             if output_path:
@@ -3459,6 +3524,8 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         logger.warning('file_encryption 模块不可用，无法加密输出文件')
     elif enable_encryption and not encryption_password:
         logger.warning('已启用加密但未提供加密密码，跳过加密')
+    elif enable_encryption and dry_run:
+        logger.info('[试运行] 跳过输出文件加密操作')
 
     return ProcessingResult(
         all_rows=final_rows,
@@ -3487,6 +3554,27 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         signature_info=signature_info,
         encryption_result=encryption_result,
         encrypted_files=encrypted_files,
+        dry_run=dry_run,
+        pending_deletion_files=pending_deletion_files,
+        pending_keep_set=keep_set,
+        pending_all_files=list(all_files),
+        pending_final_rows=final_rows,
+        pending_existing_records=existing_records,
+        pending_incremental_rows=incremental_rows,
+        pending_script_dir=script_dir,
+        pending_lookup_source=lookup_data,
+        pending_enable_signature=enable_signature,
+        pending_signature_password=signature_password,
+        pending_auto_generate_key=auto_generate_key,
+        pending_enable_encryption=enable_encryption,
+        pending_encryption_password=encryption_password,
+        pending_encryption_mode=encryption_mode,
+        pending_batch_id=batch_id,
+        pending_input_folder=folder,
+        pending_cp_tag_summary=_cp_tag_summary,
+        pending_holiday_tag_summary=_holiday_tag_summary,
+        pending_internal_transfer_summary=_it_summary,
+        pending_internal_transfer_result=_it_result,
     )
 
 
@@ -3494,31 +3582,44 @@ def format_result_message(result):
     if result.folder_empty:
         return '文件夹中未发现任何 Excel 文件。'
 
+    dry_run_banner = ''
+    if result.dry_run:
+        dry_run_banner = '【试运行模式】仅生成报告，未执行删除与写盘操作\n\n'
+
     if result.all_rows:
         if result.incremental_mode:
             msg = (
-                f'增量合并处理完成！\n\n'
+                f'{dry_run_banner}增量合并处理完成！\n\n'
                 f'运行模式：增量合并\n'
                 f'已处理文件数：{len(result.processed_files)}\n'
                 f'历史总记录数：{result.existing_record_count}\n'
                 f'本次新提取记录数：{result.new_record_count + result.duplicate_record_count}\n'
                 f'├─ 重复记录（已跳过）：{result.duplicate_record_count}\n'
-                f'└─ 新增记录（已追加）：{result.new_record_count}\n'
+                f'└─ 新增记录（{result.dry_run and "待追加" or "已追加"}）：{result.new_record_count}\n'
                 f'总表当前总记录数：{len(result.all_rows)}\n'
-                f'总表路径：{result.output_path}'
+                f'总表路径：{result.output_path or "(试运行未写盘)"}'
             )
         else:
             msg = (
-                f'处理完成！\n\n'
+                f'{dry_run_banner}处理完成！\n\n'
                 f'运行模式：全量覆盖\n'
                 f'已处理文件数：{len(result.processed_files)}\n'
                 f'提取记录数：{len(result.all_rows)}\n'
-                f'总表路径：{result.output_path}'
+                f'总表路径：{result.output_path or "(试运行未写盘)"}'
             )
+
+        if result.dry_run and result.pending_deletion_files:
+            msg += f'\n\n待删除文件（{len(result.pending_deletion_files)} 个）：'
+            for f in result.pending_deletion_files[:10]:
+                msg += f'\n  └─ {os.path.basename(f)}'
+            if len(result.pending_deletion_files) > 10:
+                msg += f'\n  └─ ... 等共 {len(result.pending_deletion_files)} 个'
 
         if result.masked_output_path:
             msg += f'\n脱敏版总表：{result.masked_output_path}'
             msg += '（银行账号、对方户名已脱敏，可用于对外分享）'
+        elif result.dry_run:
+            msg += '\n脱敏版总表：(试运行未生成)'
 
         if HAS_DATABASE and (result.db_inserted_count > 0 or result.db_duplicate_count > 0):
             msg += (
@@ -3526,6 +3627,8 @@ def format_result_message(result):
                 f'├─ 新增入库：{result.db_inserted_count} 条\n'
                 f'└─ 重复跳过：{result.db_duplicate_count} 条'
             )
+        elif HAS_DATABASE and result.dry_run:
+            msg += '\n\n数据库持久化：(试运行未执行)'
 
         if result.subject_summary_path:
             msg += f'\n\n主体汇总分析：{result.subject_summary_path}'
@@ -3548,22 +3651,30 @@ def format_result_message(result):
         if result.collab_template_path:
             msg += f'\n\n财务协同编辑模板：{result.collab_template_path}'
             msg += '\n（黄色列为可编辑区，灰色列为只读区，编辑后请运行"回写合并"功能）'
+        elif result.dry_run:
+            msg += '\n财务协同编辑模板：(试运行未生成)'
 
         if result.encrypted_files:
             mode_label = 'Excel密码保护' if result.encryption_result and result.encryption_result.mode == 'excel_password' else 'AES-256加密'
             msg += f'\n\n文件加密（{mode_label}）：{len(result.encrypted_files)} 个文件'
             for ef in result.encrypted_files:
                 msg += f'\n  └─ {os.path.basename(ef)}'
+        elif result.dry_run and result.pending_enable_encryption:
+            msg += '\n文件加密：(试运行未执行)'
+
+        if result.dry_run and not result.changes_committed:
+            msg += '\n\n⚠️  试运行提示：请检查以上报告是否符合预期。'
+            msg += '\n确认无误后，请调用 commit_pipeline_changes(result) 执行正式写盘。'
     else:
         if result.incremental_mode and result.existing_record_count > 0:
             msg = (
-                f'本次未提取到任何新增银行流水记录。\n\n'
+                f'{dry_run_banner}本次未提取到任何新增银行流水记录。\n\n'
                 f'运行模式：增量合并\n'
                 f'历史记录保留：{result.existing_record_count} 条\n'
-                f'总表路径：{result.output_path}'
+                f'总表路径：{result.output_path or "(试运行未写盘)"}'
             )
         else:
-            msg = '未提取到任何银行流水记录。'
+            msg = f'{dry_run_banner}未提取到任何银行流水记录。'
 
     if result.unprocessed_files:
         names = '\n  '.join(os.path.basename(f) for f in result.unprocessed_files)
@@ -3584,6 +3695,264 @@ def delete_processed_files(excel_files, keep_set):
                 logger.debug('已删除文件: %s', filepath)
             except OSError as e:
                 logger.error('删除文件「%s」失败: %s', filepath, e)
+
+
+def commit_pipeline_changes(result: ProcessingResult) -> ProcessingResult:
+    """
+    执行试运行结果的正式写盘操作。
+
+    接收试运行（dry_run=True）模式下生成的 ProcessingResult，
+    执行所有被推迟的破坏性写操作：
+    1. 删除已处理成功的 Excel 源文件
+    2. 写入/覆盖银行流水总表
+    3. 回写黑白名单打标结果
+    4. 回写非工作日打标结果
+    5. 回写内部划转标记结果
+    6. 生成脱敏版总表
+    7. 数据库持久化
+    8. 生成协同编辑模板
+    9. 数字签名
+    10. 文件加密
+
+    Args:
+        result: 试运行模式生成的 ProcessingResult 对象
+
+    Returns:
+        ProcessingResult: 更新后的结果对象，包含实际写盘后的路径和状态
+    """
+    logger = get_logger()
+
+    if not result.dry_run:
+        logger.warning('commit_pipeline_changes: 结果不是试运行模式（dry_run=False），无需提交')
+        return result
+
+    if result.changes_committed:
+        logger.warning('commit_pipeline_changes: 变更已被提交过，跳过重复提交')
+        return result
+
+    if result.folder_empty:
+        logger.warning('commit_pipeline_changes: 试运行结果为空文件夹，无需提交')
+        result.changes_committed = True
+        return result
+
+    logger.info('===== 开始提交试运行变更（正式写盘）=====')
+
+    script_dir = result.pending_script_dir
+    lookup_data = result.pending_lookup_source
+    final_rows = result.pending_final_rows
+    all_files = result.pending_all_files
+    keep_set = result.pending_keep_set
+    existing_records = result.pending_existing_records
+    incremental_rows = result.pending_incremental_rows
+    incremental_mode = result.incremental_mode
+    folder = result.pending_input_folder
+    output_dir = result.pending_output_dir
+
+    _cp_tag_summary = result.pending_cp_tag_summary or {}
+    _holiday_tag_summary = result.pending_holiday_tag_summary or {}
+    _it_summary = result.pending_internal_transfer_summary or {}
+    _it_result = result.pending_internal_transfer_result
+
+    if not script_dir:
+        raise ValueError('试运行结果缺少必要字段：pending_script_dir')
+
+    if result.pending_deletion_files:
+        logger.info('[提交] 执行文件删除操作，待删除 %d 个文件', len(result.pending_deletion_files))
+        delete_processed_files(all_files, keep_set)
+    else:
+        logger.info('[提交] 无待删除文件')
+
+    output_path = None
+    if final_rows:
+        if incremental_mode:
+            logger.info('[提交] 执行增量合并写总表：历史 %d 条 + 新增 %d 条',
+                        len(existing_records), len(incremental_rows))
+            output_path = merge_and_export_summary(
+                existing_records, incremental_rows, script_dir,
+                output_dir=output_dir, lookup_source=lookup_data
+            )
+        else:
+            logger.info('[提交] 执行全量覆盖写总表：共 %d 条记录', len(final_rows))
+            columns = get_summary_columns(final_rows, lookup_data)
+            df = pd.DataFrame(final_rows, columns=columns)
+            output_path = get_summary_table_path(script_dir, output_dir)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            df.to_excel(output_path, index=False, engine='openpyxl')
+            logger.info('[提交] 总表输出完成: %s', output_path)
+    elif existing_records:
+        logger.info('[提交] 无新增记录，仅基于历史记录写总表')
+        output_path = merge_and_export_summary(
+            existing_records, [], script_dir,
+            output_dir=output_dir, lookup_source=lookup_data
+        )
+
+    result.output_path = output_path
+
+    if output_path and _cp_tag_summary.get('tagged_count', 0) > 0:
+        logger.info('[提交] 回写黑白名单打标结果到总表')
+        base_columns = get_summary_columns(final_rows, lookup_data)
+        cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
+        _cp_columns = base_columns + [
+            col for col in cp_extra_cols if col not in base_columns
+        ]
+        pd.DataFrame(final_rows, columns=_cp_columns).to_excel(
+            output_path, index=False, engine='openpyxl')
+        logger.info('[提交] 黑白名单打标结果已回写')
+
+    if output_path and _holiday_tag_summary.get('tagged_count', 0) > 0:
+        logger.info('[提交] 回写非工作日打标结果到总表')
+        base_columns = get_summary_columns(final_rows, lookup_data)
+        holiday_extra_cols = ['非工作日标签', '节假日名称']
+        _holiday_columns = base_columns + [
+            col for col in holiday_extra_cols if col not in base_columns
+        ]
+        pd.DataFrame(final_rows, columns=_holiday_columns).to_excel(
+            output_path, index=False, engine='openpyxl')
+        logger.info('[提交] 非工作日打标结果已回写')
+
+    if output_path and _it_summary.get('match_pairs', 0) > 0:
+        logger.info('[提交] 回写内部划转标记结果到总表')
+        base_columns = get_summary_columns(final_rows, lookup_data)
+        it_extra_cols = list(INTERNAL_TRANSFER_EXTRA_COLUMNS)
+        _it_columns = base_columns + [
+            col for col in it_extra_cols if col not in base_columns
+        ]
+        pd.DataFrame(final_rows, columns=_it_columns).to_excel(
+            output_path, index=False, engine='openpyxl')
+        logger.info('[提交] 内部划转标记结果已回写')
+
+    masked_output_path = None
+    if final_rows and output_path:
+        try:
+            logger.info('[提交] 生成脱敏版总表')
+            _output_dir = os.path.dirname(output_path) or script_dir
+            _masked_columns = get_summary_columns(final_rows, lookup_data)
+            if _cp_tag_summary and _cp_tag_summary.get('tagged_count', 0) > 0:
+                cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
+                _masked_columns = _masked_columns + [
+                    col for col in cp_extra_cols if col not in _masked_columns
+                ]
+            else:
+                cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
+                _masked_columns = [col for col in _masked_columns if col not in cp_extra_cols]
+            masked_output_path = export_masked_summary(
+                final_rows, script_dir, output_dir=_output_dir,
+                lookup_source=lookup_data, columns=_masked_columns
+            )
+        except Exception as e:
+            logger.error('[提交] 生成脱敏版总表失败: %s', e, exc_info=True)
+    result.masked_output_path = masked_output_path
+
+    db_inserted = 0
+    db_duplicates = 0
+    if HAS_DATABASE and final_rows:
+        try:
+            batch_id = result.pending_batch_id
+            if batch_id is None:
+                batch_id = f"BATCH{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            logger.info('[提交] 执行数据库持久化')
+            db_inserted, db_duplicates = db_module.persist_transactions(
+                final_rows,
+                batch_id=batch_id,
+                deduplicate=True,
+                script_dir=script_dir,
+            )
+            logger.info('[提交] 数据库持久化完成: 插入 %d 条, 去重跳过 %d 条',
+                        db_inserted, db_duplicates)
+        except Exception as e:
+            logger.error('[提交] 数据库持久化失败: %s', e, exc_info=True)
+    result.db_inserted_count = db_inserted
+    result.db_duplicate_count = db_duplicates
+
+    collab_template_path = None
+    if output_path and final_rows:
+        try:
+            logger.info('[提交] 生成财务协同编辑模板')
+            collab_output_dir = os.path.dirname(output_path) or script_dir
+            collab_template_path = generate_collab_template(
+                output_path,
+                output_dir=collab_output_dir,
+                lookup_source=lookup_data,
+            )
+        except Exception as e:
+            logger.error('[提交] 生成协同编辑模板失败: %s', e, exc_info=True)
+    result.collab_template_path = collab_template_path
+
+    output_hash = None
+    signature_id = None
+    signature_info = None
+    if output_path and result.pending_enable_signature and HAS_CRYPTOGRAPHY:
+        try:
+            logger.info('[提交] 执行数字签名')
+            output_hash = compute_file_hash(output_path)
+            if result.pending_auto_generate_key and not has_signing_key(script_dir):
+                ensure_signing_key(script_dir, auto_generate=True,
+                                   password=result.pending_signature_password)
+            signature_info = sign_output_file(
+                output_path=output_path,
+                script_dir=script_dir,
+                input_directory=folder,
+                password=result.pending_signature_password,
+                extra_data={
+                    'record_count': len(final_rows),
+                    'incremental_mode': incremental_mode,
+                    'processed_files': len(result.processed_files),
+                }
+            )
+            if signature_info:
+                signature_id = save_signature_record(
+                    signature_info, script_dir=script_dir
+                )
+                signature_info['signature_id'] = signature_id
+                logger.info('[提交] 数字签名完成: %s', signature_id)
+        except Exception as e:
+            logger.error('[提交] 数字签名失败: %s', e, exc_info=True)
+    result.output_hash = output_hash
+    result.signature_id = signature_id
+    result.signature_info = signature_info
+
+    encryption_result = None
+    encrypted_files = []
+    if (result.pending_enable_encryption and result.pending_encryption_password
+            and HAS_FILE_ENCRYPTION):
+        try:
+            logger.info('[提交] 执行输出文件加密')
+            enc_output_dir = script_dir
+            if output_path:
+                enc_output_dir = os.path.dirname(output_path) or script_dir
+
+            files_to_encrypt = []
+            for fp in [output_path, result.subject_summary_path, result.balance_check_path,
+                       result.duplicate_check_path, result.interest_fee_check_path,
+                       result.holiday_check_path, result.accounting_period_path]:
+                if fp and os.path.isfile(fp):
+                    files_to_encrypt.append(fp)
+
+            if files_to_encrypt:
+                encryption_result = _encrypt_output_files(
+                    files_to_encrypt,
+                    password=result.pending_encryption_password,
+                    mode=result.pending_encryption_mode,
+                    output_dir=enc_output_dir,
+                )
+                encrypted_files = [
+                    r.encrypted_path for r in encryption_result.results
+                    if r.success and r.encrypted_path
+                ]
+                _save_encryption_record(encryption_result, script_dir=script_dir)
+                logger.info('[提交] 文件加密完成: 成功 %d, 失败 %d',
+                            encryption_result.success_count,
+                            encryption_result.failure_count)
+        except Exception as e:
+            logger.error('[提交] 输出文件加密失败: %s', e, exc_info=True)
+    result.encryption_result = encryption_result
+    result.encrypted_files = encrypted_files
+
+    result.dry_run = False
+    result.changes_committed = True
+    logger.info('===== 试运行变更提交完成 =====')
+    return result
 
 
 # ──────────────────────────────────────────────
@@ -3860,6 +4229,38 @@ def format_diff_message(diff_result):
     return msg
 
 
+def ask_dry_run_mode():
+    """询问用户是否启用试运行模式"""
+    print('\n请选择执行模式：')
+    print('  1) 试运行模式（推荐）：仅生成统计与异常报告，不删除文件、不写总表')
+    print('  2) 正式写盘模式：直接执行删除与写盘操作')
+    choice = input('请输入选项（直接回车默认为 1 试运行模式）: ').strip()
+    if choice == '':
+        return True
+    if choice == '1':
+        return True
+    if choice == '2':
+        return False
+    print('无效选项，默认使用试运行模式')
+    return True
+
+
+def ask_commit_changes():
+    """询问用户是否确认提交试运行变更"""
+    print('\n' + '=' * 60)
+    print('试运行完成，已生成统计与异常报告，请检查报告内容。')
+    print('=' * 60)
+    print('\n是否确认执行以下正式操作？')
+    print('  - 删除已处理成功的源文件（按保留策略）')
+    print('  - 写入/覆盖银行流水总表')
+    print('  - 生成脱敏版总表')
+    print('  - 执行数据库持久化（如已配置）')
+    print('  - 执行数字签名和文件加密（如已启用）')
+    print()
+    choice = input('请确认提交 (y/N): ').strip().lower()
+    return choice in ('y', 'yes')
+
+
 def run_pipeline_flow(script_dir):
     """主流程：处理银行流水文件夹，输出总表"""
     logger = get_logger()
@@ -3878,7 +4279,10 @@ def run_pipeline_flow(script_dir):
         return
     logger.info('用户选择运行模式: %s', '增量合并' if incremental else '全量覆盖')
 
-    result = run_pipeline(folder, script_dir, incremental=incremental)
+    dry_run = ask_dry_run_mode()
+    logger.info('用户选择执行模式: %s', '试运行（不写盘）' if dry_run else '正式写盘')
+
+    result = run_pipeline(folder, script_dir, incremental=incremental, dry_run=dry_run)
 
     if result.lookup_missing:
         show_warning(
@@ -3888,7 +4292,20 @@ def run_pipeline_flow(script_dir):
         )
 
     msg = format_result_message(result)
-    show_info('完成' if result.all_rows else '提示', msg)
+
+    if result.dry_run and not result.folder_empty and result.all_rows:
+        print('\n' + msg)
+        if ask_commit_changes():
+            logger.info('用户确认提交试运行变更')
+            result = commit_pipeline_changes(result)
+            msg = format_result_message(result)
+            show_info('提交完成', msg)
+        else:
+            logger.info('用户取消提交试运行变更')
+            msg += '\n\n⚠️  已取消提交，未执行任何删除与写盘操作。'
+            show_info('已取消', msg)
+    else:
+        show_info('完成' if result.all_rows else '提示', msg)
 
 
 def run_diff_flow(script_dir):
@@ -7867,6 +8284,9 @@ def run_pipeline_flow(script_dir):
         return
     logger.info('用户选择运行模式: %s', '增量合并' if incremental else '全量覆盖')
 
+    dry_run = ask_dry_run_mode()
+    logger.info('用户选择执行模式: %s', '试运行（不写盘）' if dry_run else '正式写盘')
+
     batch_id = None
     batch_manager = None
     if HAS_BATCH_MANAGER:
@@ -7883,8 +8303,8 @@ def run_pipeline_flow(script_dir):
     with AuditLogger('pipeline', script_dir) as audit:
         audit.record_input(folder)
 
-        result = run_pipeline(folder, script_dir, incremental=incremental, batch_id=batch_id)
-        audit.record_result(result)
+        result = run_pipeline(folder, script_dir, incremental=incremental,
+                              batch_id=batch_id, dry_run=dry_run)
 
         if result.lookup_missing:
             show_warning(
@@ -7894,6 +8314,19 @@ def run_pipeline_flow(script_dir):
             )
 
         msg = format_result_message(result)
+
+        if result.dry_run and not result.folder_empty and result.all_rows:
+            print('\n' + msg)
+            if ask_commit_changes():
+                logger.info('用户确认提交试运行变更')
+                result = commit_pipeline_changes(result)
+                msg = format_result_message(result)
+            else:
+                logger.info('用户取消提交试运行变更')
+                msg += '\n\n⚠️  已取消提交，未执行任何删除与写盘操作。'
+
+        audit.record_result(result)
+
         msg += f'\n\n审计编号: {audit.audit_id}'
         if change_result.change_id:
             msg += f'\n配置变更编号: {change_result.change_id}'
@@ -7913,9 +8346,13 @@ def run_pipeline_flow(script_dir):
                     'summary_table_path': result.output_path,
                     'log_file_path': log_file,
                     'audit_id': audit.audit_id,
+                    'dry_run': result.dry_run,
+                    'changes_committed': result.changes_committed,
                 }
                 status = 'success' if result.all_rows or result.existing_record_count > 0 else 'warning'
                 if result.error_files:
+                    status = 'warning'
+                if result.dry_run and not result.changes_committed:
                     status = 'warning'
                 batch_manager.finish_batch(batch_id, result_data, status=status)
                 msg += f'\n批次号: {batch_id}'
@@ -7928,7 +8365,14 @@ def run_pipeline_flow(script_dir):
                     except Exception:
                         pass
 
-        show_info('完成' if result.all_rows else '提示', msg)
+        title = '完成'
+        if result.dry_run and not result.changes_committed:
+            title = '试运行完成（未提交）'
+        elif result.changes_committed:
+            title = '提交完成'
+        elif not result.all_rows:
+            title = '提示'
+        show_info(title, msg)
 
 
 def run_diff_flow(script_dir):
@@ -9183,6 +9627,20 @@ def build_cli_parser():
         default='excel_password',
         help='加密模式 (默认: excel_password)',
     )
+    process_parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        default=False,
+        help='试运行模式：仅生成统计与异常报告，不执行删除与写盘操作',
+    )
+    process_parser.add_argument(
+        '--yes',
+        '--commit',
+        action='store_true',
+        default=False,
+        dest='auto_commit',
+        help='试运行后自动确认提交，无需交互式确认（配合 --dry-run 使用）',
+    )
 
     validate_parser = subparsers.add_parser(
         'validate-lookup',
@@ -9291,6 +9749,13 @@ def _cmd_process(args):
     start_date = args.start_date
     end_date = args.end_date
     batch_id = args.batch_id
+    dry_run = args.dry_run
+    auto_commit = args.auto_commit
+
+    if dry_run:
+        print('\n🔬 试运行模式：仅生成统计与异常报告，不执行删除与写盘操作')
+        if auto_commit:
+            print('⚡ 自动提交模式：试运行完成后将自动执行写盘操作')
 
     if args.preset:
         preset = load_preset(args.preset, script_dir)
@@ -9302,11 +9767,13 @@ def _cmd_process(args):
         print(f'处理目录: {folder}')
         with AuditLogger('preset_pipeline', script_dir) as audit:
             audit.record_input(folder)
-            audit.set_extra_info({'preset_id': args.preset, 'preset_name': preset.get('name', '')})
-            result = apply_preset_to_pipeline(preset, folder, script_dir)
+            audit.set_extra_info({'preset_id': args.preset, 'preset_name': preset.get('name', ''),
+                                  'dry_run': dry_run, 'auto_commit': auto_commit})
+            result = apply_preset_to_pipeline(preset, folder, script_dir, dry_run=dry_run)
             audit.record_result(result)
     else:
-        logger.info('CLI process: 目录=%s, 增量=%s, 保留策略=%s', folder, incremental, keep_strategy)
+        logger.info('CLI process: 目录=%s, 增量=%s, 保留策略=%s, dry_run=%s',
+                    folder, incremental, keep_strategy, dry_run)
 
         result = run_pipeline_with_options(
             folder=folder,
@@ -9321,19 +9788,54 @@ def _cmd_process(args):
             enable_encryption=args.enable_encryption,
             encryption_password=args.encryption_password,
             encryption_mode=args.encryption_mode,
+            dry_run=dry_run,
         )
 
     if result.folder_empty:
         print(f'\n⚠️  文件夹中未发现任何 Excel 文件')
         return 0
 
+    committed = False
+    if result.dry_run and result.all_rows:
+        msg = format_result_message(result)
+        print('\n' + msg)
+        if auto_commit:
+            print('\n⚡ 自动提交试运行变更...')
+            result = commit_pipeline_changes(result)
+            committed = True
+        else:
+            print('\n是否确认提交并执行正式写盘操作？')
+            print('  - 删除已处理成功的源文件（按保留策略）')
+            print('  - 写入/覆盖银行流水总表与脱敏版总表')
+            print('  - 执行数据库持久化（如已配置）')
+            print('  - 执行文件加密（如已启用）')
+            choice = input('\n请确认提交 (y/N): ').strip().lower()
+            if choice in ('y', 'yes'):
+                print('\n📝 正在提交试运行变更...')
+                result = commit_pipeline_changes(result)
+                committed = True
+            else:
+                print('\n⏭️  已取消提交，未执行任何删除与写盘操作。')
+                result.changes_committed = False
+
     if result.all_rows:
-        print(f'\n✅ 处理完成！')
+        if committed:
+            print(f'\n✅ 提交完成！')
+        elif result.dry_run and not result.changes_committed:
+            print(f'\n⏭️  试运行完成（未提交）')
+        else:
+            print(f'\n✅ 处理完成！')
         print(f'   总记录数: {len(result.all_rows)}')
         print(f'   新增记录: {result.new_record_count}')
         print(f'   已处理文件: {len(result.processed_files)}')
         if result.output_path:
             print(f'   输出文件: {result.output_path}')
+        elif result.dry_run and not committed:
+            print(f'   输出文件: (试运行未写盘)')
+        if result.masked_output_path:
+            print(f'   脱敏版总表: {result.masked_output_path}')
+        elif result.dry_run and not committed:
+            print(f'   脱敏版总表: (试运行未生成)')
         if result.lookup_missing:
             print(f'   ⚠️  未找到主体查找表，"主体"列为空')
         if result.unprocessed_files:
@@ -9352,6 +9854,10 @@ def _cmd_process(args):
             print(f'   非工作日交易报告: {result.holiday_check_path}')
         if result.subject_summary_path:
             print(f'   主体汇总分析: {result.subject_summary_path}')
+        if HAS_DATABASE and (result.db_inserted_count > 0 or result.db_duplicate_count > 0):
+            print(f'   数据库入库: {result.db_inserted_count} 条新增, {result.db_duplicate_count} 条重复跳过')
+        elif HAS_DATABASE and result.dry_run and not committed:
+            print(f'   数据库入库: (试运行未执行)')
         return 0
     else:
         print(f'\n⚠️  未提取到任何银行流水记录')
@@ -11002,14 +11508,14 @@ def get_default_preset(script_dir=None):
     return None
 
 
-def apply_preset_to_pipeline(preset, folder, script_dir):
+def apply_preset_to_pipeline(preset, folder, script_dir, dry_run=False):
     logger = get_logger()
 
     if not preset:
         logger.warning('预设为空，使用默认配置运行')
-        return run_pipeline(folder, script_dir)
+        return run_pipeline(folder, script_dir, dry_run=dry_run)
 
-    logger.info('应用预设 [%s] %s', preset.get('preset_id'), preset.get('name', ''))
+    logger.info('应用预设 [%s] %s (dry_run=%s)', preset.get('preset_id'), preset.get('name', ''), dry_run)
 
     enabled_banks = preset.get('enabled_banks', BANK_PREFIXES)
     keep_strategy = preset.get('keep_strategy', 'keep_unprocessed')
@@ -11027,6 +11533,7 @@ def apply_preset_to_pipeline(preset, folder, script_dir):
         start_date=start_date,
         end_date=end_date,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
 
     return result
@@ -11035,8 +11542,11 @@ def apply_preset_to_pipeline(preset, folder, script_dir):
 def run_pipeline_with_options(folder, script_dir, incremental=True,
                               enabled_banks=None, keep_strategy='keep_unprocessed',
                               start_date='', end_date='', batch_id=None, output_dir=None,
-                              enable_encryption=False, encryption_password=None, encryption_mode='excel_password'):
+                              enable_encryption=False, encryption_password=None, encryption_mode='excel_password',
+                              dry_run=False):
     logger = get_logger()
+    if dry_run:
+        logger.info('===== 试运行模式已启用（不执行删除与写盘操作）=====')
 
     if enabled_banks is None:
         enabled_banks = BANK_PREFIXES
@@ -11088,6 +11598,10 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             folder_empty=True,
             incremental_mode=actual_incremental,
             existing_record_count=len(existing_records),
+            dry_run=dry_run,
+            pending_script_dir=script_dir if dry_run else None,
+            pending_output_dir=output_dir if dry_run else None,
+            pending_input_folder=folder if dry_run else None,
         )
 
     def _parse_date(value):
@@ -11166,36 +11680,57 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     else:
         logger.info('保留策略：仅保留未处理文件')
 
-    delete_processed_files(excel_files, keep_set)
+    pending_deletion_files = [f for f in excel_files if f not in keep_set]
+    if dry_run:
+        logger.info('[试运行] 跳过删除文件操作，待删除文件 %d 个', len(pending_deletion_files))
+    else:
+        delete_processed_files(excel_files, keep_set)
 
     output_path = None
     final_rows = []
+    incremental_rows = []
+    _cp_tag_summary = {}
+    _it_summary = {}
+    _it_result = None
 
     if all_rows:
         if actual_incremental:
             incremental_rows, duplicate_count = filter_incremental_records(all_rows, existing_keys)
             new_record_count = len(incremental_rows)
-            output_path = merge_and_export_summary(
-                existing_records, incremental_rows, script_dir, output_dir, lookup_source=lookup_data
-            )
-            final_rows = existing_records + incremental_rows
+            if dry_run:
+                logger.info('[试运行] 跳过总表写盘，模式=增量合并，历史 %d 条 + 新增 %d 条',
+                            len(existing_records), len(incremental_rows))
+                final_rows = existing_records + incremental_rows
+            else:
+                output_path = merge_and_export_summary(
+                    existing_records, incremental_rows, script_dir, output_dir, lookup_source=lookup_data
+                )
+                final_rows = existing_records + incremental_rows
         else:
-            columns = get_summary_columns(all_rows, lookup_data)
-            df = pd.DataFrame(all_rows, columns=columns)
-            output_path = get_summary_table_path(script_dir, output_dir)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
-            df.to_excel(output_path, index=False, engine='openpyxl')
-            logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
-            final_rows = all_rows
+            if dry_run:
+                logger.info('[试运行] 跳过总表写盘，模式=全量覆盖，共 %d 条记录', len(all_rows))
+                final_rows = all_rows
+            else:
+                columns = get_summary_columns(all_rows, lookup_data)
+                df = pd.DataFrame(all_rows, columns=columns)
+                output_path = get_summary_table_path(script_dir, output_dir)
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                df.to_excel(output_path, index=False, engine='openpyxl')
+                logger.info('总表输出完成: %s（共 %d 条记录）', output_path, len(all_rows))
+                final_rows = all_rows
             new_record_count = len(all_rows)
     else:
         logger.warning('未提取到任何银行流水记录')
         if existing_records:
-            output_path = merge_and_export_summary(
-                existing_records, [], script_dir, output_dir, lookup_source=lookup_data
-            )
-            final_rows = existing_records
+            if dry_run:
+                logger.info('[试运行] 跳过总表写盘，仅使用历史记录 %d 条', len(existing_records))
+                final_rows = existing_records
+            else:
+                output_path = merge_and_export_summary(
+                    existing_records, [], script_dir, output_dir, lookup_source=lookup_data
+                )
+                final_rows = existing_records
 
     if final_rows:
         final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
@@ -11205,7 +11740,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                         _cp_tag_summary.get('tagged_count', 0),
                         _cp_tag_summary.get('blacklist_hits', 0),
                         _cp_tag_summary.get('whitelist_hits', 0))
-            if output_path:
+            if output_path and not dry_run:
                 base_columns = get_summary_columns(final_rows, lookup_data)
                 cp_extra_cols = ['黑白名单标签', '命中规则名称', '命中关键词']
                 _cp_columns = base_columns + [
@@ -11214,9 +11749,11 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                 pd.DataFrame(final_rows, columns=_cp_columns).to_excel(
                     output_path, index=False, engine='openpyxl')
                 logger.info('已将黑白名单打标结果回写到总表: %s', output_path)
+            elif dry_run:
+                logger.info('[试运行] 跳过黑白名单打标结果回写总表')
 
     masked_output_path = None
-    if final_rows and output_path:
+    if final_rows and output_path and not dry_run:
         try:
             output_dir = os.path.dirname(output_path) or script_dir
             _masked_columns = get_summary_columns(final_rows, lookup_data)
@@ -11235,10 +11772,12 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         except Exception as e:
             logger.error('生成脱敏版总表失败: %s', e, exc_info=True)
             masked_output_path = None
+    elif final_rows and dry_run:
+        logger.info('[试运行] 跳过生成脱敏版总表')
 
     db_inserted = 0
     db_duplicates = 0
-    if HAS_DATABASE and final_rows:
+    if HAS_DATABASE and final_rows and not dry_run:
         try:
             if batch_id is None:
                 batch_id = f"BATCH{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -11254,9 +11793,10 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             )
         except Exception as e:
             logger.error('数据库持久化失败: %s', e, exc_info=True)
+    elif HAS_DATABASE and final_rows and dry_run:
+        logger.info('[试运行] 跳过数据库持久化操作')
 
     internal_transfer_path = None
-    _it_summary = {}
     if final_rows:
         try:
             final_rows, _it_summary, _it_result = identify_and_tag_internal_transfers(
@@ -11274,7 +11814,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                     len(_it_summary.get('involved_banks', [])),
                     _it_summary.get('total_transfer_amount', 0.0),
                 )
-                if output_path:
+                if output_path and not dry_run:
                     base_columns = get_summary_columns(final_rows, lookup_data)
                     it_extra_cols = list(INTERNAL_TRANSFER_EXTRA_COLUMNS)
                     _it_columns = base_columns + [
@@ -11283,6 +11823,8 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                     pd.DataFrame(final_rows, columns=_it_columns).to_excel(
                         output_path, index=False, engine='openpyxl')
                     logger.info('已将内部划转标记回写到总表: %s', output_path)
+                elif dry_run:
+                    logger.info('[试运行] 跳过内部划转标记回写总表')
 
                 _it_out_dir = script_dir
                 if output_path:
@@ -11430,7 +11972,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     encryption_result = None
     encrypted_files = []
 
-    if enable_encryption and encryption_password and HAS_FILE_ENCRYPTION:
+    if enable_encryption and encryption_password and HAS_FILE_ENCRYPTION and not dry_run:
         try:
             enc_output_dir = output_dir or script_dir
             if output_path:
@@ -11460,6 +12002,8 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         except Exception as e:
             logger.error('输出文件加密失败: %s', e, exc_info=True)
             encryption_result = None
+    elif enable_encryption and dry_run:
+        logger.info('[试运行] 跳过输出文件加密操作')
 
     return ProcessingResult(
         all_rows=final_rows,
@@ -11482,6 +12026,24 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         db_duplicate_count=db_duplicates,
         encryption_result=encryption_result,
         encrypted_files=encrypted_files,
+        dry_run=dry_run,
+        pending_deletion_files=pending_deletion_files,
+        pending_keep_set=keep_set,
+        pending_all_files=list(excel_files),
+        pending_final_rows=final_rows,
+        pending_existing_records=existing_records,
+        pending_incremental_rows=incremental_rows,
+        pending_script_dir=script_dir,
+        pending_output_dir=output_dir,
+        pending_lookup_source=lookup_data,
+        pending_enable_encryption=enable_encryption,
+        pending_encryption_password=encryption_password,
+        pending_encryption_mode=encryption_mode,
+        pending_batch_id=batch_id,
+        pending_input_folder=folder,
+        pending_cp_tag_summary=_cp_tag_summary,
+        pending_internal_transfer_summary=_it_summary,
+        pending_internal_transfer_result=_it_result,
     )
 
 
