@@ -2200,6 +2200,114 @@ def _identify_bank_by_content(filepath: str) -> Optional[str]:
     return None
 
 
+def _get_file_debug_info(filepath: str, max_rows: int = 10, max_cols: int = 10) -> Dict[str, Any]:
+    """
+    获取文件调试信息，用于银行识别失败时的人工排查。
+
+    Args:
+        filepath: Excel 文件路径
+        max_rows: 最多读取的行数（用于快照）
+        max_cols: 最多读取的列数（用于快照）
+
+    Returns:
+        包含以下字段的字典：
+        - filename: 文件名
+        - extension: 文件扩展名
+        - file_size_bytes: 文件大小（字节）
+        - file_size_human: 文件大小（人类可读格式）
+        - sheet_names: 工作表名称列表
+        - active_sheet: 活动工作表名称
+        - preview_rows: 前几行单元格快照（二维列表）
+    """
+    logger = get_logger()
+    result = {
+        'filename': os.path.basename(filepath),
+        'extension': os.path.splitext(filepath)[1].lower(),
+        'file_size_bytes': 0,
+        'file_size_human': 'unknown',
+        'sheet_names': [],
+        'active_sheet': '',
+        'preview_rows': [],
+    }
+
+    try:
+        if os.path.isfile(filepath):
+            size = os.path.getsize(filepath)
+            result['file_size_bytes'] = size
+            for unit in ['B', 'KB', 'MB', 'GB']:
+                if size < 1024.0:
+                    result['file_size_human'] = f'{size:.2f} {unit}'
+                    break
+                size /= 1024.0
+    except Exception as e:
+        logger.debug('获取文件大小失败 %s: %s', filepath, e)
+
+    try:
+        wb, tmp_path = open_workbook_compat(filepath)
+        try:
+            result['sheet_names'] = [ws.title for ws in wb.worksheets]
+            ws = wb.active
+            result['active_sheet'] = ws.title if ws else ''
+
+            if ws:
+                actual_rows = min(ws.max_row, max_rows)
+                actual_cols = min(ws.max_column, max_cols)
+                for row_idx in range(1, actual_rows + 1):
+                    row_data = []
+                    for col_idx in range(1, actual_cols + 1):
+                        val = ws.cell(row=row_idx, column=col_idx).value
+                        if val is None:
+                            row_data.append('')
+                        else:
+                            s = str(val)
+                            if len(s) > 50:
+                                s = s[:47] + '...'
+                            row_data.append(s)
+                    result['preview_rows'].append(row_data)
+        finally:
+            wb.close()
+            cleanup_temp_file(tmp_path)
+    except Exception as e:
+        logger.debug('读取 Excel 预览失败 %s: %s', filepath, e)
+
+    return result
+
+
+def _format_debug_preview(preview_rows: List[List[str]]) -> str:
+    """
+    将预览行数据格式化为可读的表格字符串。
+
+    Args:
+        preview_rows: 二维列表形式的单元格数据
+
+    Returns:
+        格式化后的表格字符串
+    """
+    if not preview_rows:
+        return '(no data)'
+
+    col_widths = []
+    for col_idx in range(len(preview_rows[0])):
+        max_w = 0
+        for row in preview_rows:
+            if col_idx < len(row):
+                max_w = max(max_w, len(row[col_idx]))
+        col_widths.append(min(max_w, 30))
+
+    lines = []
+    for i, row in enumerate(preview_rows):
+        cells = []
+        for j, cell in enumerate(row):
+            if j < len(col_widths):
+                w = col_widths[j]
+                display = cell[:w].ljust(w)
+                cells.append(display)
+        line = f'  Row {i + 1:2d}: | ' + ' | '.join(cells) + ' |'
+        lines.append(line)
+
+    return '\n'.join(lines)
+
+
 def identify_bank(filepath):
     """
     识别银行类型，返回银行名称或 None。
@@ -2227,6 +2335,30 @@ def identify_bank(filepath):
         return content_match
 
     logger.warning('文件「%s」无法识别银行类型', basename)
+
+    try:
+        debug_info = _get_file_debug_info(filepath)
+        preview_str = _format_debug_preview(debug_info['preview_rows'])
+        logger.debug(
+            '银行识别失败 - 文件调试信息:\n'
+            '  文件名: %s\n'
+            '  扩展名: %s\n'
+            '  文件大小: %s (%d bytes)\n'
+            '  工作表列表: %s\n'
+            '  活动工作表: %s\n'
+            '  前 %d 行单元格快照:\n%s',
+            debug_info['filename'],
+            debug_info['extension'],
+            debug_info['file_size_human'],
+            debug_info['file_size_bytes'],
+            debug_info['sheet_names'],
+            debug_info['active_sheet'],
+            len(debug_info['preview_rows']),
+            preview_str,
+        )
+    except Exception as e:
+        logger.debug('收集银行识别失败调试信息时出错: %s', e)
+
     return None
 
 
