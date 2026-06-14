@@ -1776,3 +1776,190 @@ class TestDryRunTwoPhase:
         args = parser.parse_args(['process', '/tmp/test', '--dry-run', '--commit'])
         assert args.dry_run is True
         assert args.auto_commit is True
+
+
+class TestContentHashDeduplication:
+    """基于文件内容哈希的去重机制集成测试"""
+
+    def _setup_folder_with_duplicates(self, tmp_dir, script_dir):
+        """创建包含重复 Excel 文件的测试文件夹"""
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        sub_folder1 = os.path.join(source_folder, '子目录1')
+        sub_folder2 = os.path.join(source_folder, '子目录2')
+        os.makedirs(sub_folder1, exist_ok=True)
+        os.makedirs(sub_folder2, exist_ok=True)
+
+        path1 = os.path.join(sub_folder1, '北京银行_流水.xlsx')
+        path2 = os.path.join(sub_folder2, '北京银行_流水_副本.xlsx')
+        path3 = os.path.join(source_folder, '北京银行_另一份.xlsx')
+        _create_beijing_bank_excel(path1)
+        import shutil as _shutil
+        _shutil.copy2(path1, path2)
+        _shutil.copy2(path1, path3)
+
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+        return source_folder, [path1, path2, path3]
+
+    def test_deduplicate_identical_content_files(self, tmp_dir):
+        """内容相同但路径不同的 Excel 应仅处理一份"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source, original_paths = self._setup_folder_with_duplicates(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline(source, script_dir)
+
+        assert len(result.processed_files) == 1, '应仅处理 1 个文件'
+        assert len(result.skipped_duplicate_files) == 2, '应跳过 2 个重复文件'
+        assert len(result.all_rows) == 2, '应提取 2 条记录（仅一份）'
+
+        original_basenames = [os.path.basename(p) for p in original_paths]
+        processed_basename = os.path.basename(result.processed_files[0])
+        assert processed_basename in original_basenames
+
+        skipped_basenames = [os.path.basename(p) for p, _ in result.skipped_duplicate_files]
+        assert len(skipped_basenames) == 2
+        for sb in skipped_basenames:
+            assert sb in original_basenames
+        assert processed_basename not in skipped_basenames
+
+    def test_deduplicate_skip_reason_contains_info(self, tmp_dir):
+        """跳过原因应包含代表文件名和哈希信息"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source, _ = self._setup_folder_with_duplicates(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline(source, script_dir)
+
+        assert len(result.skipped_duplicate_files) == 2
+        for _, reason in result.skipped_duplicate_files:
+            assert '内容与' in reason
+            assert '完全相同' in reason
+            assert '哈希:' in reason
+            assert '已跳过重复处理' in reason
+
+    def test_deduplicate_files_preserved_in_working_folder(self, tmp_dir):
+        """重复文件应在检验版文件夹中被保留"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source, _ = self._setup_folder_with_duplicates(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline(source, script_dir, keep_strategy='keep_all')
+
+        new_folder = source + '＋检验版'
+        remaining = bankcheck.scan_excel_files(new_folder)
+        assert len(remaining) == 3, '所有文件（含重复）应被保留'
+
+    def test_deduplicate_default_strategy_preserves_duplicates(self, tmp_dir):
+        """默认 keep_unprocessed 策略下重复文件应被保留"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source, _ = self._setup_folder_with_duplicates(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline(source, script_dir)
+
+        new_folder = source + '＋检验版'
+        remaining = bankcheck.scan_excel_files(new_folder)
+        remaining_basenames = [os.path.basename(f) for f in remaining]
+        for dup_path, _ in result.skipped_duplicate_files:
+            assert os.path.basename(dup_path) in remaining_basenames
+
+    def test_format_message_contains_skipped_duplicates(self, tmp_dir):
+        """结果消息中应包含跳过的重复文件信息"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source, _ = self._setup_folder_with_duplicates(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline(source, script_dir)
+        msg = bankcheck.format_result_message(result)
+
+        assert '内容重复被跳过的文件' in msg
+        assert '2 个' in msg
+        for dup_path, reason in result.skipped_duplicate_files:
+            assert os.path.basename(dup_path) in msg
+
+    def test_pending_list_contains_skipped_duplicates(self, tmp_dir):
+        """待处理清单中应包含跳过的重复文件"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source, _ = self._setup_folder_with_duplicates(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline(source, script_dir)
+
+        assert result.pending_list_path is not None
+        assert os.path.exists(result.pending_list_path)
+
+        df = pd.read_excel(result.pending_list_path, engine='openpyxl')
+        assert '内容重复已跳过' in df['识别结果'].tolist()
+        dup_rows = df[df['识别结果'] == '内容重复已跳过']
+        assert len(dup_rows) == 2
+
+    def test_compute_hash_same_for_identical_files(self, tmp_dir):
+        """compute_excel_content_hash 对完全相同文件应返回相同哈希"""
+        source_folder = os.path.join(tmp_dir, '流水')
+        os.makedirs(source_folder)
+        path1 = os.path.join(source_folder, 'a.xlsx')
+        path2 = os.path.join(source_folder, 'b.xlsx')
+        _create_beijing_bank_excel(path1)
+        import shutil as _shutil
+        _shutil.copy2(path1, path2)
+
+        h1 = bankcheck.compute_excel_content_hash(path1)
+        h2 = bankcheck.compute_excel_content_hash(path2)
+
+        assert h1 is not None
+        assert h2 is not None
+        assert h1 == h2
+
+    def test_compute_hash_different_for_distinct_files(self, tmp_dir):
+        """不同内容的 Excel 应返回不同哈希"""
+        source_folder = os.path.join(tmp_dir, '流水')
+        os.makedirs(source_folder)
+        path1 = os.path.join(source_folder, '北京银行.xlsx')
+        path2 = os.path.join(source_folder, '东亚银行.xlsx')
+        _create_beijing_bank_excel(path1)
+        _create_east_asia_bank_excel(path2)
+
+        h1 = bankcheck.compute_excel_content_hash(path1)
+        h2 = bankcheck.compute_excel_content_hash(path2)
+
+        assert h1 is not None
+        assert h2 is not None
+        assert h1 != h2
+
+    def test_deduplicate_with_mixed_valid_and_duplicate(self, tmp_dir):
+        """混合不同内容和重复内容的文件应正确去重"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        sub_folder = os.path.join(source_folder, '子目录')
+        os.makedirs(sub_folder, exist_ok=True)
+
+        _create_beijing_bank_excel(os.path.join(source_folder, '北京银行.xlsx'))
+        _create_east_asia_bank_excel(os.path.join(source_folder, '东亚银行.xlsx'))
+        import shutil as _shutil
+        _shutil.copy2(
+            os.path.join(source_folder, '北京银行.xlsx'),
+            os.path.join(sub_folder, '北京银行_副本.xlsx')
+        )
+
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+
+        result = bankcheck.run_pipeline(source_folder, script_dir)
+
+        assert len(result.processed_files) == 2
+        assert len(result.skipped_duplicate_files) == 1
+        assert len(result.all_rows) == 4
+
+    def test_deduplicate_in_run_pipeline_with_options(self, tmp_dir):
+        """run_pipeline_with_options 中应同样启用去重"""
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source, original_paths = self._setup_folder_with_duplicates(tmp_dir, script_dir)
+
+        result = bankcheck.run_pipeline_with_options(
+            folder=source,
+            script_dir=script_dir,
+        )
+
+        assert len(result.processed_files) == 1
+        assert len(result.skipped_duplicate_files) == 2

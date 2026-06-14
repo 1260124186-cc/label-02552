@@ -1021,6 +1021,125 @@ def scan_excel_files(folder):
     return excel_files
 
 
+def compute_excel_content_hash(filepath, chunk_size=8192):
+    """
+    基于文件二进制内容计算 SHA-256 哈希，用于内容级去重。
+
+    对于 xlsx 文件（ZIP 格式），由于 ZIP 包头可能包含时间戳等元数据，
+    直接对整个文件哈希可能导致相同内容产生不同哈希。因此对 xlsx 文件
+    采用"读取核心内容后再哈希"的策略：尝试用 openpyxl 读取后重新导出
+    （若不可行则回退到纯文件字节哈希）。
+
+    对于 xls 文件，直接使用文件字节哈希。
+
+    Args:
+        filepath: Excel 文件的绝对路径
+        chunk_size: 分块读取的字节数
+
+    Returns:
+        str: 十六进制格式的 SHA-256 哈希字符串；出错时返回 None
+    """
+    logger = get_logger()
+    fmt = detect_excel_format(filepath)
+
+    try:
+        if fmt == 'xlsx':
+            try:
+                import zipfile
+                import io
+                hasher = hashlib.sha256()
+                with zipfile.ZipFile(filepath, 'r') as zf:
+                    for name in sorted(zf.namelist()):
+                        if name.startswith('xl/') or name == '[Content_Types].xml' or name.startswith('_rels/'):
+                            data = zf.read(name)
+                            hasher.update(name.encode('utf-8'))
+                            hasher.update(b'\x00')
+                            hasher.update(data)
+                            hasher.update(b'\x01')
+                return hasher.hexdigest()
+            except Exception as inner_e:
+                logger.debug(
+                    'xlsx 内容哈希失败（%s），回退到文件字节哈希: %s',
+                    filepath, inner_e
+                )
+
+        hasher = hashlib.sha256()
+        with open(filepath, 'rb') as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception as e:
+        logger.warning('计算文件哈希失败 %s: %s', filepath, e)
+        return None
+
+
+def deduplicate_excel_files_by_content(excel_files):
+    """
+    基于文件内容哈希对 Excel 文件列表进行去重。
+
+    策略：保留路径字典序最靠前的文件作为"代表文件"，其余内容相同的文件
+    作为重复文件跳过。
+
+    Args:
+        excel_files: Excel 文件路径列表
+
+    Returns:
+        tuple: (unique_files, duplicate_info_list)
+            - unique_files: 去重后的文件路径列表（顺序与原列表一致，仅保留首次出现）
+            - duplicate_info_list: 被跳过文件的信息列表，每个元素为
+              (duplicate_path, reason_str)，reason 格式为
+              "内容与 {representative_path} 完全相同（哈希: xxx）"
+    """
+    logger = get_logger()
+    if not excel_files:
+        return [], []
+
+    hash_to_representative = {}
+    unique_files = []
+    duplicate_info_list = []
+
+    sorted_files = sorted(excel_files, key=lambda p: (os.path.basename(p), p))
+
+    for filepath in sorted_files:
+        content_hash = compute_excel_content_hash(filepath)
+        if content_hash is None:
+            unique_files.append(filepath)
+            logger.warning(
+                '文件哈希计算失败，无法判断是否重复，将按原样处理: %s',
+                filepath
+            )
+            continue
+
+        if content_hash in hash_to_representative:
+            rep = hash_to_representative[content_hash]
+            short_rep = os.path.basename(rep)
+            short_hash = content_hash[:12]
+            reason = (
+                f'内容与「{short_rep}」完全相同（哈希: {short_hash}...），已跳过重复处理'
+            )
+            duplicate_info_list.append((filepath, reason))
+            logger.info(
+                '跳过重复文件: %s -> 与代表文件 %s 内容相同（哈希 %s...）',
+                os.path.basename(filepath), short_rep, short_hash
+            )
+        else:
+            hash_to_representative[content_hash] = filepath
+            unique_files.append(filepath)
+
+    original_count = len(excel_files)
+    skipped_count = len(duplicate_info_list)
+    if skipped_count > 0:
+        logger.info(
+            '基于内容哈希去重完成：原 %d 个文件，去重后 %d 个，跳过重复 %d 个',
+            original_count, len(unique_files), skipped_count
+        )
+
+    return unique_files, duplicate_info_list
+
+
 # ──────────────────────────────────────────────
 # 银行规则配置模块
 # ──────────────────────────────────────────────
@@ -2623,6 +2742,7 @@ class ProcessingResult:
     processed_files: List[str] = field(default_factory=list)
     unprocessed_files: List[str] = field(default_factory=list)
     error_files: List[Tuple[str, str]] = field(default_factory=list)
+    skipped_duplicate_files: List[Tuple[str, str]] = field(default_factory=list)
     output_path: Optional[str] = None
     masked_output_path: Optional[str] = None
     subject_summary_path: Optional[str] = None
@@ -3064,6 +3184,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         _profiler.record_phase('folder_copy', _copy_dur, '复制文件夹')
 
     excel_files = scan_excel_files(working_folder)
+    excel_files, skipped_duplicate_files = deduplicate_excel_files_by_content(excel_files)
     try:
         from pdf_bank_parser import scan_pdf_files, is_pdf_file, process_pdf_file
         pdf_files = scan_pdf_files(working_folder)
@@ -3080,6 +3201,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
             incremental_mode=actual_incremental,
             existing_record_count=len(existing_records),
             dry_run=dry_run,
+            skipped_duplicate_files=skipped_duplicate_files,
             pending_script_dir=script_dir if dry_run else None,
             pending_input_folder=folder if dry_run else None,
             working_folder=working_folder,
@@ -3132,14 +3254,17 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                                f'处理 {len(all_files)} 个文件')
 
     error_file_paths = {f for f, _ in error_files}
-    keep_set = set(unprocessed_files) | error_file_paths
-    pending_deletion_files = [f for f in all_files if f not in keep_set]
+    skipped_dup_paths = {f for f, _ in skipped_duplicate_files}
+    keep_set = set(unprocessed_files) | error_file_paths | skipped_dup_paths
+    all_original_files = all_files + list(skipped_dup_paths)
+    pending_deletion_files = [f for f in all_original_files if f not in keep_set]
 
     if dry_run:
         logger.info('[试运行] 跳过删除文件操作，待删除文件 %d 个', len(pending_deletion_files))
     else:
         delete_processed_files(
-            all_files, processed_files, error_files, unprocessed_files,
+            all_original_files, processed_files, error_files, unprocessed_files,
+            skipped_duplicate_files=skipped_duplicate_files,
             strategy=keep_strategy, archive_dir_name=archive_dir_name
         )
 
@@ -3582,11 +3707,12 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         logger.info('[试运行] 跳过输出文件加密操作')
 
     pending_list_path = None
-    if (unprocessed_files or error_files) and not dry_run:
+    if (unprocessed_files or error_files or skipped_duplicate_files) and not dry_run:
         pending_list_path = generate_pending_list_xlsx(
-            unprocessed_files, error_files, script_dir
+            unprocessed_files, error_files, script_dir,
+            skipped_duplicate_files=skipped_duplicate_files,
         )
-    elif (unprocessed_files or error_files) and dry_run:
+    elif (unprocessed_files or error_files or skipped_duplicate_files) and dry_run:
         logger.info('[试运行] 跳过待处理清单生成')
 
     return ProcessingResult(
@@ -3594,6 +3720,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         processed_files=processed_files,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
+        skipped_duplicate_files=skipped_duplicate_files,
         output_path=output_path,
         masked_output_path=masked_output_path,
         subject_summary_path=subject_summary_path,
@@ -3752,38 +3879,45 @@ def format_result_message(result):
     if result.error_files:
         err_info = '\n  '.join(f'{os.path.basename(f)}: {e}' for f, e in result.error_files)
         msg += f'\n\n处理出错的文件（{len(result.error_files)} 个，已保留）：\n  {err_info}'
+    if result.skipped_duplicate_files:
+        dup_info = '\n  '.join(f'{os.path.basename(f)}: {reason}' for f, reason in result.skipped_duplicate_files)
+        msg += f'\n\n内容重复被跳过的文件（{len(result.skipped_duplicate_files)} 个，已保留）：\n  {dup_info}'
 
     if result.pending_list_path:
         msg += f'\n\n待处理清单：{result.pending_list_path}'
         msg += '\n（请根据清单修正文件后重新导入）'
-    elif result.dry_run and (result.unprocessed_files or result.error_files):
+    elif result.dry_run and (result.unprocessed_files or result.error_files or result.skipped_duplicate_files):
         msg += '\n\n待处理清单：(试运行未生成)'
 
     return msg
 
 
 def generate_pending_list_xlsx(unprocessed_files, error_files, script_dir,
-                                output_dir=None):
+                                output_dir=None, skipped_duplicate_files=None):
     """
-    生成待处理清单.xlsx，列出无法识别和处理出错的文件。
+    生成待处理清单.xlsx，列出无法识别、处理出错、以及因内容重复被跳过的文件。
 
     清单包含三列：
     - 文件路径：待处理文件的完整路径
-    - 识别结果：无法识别银行类型 / 处理出错
-    - 错误信息：具体的错误描述（无法识别的文件此项为空）
+    - 识别结果：无法识别银行类型 / 处理出错 / 内容重复已跳过
+    - 错误信息：具体的错误描述或跳过原因
 
     Args:
         unprocessed_files: 无法识别银行类型的文件路径列表
         error_files: 处理出错的文件列表，每个元素为 (文件路径, 错误信息) 元组
         script_dir: 脚本目录，用于默认输出路径
         output_dir: 可选的输出目录，不指定时使用 script_dir
+        skipped_duplicate_files: 因内容重复被跳过的文件列表，每个元素为 (文件路径, 跳过原因)
 
     Returns:
         生成的待处理清单文件路径，如果没有待处理文件则返回 None
     """
     logger = get_logger()
 
-    if not unprocessed_files and not error_files:
+    if skipped_duplicate_files is None:
+        skipped_duplicate_files = []
+
+    if not unprocessed_files and not error_files and not skipped_duplicate_files:
         logger.info('没有待处理的文件，无需生成待处理清单')
         return None
 
@@ -3799,6 +3933,12 @@ def generate_pending_list_xlsx(unprocessed_files, error_files, script_dir,
             '文件路径': filepath,
             '识别结果': '处理出错',
             '错误信息': error_msg,
+        })
+    for filepath, skip_reason in skipped_duplicate_files:
+        rows.append({
+            '文件路径': filepath,
+            '识别结果': '内容重复已跳过',
+            '错误信息': skip_reason,
         })
 
     columns = ['文件路径', '识别结果', '错误信息']
@@ -3819,6 +3959,7 @@ def generate_pending_list_xlsx(unprocessed_files, error_files, script_dir,
 
 
 def delete_processed_files(excel_files, processed_files, error_files, unprocessed_files,
+                           skipped_duplicate_files=None,
                            strategy='keep_unprocessed', archive_dir_name='已处理归档'):
     """
     根据策略处理已处理成功的 Excel 文件。
@@ -3834,6 +3975,7 @@ def delete_processed_files(excel_files, processed_files, error_files, unprocesse
         processed_files: 已成功处理的文件列表
         error_files: 处理出错的文件列表 [(path, error_msg), ...]
         unprocessed_files: 未识别/未处理的文件列表
+        skipped_duplicate_files: 因内容重复被跳过的文件列表 [(path, reason), ...]，默认 None
         strategy: 文件保留策略，默认为 'keep_unprocessed'
         archive_dir_name: 归档目录名（仅 move_to_archive 策略使用），默认为 '已处理归档'
     """
@@ -3841,6 +3983,9 @@ def delete_processed_files(excel_files, processed_files, error_files, unprocesse
 
     if not excel_files:
         return
+
+    if skipped_duplicate_files is None:
+        skipped_duplicate_files = []
 
     if strategy not in KEEP_STRATEGIES:
         logger.warning('未知的保留策略「%s」，回退到默认 keep_unprocessed', strategy)
@@ -3851,8 +3996,9 @@ def delete_processed_files(excel_files, processed_files, error_files, unprocesse
         return
 
     error_file_paths = {f for f, _ in error_files}
+    skipped_dup_paths = {f for f, _ in skipped_duplicate_files}
     processed_set = set(processed_files)
-    keep_set = set(unprocessed_files) | error_file_paths
+    keep_set = set(unprocessed_files) | error_file_paths | skipped_dup_paths
 
     def _get_common_parent_dir(files):
         dirs = [os.path.dirname(os.path.abspath(f)) for f in files if f]
@@ -3875,7 +4021,7 @@ def delete_processed_files(excel_files, processed_files, error_files, unprocesse
             return
 
         for filepath in excel_files:
-            if filepath in processed_set and filepath not in error_file_paths:
+            if filepath in processed_set and filepath not in error_file_paths and filepath not in skipped_dup_paths:
                 try:
                     if not os.path.exists(filepath):
                         logger.debug('归档目标不存在，跳过: %s', filepath)
@@ -3895,11 +4041,11 @@ def delete_processed_files(excel_files, processed_files, error_files, unprocesse
         return
 
     if strategy == 'keep_unprocessed':
-        delete_set = processed_set - error_file_paths
+        delete_set = processed_set - error_file_paths - skipped_dup_paths
     elif strategy == 'delete_all':
-        delete_set = set(excel_files)
+        delete_set = set(excel_files) - skipped_dup_paths
     else:
-        delete_set = processed_set - error_file_paths
+        delete_set = processed_set - error_file_paths - skipped_dup_paths
 
     for filepath in excel_files:
         if filepath in delete_set:
@@ -3977,6 +4123,7 @@ def commit_pipeline_changes(result: ProcessingResult) -> ProcessingResult:
             result.processed_files,
             result.error_files,
             result.unprocessed_files,
+            skipped_duplicate_files=result.skipped_duplicate_files,
             strategy=result.pending_keep_strategy,
             archive_dir_name=result.pending_archive_dir_name,
         )
@@ -4170,9 +4317,10 @@ def commit_pipeline_changes(result: ProcessingResult) -> ProcessingResult:
     result.encryption_result = encryption_result
     result.encrypted_files = encrypted_files
 
-    if result.unprocessed_files or result.error_files:
+    if result.unprocessed_files or result.error_files or result.skipped_duplicate_files:
         pending_list_path = generate_pending_list_xlsx(
-            result.unprocessed_files, result.error_files, script_dir
+            result.unprocessed_files, result.error_files, script_dir,
+            skipped_duplicate_files=result.skipped_duplicate_files,
         )
         result.pending_list_path = pending_list_path
 
@@ -12187,6 +12335,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     )
 
     excel_files = scan_excel_files(working_folder)
+    excel_files, skipped_duplicate_files = deduplicate_excel_files_by_content(excel_files)
     if not excel_files:
         logger.warning('工作文件夹中未发现任何 Excel 文件')
         return ProcessingResult(
@@ -12195,6 +12344,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             incremental_mode=actual_incremental,
             existing_record_count=len(existing_records),
             dry_run=dry_run,
+            skipped_duplicate_files=skipped_duplicate_files,
             pending_script_dir=script_dir if dry_run else None,
             pending_output_dir=output_dir if dry_run else None,
             pending_input_folder=folder if dry_run else None,
@@ -12267,27 +12417,30 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         logger.info('日期过滤共排除 %d 条记录', filtered_out_count)
 
     error_file_paths = {f for f, _ in error_files}
-    keep_set = set(unprocessed_files) | error_file_paths
+    skipped_dup_paths = {f for f, _ in skipped_duplicate_files}
+    keep_set = set(unprocessed_files) | error_file_paths | skipped_dup_paths
+    all_original_files = list(excel_files) + list(skipped_dup_paths)
 
     if keep_strategy == 'keep_all':
-        keep_set = set(excel_files)
+        keep_set = set(all_original_files)
         logger.info('保留策略：保留所有文件')
     elif keep_strategy == 'delete_all':
-        keep_set = set()
-        logger.info('保留策略：删除所有已处理文件')
+        keep_set = skipped_dup_paths
+        logger.info('保留策略：删除所有已处理文件（内容重复文件仍保留）')
     elif keep_strategy == 'move_to_archive':
         logger.info('保留策略：归档已处理文件到「%s」子目录', archive_dir_name)
     else:
         logger.info('保留策略：仅保留未处理文件')
 
-    pending_deletion_files = [f for f in excel_files if f not in keep_set] if keep_strategy != 'move_to_archive' else [
-        f for f in processed_files if f not in error_file_paths
+    pending_deletion_files = [f for f in all_original_files if f not in keep_set] if keep_strategy != 'move_to_archive' else [
+        f for f in processed_files if f not in error_file_paths and f not in skipped_dup_paths
     ]
     if dry_run:
         logger.info('[试运行] 跳过删除文件操作，待删除文件 %d 个', len(pending_deletion_files))
     else:
         delete_processed_files(
-            excel_files, processed_files, error_files, unprocessed_files,
+            all_original_files, processed_files, error_files, unprocessed_files,
+            skipped_duplicate_files=skipped_duplicate_files,
             strategy=keep_strategy, archive_dir_name=archive_dir_name
         )
 
@@ -12627,11 +12780,12 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         logger.info('[试运行] 跳过输出文件加密操作')
 
     pending_list_path = None
-    if (unprocessed_files or error_files) and not dry_run:
+    if (unprocessed_files or error_files or skipped_duplicate_files) and not dry_run:
         pending_list_path = generate_pending_list_xlsx(
-            unprocessed_files, error_files, script_dir, output_dir
+            unprocessed_files, error_files, script_dir, output_dir,
+            skipped_duplicate_files=skipped_duplicate_files,
         )
-    elif (unprocessed_files or error_files) and dry_run:
+    elif (unprocessed_files or error_files or skipped_duplicate_files) and dry_run:
         logger.info('[试运行] 跳过待处理清单生成')
 
     return ProcessingResult(
@@ -12639,6 +12793,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         processed_files=processed_files,
         unprocessed_files=unprocessed_files,
         error_files=error_files,
+        skipped_duplicate_files=skipped_duplicate_files,
         output_path=output_path,
         masked_output_path=masked_output_path,
         subject_summary_path=subject_summary_path,
