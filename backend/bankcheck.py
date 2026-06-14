@@ -460,6 +460,7 @@ def cli_askmode():
     print(t('cli.option_interest_fee_check'))
     print(t('cli.option_balance_reconciliation'))
     print('  15) 非工作日交易标记')
+    print('  16) 批量文件夹处理')
     choice = input(t('cli.enter_choice')).strip()
     if choice == '2':
         return 'diff'
@@ -489,6 +490,8 @@ def cli_askmode():
         return 'balance_reconciliation'
     elif choice == '15':
         return 'holiday_check'
+    elif choice == '16':
+        return 'batch_pipeline'
     return 'pipeline'
 
 
@@ -546,6 +549,7 @@ def _gui_askmode_full():
 
     modes = [
         (t('modes.pipeline_name'), 'pipeline', t('modes.pipeline_desc'), '#4CAF50'),
+        ('批量处理', 'batch_pipeline', '一次选择多个文件夹，顺序处理汇总', '#66BB6A'),
         (t('modes.diff_name'), 'diff', t('modes.diff_desc'), '#2196F3'),
         (t('modes.monitor_name'), 'monitor', t('modes.monitor_desc'), '#FF9800'),
         (t('modes.scheduler_name'), 'scheduler', t('modes.scheduler_desc'), '#9C27B0'),
@@ -639,15 +643,127 @@ def cli_ask_monitor_export_menu():
     return 'monitor'
 
 
+def cli_ask_directories(title=None, use_history=True):
+    """命令行模式下让用户一次选择多个文件夹路径，支持历史记录
+
+    用户可输入多个路径（用分号分隔），也可从最近使用历史中选择。
+    输入空行表示结束选择。
+
+    Returns:
+        list[str]: 选择的文件夹路径列表（已验证存在），空列表表示取消
+    """
+    if title is None:
+        title = '请选择多个银行流水文件夹'
+    print(f'\n{title}')
+    print('提示：可输入多个路径，用分号(;)分隔；输入空行结束选择')
+
+    if use_history:
+        recent = load_recent_folders()
+        if recent:
+            print(t('cli.recent_folders'))
+            for i, folder in enumerate(recent[:MAX_RECENT_FOLDERS], 1):
+                print(f'  {i}) {folder}')
+
+    folders = []
+
+    raw = input('请输入文件夹路径（分号分隔多路径，或序号选择历史）: ').strip()
+    if not raw:
+        return []
+
+    if use_history and raw.isdigit():
+        idx = int(raw) - 1
+        recent = load_recent_folders()
+        if 0 <= idx < len(recent):
+            folders.append(recent[idx])
+    else:
+        for part in raw.split(';'):
+            part = part.strip().strip('"').strip("'")
+            if part and os.path.isdir(part):
+                folders.append(part)
+                add_to_recent_folders(part)
+
+    while True:
+        extra = input('继续添加路径（直接回车结束）: ').strip()
+        if not extra:
+            break
+        if use_history and extra.isdigit():
+            idx = int(extra) - 1
+            recent = load_recent_folders()
+            if 0 <= idx < len(recent):
+                folders.append(recent[idx])
+                continue
+        for part in extra.split(';'):
+            part = part.strip().strip('"').strip("'")
+            if part and os.path.isdir(part):
+                folders.append(part)
+                add_to_recent_folders(part)
+
+    if not folders:
+        print('未选择任何有效文件夹')
+    return folders
+
+
+def gui_ask_directories(title=None, initialdir=None, use_history=True):
+    """GUI 模式选择多个文件夹
+
+    弹出文件夹选择对话框，用户可多次选择。每次选择后询问是否继续。
+
+    Returns:
+        list[str]: 选择的文件夹路径列表，空列表表示取消
+    """
+    if title is None:
+        title = '请选择多个银行流水文件夹'
+
+    if use_history and initialdir is None:
+        initialdir = get_last_used_folder()
+
+    folders = []
+
+    while True:
+        root = tk.Tk()
+        root.withdraw()
+        folder = filedialog.askdirectory(title=title, initialdir=initialdir or '')
+        root.destroy()
+
+        if not folder:
+            break
+
+        folders.append(folder)
+        add_to_recent_folders(folder)
+        initialdir = folder
+
+        confirm_root = tk.Tk()
+        confirm_root.withdraw()
+        cont = messagebox.askyesno(
+            '继续选择',
+            f'已选择 {len(folders)} 个文件夹:\n'
+            + '\n'.join(f'  {i+1}) {os.path.basename(f)}' for i, f in enumerate(folders))
+            + '\n\n是否继续选择更多文件夹？',
+        )
+        confirm_root.destroy()
+        if not cont:
+            break
+
+    if not folders:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo('提示', '未选择文件夹')
+        root.destroy()
+
+    return folders
+
+
 # 根据 tkinter 是否可用，选择交互方式
 if HAS_TKINTER:
     ask_directory = gui_askdirectory
+    ask_directories = gui_ask_directories
     show_info = gui_showinfo
     show_warning = gui_showwarning
     ask_file = gui_askfile
     ask_mode = gui_askmode
 else:
     ask_directory = cli_askdirectory
+    ask_directories = cli_ask_directories
     show_info = cli_showinfo
     show_warning = cli_showwarning
     ask_file = cli_askfile
@@ -3107,6 +3223,51 @@ class ProcessingResult:
     changes_committed: bool = False
     resumed_from_checkpoint: bool = False
     checkpoint_skipped_files: List[str] = field(default_factory=list)
+
+
+@dataclass
+class FolderProcessingItem:
+    folder: str
+    result: Optional[Any] = None
+    status: str = 'pending'
+    error_message: Optional[str] = None
+
+
+@dataclass
+class BatchProcessingResult:
+    items: List[FolderProcessingItem] = field(default_factory=list)
+    total_folders: int = 0
+    success_count: int = 0
+    error_count: int = 0
+    empty_count: int = 0
+    total_records: int = 0
+    total_new_records: int = 0
+    total_duplicate_records: int = 0
+    total_processed_files: int = 0
+    incremental_mode: bool = False
+    dry_run: bool = False
+
+    def aggregate(self):
+        self.total_folders = len(self.items)
+        self.success_count = 0
+        self.error_count = 0
+        self.empty_count = 0
+        self.total_records = 0
+        self.total_new_records = 0
+        self.total_duplicate_records = 0
+        self.total_processed_files = 0
+        for item in self.items:
+            if item.status == 'error':
+                self.error_count += 1
+            elif item.status == 'empty':
+                self.empty_count += 1
+            elif item.status == 'success':
+                self.success_count += 1
+            if item.result is not None:
+                self.total_records += len(getattr(item.result, 'all_rows', []))
+                self.total_new_records += getattr(item.result, 'new_record_count', 0)
+                self.total_duplicate_records += getattr(item.result, 'duplicate_record_count', 0)
+                self.total_processed_files += len(getattr(item.result, 'processed_files', []))
 
 
 # ──────────────────────────────────────────────
@@ -9319,6 +9480,191 @@ def run_pipeline_flow(script_dir):
         show_info(title, msg)
 
 
+def format_batch_result_message(batch_result):
+    """格式化批量处理结果信息"""
+    if not batch_result.items:
+        return '未选择任何文件夹。'
+
+    dry_run_banner = ''
+    if batch_result.dry_run:
+        dry_run_banner = '【试运行模式】仅生成报告，未执行删除与写盘操作\n\n'
+
+    mode_label = '增量合并' if batch_result.incremental_mode else '全量覆盖'
+
+    lines = [
+        f'{dry_run_banner}批量处理完成！',
+        '',
+        f'运行模式：{mode_label}',
+        f'文件夹总数：{batch_result.total_folders}',
+        f'├─ 成功：{batch_result.success_count}',
+        f'├─ 无数据：{batch_result.empty_count}',
+        f'└─ 失败：{batch_result.error_count}',
+        '',
+        f'总处理文件数：{batch_result.total_processed_files}',
+        f'总记录数：{batch_result.total_records}',
+        f'├─ 新增记录：{batch_result.total_new_records}',
+        f'└─ 重复记录（已跳过）：{batch_result.total_duplicate_records}',
+        '',
+        '各文件夹详情：',
+    ]
+
+    for i, item in enumerate(batch_result.items, 1):
+        folder_name = os.path.basename(item.folder.rstrip('/\\'))
+        status_label = {'success': '成功', 'empty': '无数据', 'error': '失败', 'pending': '未处理'}.get(item.status, item.status)
+        detail = f'  {i}) [{status_label}] {folder_name}'
+        if item.result is not None:
+            row_count = len(getattr(item.result, 'all_rows', []))
+            new_count = getattr(item.result, 'new_record_count', 0)
+            detail += f' — {len(getattr(item.result, "processed_files", []))} 个文件, {row_count} 条记录, 新增 {new_count}'
+        if item.error_message:
+            detail += f' — 错误: {item.error_message}'
+        lines.append(detail)
+
+    return '\n'.join(lines)
+
+
+def run_batch_pipeline_flow(script_dir, folders=None):
+    """批量处理多个文件夹流程
+
+    Args:
+        script_dir: 脚本所在目录
+        folders: 文件夹路径列表。若为 None，则通过交互方式让用户选择。
+    """
+    logger = get_logger()
+
+    if folders is None:
+        folders = ask_directories()
+
+    if not folders:
+        show_info('提示', '未选择任何文件夹，程序退出。')
+        logger.info('批量处理：用户未选择文件夹，程序退出')
+        return
+
+    logger.info('批量处理：用户选择 %d 个文件夹', len(folders))
+
+    incremental = ask_incremental_mode()
+    if incremental is None:
+        logger.info('批量处理：用户取消增量模式选择，返回主菜单')
+        return
+    logger.info('批量处理：用户选择运行模式: %s', '增量合并' if incremental else '全量覆盖')
+
+    dry_run = ask_dry_run_mode()
+    logger.info('批量处理：用户选择执行模式: %s', '试运行（不写盘）' if dry_run else '正式写盘')
+
+    batch_result = BatchProcessingResult(
+        incremental_mode=incremental,
+        dry_run=dry_run,
+    )
+
+    for i, folder in enumerate(folders, 1):
+        logger.info('===== 批量处理 [%d/%d]: %s =====', i, len(folders), folder)
+
+        item = FolderProcessingItem(folder=folder)
+
+        batch_id = None
+        batch_manager = None
+        if HAS_BATCH_MANAGER:
+            try:
+                batch_manager = batch_module.get_batch_manager(script_dir)
+                operator = get_current_user()
+                batch_info = batch_manager.start_batch(input_folder=folder, operator=operator)
+                batch_id = batch_info.batch_id
+                logger.info('批次管理已启用，批次号: %s', batch_id)
+            except Exception as e:
+                logger.error('批次创建失败: %s', e, exc_info=True)
+                batch_manager = None
+
+        try:
+            with AuditLogger('batch_pipeline', script_dir) as audit:
+                audit.record_input(folder)
+
+                result = run_pipeline(folder, script_dir, incremental=incremental,
+                                      batch_id=batch_id, dry_run=dry_run)
+
+                item.result = result
+
+                if result.folder_empty:
+                    item.status = 'empty'
+                    logger.info('文件夹 [%d/%d] 无数据: %s', i, len(folders), folder)
+                elif result.error_files:
+                    item.status = 'success'
+                    logger.info('文件夹 [%d/%d] 处理完成（有错误文件）: %s', i, len(folders), folder)
+                else:
+                    item.status = 'success'
+                    logger.info('文件夹 [%d/%d] 处理成功: %s', i, len(folders), folder)
+
+                if result.dry_run and not result.folder_empty and result.all_rows:
+                    print(f'\n文件夹 {i}/{len(folders)} 试运行结果：')
+                    msg = format_result_message(result)
+                    print(msg)
+                    if ask_commit_changes():
+                        logger.info('用户确认提交试运行变更（文件夹 %d/%d）', i, len(folders))
+                        result = commit_pipeline_changes(result)
+                        item.result = result
+                    else:
+                        logger.info('用户取消提交试运行变更（文件夹 %d/%d）', i, len(folders))
+
+                audit.record_result(result)
+
+                if batch_manager and batch_id:
+                    try:
+                        log_file = get_current_log_file() or find_latest_log_file_in_dir(get_log_dir(script_dir))
+                        result_data = {
+                            'total_records': len(result.all_rows),
+                            'new_records': result.new_record_count,
+                            'duplicate_records': result.duplicate_record_count,
+                            'processed_files': result.processed_files,
+                            'unprocessed_files': result.unprocessed_files,
+                            'error_files': result.error_files,
+                            'incremental_mode': result.incremental_mode,
+                            'output_folder': folder,
+                            'log_file_path': log_file,
+                            'audit_id': audit.audit_id,
+                            'dry_run': result.dry_run,
+                            'changes_committed': result.changes_committed,
+                            'batch_index': i,
+                            'batch_total': len(folders),
+                        }
+                        status = 'success' if result.all_rows or result.existing_record_count > 0 else 'warning'
+                        batch_manager.finish_batch(batch_id, result_data, status=status)
+                    except Exception as e:
+                        logger.error('批次归档失败: %s', e, exc_info=True)
+                        if batch_manager:
+                            try:
+                                batch_manager.finish_batch(batch_id, {}, status='failed', error_message=str(e))
+                            except Exception:
+                                pass
+
+                if result.lookup_missing:
+                    show_warning(
+                        '警告',
+                        '在程序所在目录下未找到主体查找表文件，\n"主体"列将为空。\n'
+                        '建议将查找表文件命名为"主体查找表.xlsx"并放在程序所在目录下。'
+                    )
+
+        except Exception as e:
+            item.status = 'error'
+            item.error_message = str(e)
+            logger.error('批量处理文件夹 [%d/%d] 失败: %s — %s', i, len(folders), folder, e, exc_info=True)
+            if batch_manager and batch_id:
+                try:
+                    batch_manager.finish_batch(batch_id, {}, status='failed', error_message=str(e))
+                except Exception:
+                    pass
+
+        batch_result.items.append(item)
+
+    batch_result.aggregate()
+
+    msg = format_batch_result_message(batch_result)
+    show_info('批量处理完成', msg)
+    logger.info('批量处理全部完成: %d 个文件夹, 成功 %d, 无数据 %d, 失败 %d',
+                batch_result.total_folders, batch_result.success_count,
+                batch_result.empty_count, batch_result.error_count)
+
+    return batch_result
+
+
 def run_diff_flow(script_dir):
     """变更对比流程：选择两次总表，输出对比结果"""
     logger = get_logger()
@@ -11821,6 +12167,8 @@ def main():
 
     if mode == 'pipeline':
         run_pipeline_flow(script_dir)
+    elif mode == 'batch_pipeline':
+        run_batch_pipeline_flow(script_dir)
     elif mode == 'diff':
         run_diff_flow(script_dir)
     elif mode == 'monitor':
