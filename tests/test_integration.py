@@ -312,6 +312,84 @@ class TestFormatResultMessage:
         msg = bankcheck.format_result_message(result)
         assert '待处理清单：(试运行未生成)' in msg
 
+    def test_bank_counts_in_message(self):
+        result = bankcheck.ProcessingResult(
+            all_rows=[{'银行': '北京银行'}, {'银行': '东亚银行'}, {'银行': '北京银行'}],
+            processed_files=['/path/a.xlsx'],
+            bank_counts={'北京银行': 2, '东亚银行': 1},
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '按银行分布（共 2 个）：' in msg
+        assert '北京银行：2 条' in msg
+        assert '东亚银行：1 条' in msg
+
+    def test_account_counts_in_message(self):
+        result = bankcheck.ProcessingResult(
+            all_rows=[{'银行账号': '123456'}, {'银行账号': '789012'}],
+            processed_files=['/path/a.xlsx'],
+            account_counts={'123456': 1, '789012': 1},
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '按账号分布（共 2 个）：' in msg
+        assert '123456：1 条' in msg
+        assert '789012：1 条' in msg
+
+    def test_subject_counts_in_message(self):
+        result = bankcheck.ProcessingResult(
+            all_rows=[{'主体': '甲公司'}, {'主体': '乙公司'}],
+            processed_files=['/path/a.xlsx'],
+            subject_counts={'甲公司': 1, '乙公司': 1},
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '按主体分布（共 2 个）：' in msg
+        assert '甲公司：1 条' in msg
+        assert '乙公司：1 条' in msg
+
+    def test_empty_counts_not_shown(self):
+        result = bankcheck.ProcessingResult(
+            all_rows=[],
+            processed_files=[],
+            bank_counts={},
+            account_counts={},
+            subject_counts={},
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '按银行分布' not in msg
+        assert '按账号分布' not in msg
+        assert '按主体分布' not in msg
+
+    def test_counts_sorted_by_count_desc(self):
+        result = bankcheck.ProcessingResult(
+            all_rows=[{'银行': 'A银行'}, {'银行': 'A银行'}, {'银行': 'A银行'},
+                       {'银行': 'B银行'}, {'银行': 'B银行'}, {'银行': 'C银行'}],
+            processed_files=['f1'],
+            bank_counts={'C银行': 1, 'A银行': 3, 'B银行': 2},
+        )
+        msg = bankcheck.format_result_message(result)
+        c_pos = msg.find('C银行')
+        a_pos = msg.find('A银行')
+        b_pos = msg.find('B银行')
+        assert a_pos < b_pos < c_pos
+
+    def test_incremental_mode_with_counts(self):
+        result = bankcheck.ProcessingResult(
+            all_rows=[{'银行': '北京银行', '银行账号': '123', '主体': '甲公司'}],
+            processed_files=['/path/a.xlsx'],
+            output_path='/path/to/总表.xlsx',
+            incremental_mode=True,
+            existing_record_count=10,
+            new_record_count=1,
+            duplicate_record_count=0,
+            bank_counts={'北京银行': 1},
+            account_counts={'123': 1},
+            subject_counts={'甲公司': 1},
+        )
+        msg = bankcheck.format_result_message(result)
+        assert '增量合并处理完成！' in msg
+        assert '按银行分布' in msg
+        assert '按账号分布' in msg
+        assert '按主体分布' in msg
+
 
 class TestGeneratePendingList:
 

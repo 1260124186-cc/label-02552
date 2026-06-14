@@ -391,3 +391,72 @@ class TestBatchProcessingResultAggregate:
         assert br.total_records == 3
         assert br.total_new_records == 3
         assert br.total_processed_files == 3
+
+    def test_aggregate_bank_counts(self):
+        r1 = ProcessingResult(
+            all_rows=[],
+            bank_counts={'北京银行': 10, '东亚银行': 5},
+        )
+        r2 = ProcessingResult(
+            all_rows=[],
+            bank_counts={'北京银行': 8, '招商银行': 3},
+        )
+        br = BatchProcessingResult(items=[
+            FolderProcessingItem(folder='/a', result=r1, status='success'),
+            FolderProcessingItem(folder='/b', result=r2, status='success'),
+        ])
+        br.aggregate()
+        assert br.total_bank_counts['北京银行'] == 18
+        assert br.total_bank_counts['东亚银行'] == 5
+        assert br.total_bank_counts['招商银行'] == 3
+        assert len(br.total_bank_counts) == 3
+
+    def test_aggregate_account_counts(self):
+        r1 = ProcessingResult(
+            all_rows=[],
+            account_counts={'123456': 10, '789012': 5},
+        )
+        r2 = ProcessingResult(
+            all_rows=[],
+            account_counts={'123456': 7, '345678': 3},
+        )
+        br = BatchProcessingResult(items=[
+            FolderProcessingItem(folder='/a', result=r1, status='success'),
+            FolderProcessingItem(folder='/b', result=r2, status='success'),
+        ])
+        br.aggregate()
+        assert br.total_account_counts['123456'] == 17
+        assert br.total_account_counts['789012'] == 5
+        assert br.total_account_counts['345678'] == 3
+        assert len(br.total_account_counts) == 3
+
+    def test_aggregate_subject_counts(self):
+        r1 = ProcessingResult(
+            all_rows=[],
+            subject_counts={'甲公司': 10, '乙公司': 5},
+        )
+        r2 = ProcessingResult(
+            all_rows=[],
+            subject_counts={'甲公司': 8, '丙公司': 3},
+        )
+        br = BatchProcessingResult(items=[
+            FolderProcessingItem(folder='/a', result=r1, status='success'),
+            FolderProcessingItem(folder='/b', result=r2, status='success'),
+        ])
+        br.aggregate()
+        assert br.total_subject_counts['甲公司'] == 18
+        assert br.total_subject_counts['乙公司'] == 5
+        assert br.total_subject_counts['丙公司'] == 3
+        assert len(br.total_subject_counts) == 3
+
+    def test_aggregate_empty_result_counts(self):
+        r1 = ProcessingResult(all_rows=[])
+        r2 = ProcessingResult(all_rows=[])
+        br = BatchProcessingResult(items=[
+            FolderProcessingItem(folder='/a', result=r1, status='success'),
+            FolderProcessingItem(folder='/b', result=r2, status='success'),
+        ])
+        br.aggregate()
+        assert br.total_bank_counts == {}
+        assert br.total_account_counts == {}
+        assert br.total_subject_counts == {}

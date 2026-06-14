@@ -3759,6 +3759,9 @@ class ProcessingResult:
     changes_committed: bool = False
     resumed_from_checkpoint: bool = False
     checkpoint_skipped_files: List[str] = field(default_factory=list)
+    bank_counts: Dict[str, int] = field(default_factory=dict)
+    account_counts: Dict[str, int] = field(default_factory=dict)
+    subject_counts: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -3782,6 +3785,9 @@ class BatchProcessingResult:
     total_processed_files: int = 0
     incremental_mode: bool = False
     dry_run: bool = False
+    total_bank_counts: Dict[str, int] = field(default_factory=dict)
+    total_account_counts: Dict[str, int] = field(default_factory=dict)
+    total_subject_counts: Dict[str, int] = field(default_factory=dict)
 
     def aggregate(self):
         self.total_folders = len(self.items)
@@ -3792,6 +3798,9 @@ class BatchProcessingResult:
         self.total_new_records = 0
         self.total_duplicate_records = 0
         self.total_processed_files = 0
+        bank_counts = defaultdict(int)
+        account_counts = defaultdict(int)
+        subject_counts = defaultdict(int)
         for item in self.items:
             if item.status == 'error':
                 self.error_count += 1
@@ -3804,6 +3813,15 @@ class BatchProcessingResult:
                 self.total_new_records += getattr(item.result, 'new_record_count', 0)
                 self.total_duplicate_records += getattr(item.result, 'duplicate_record_count', 0)
                 self.total_processed_files += len(getattr(item.result, 'processed_files', []))
+                for k, v in getattr(item.result, 'bank_counts', {}).items():
+                    bank_counts[k] += v
+                for k, v in getattr(item.result, 'account_counts', {}).items():
+                    account_counts[k] += v
+                for k, v in getattr(item.result, 'subject_counts', {}).items():
+                    subject_counts[k] += v
+        self.total_bank_counts = dict(bank_counts)
+        self.total_account_counts = dict(account_counts)
+        self.total_subject_counts = dict(subject_counts)
 
 
 # ──────────────────────────────────────────────
@@ -4884,6 +4902,17 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
     if resumed_from_checkpoint:
         logger.info('断点续跑完成，已清除状态文件')
 
+    bank_counts = defaultdict(int)
+    account_counts = defaultdict(int)
+    subject_counts = defaultdict(int)
+    for row in final_rows:
+        bank = str(row.get('银行') or '').strip() or '未知银行'
+        account = str(row.get('银行账号') or '').strip() or '未知账号'
+        subject = str(row.get('主体') or '').strip() or '未知主体'
+        bank_counts[bank] += 1
+        account_counts[account] += 1
+        subject_counts[subject] += 1
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -4943,6 +4972,9 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         working_folder_is_copy=working_folder_is_copy,
         resumed_from_checkpoint=resumed_from_checkpoint,
         checkpoint_skipped_files=checkpoint_skipped_files,
+        bank_counts=dict(bank_counts),
+        account_counts=dict(account_counts),
+        subject_counts=dict(subject_counts),
     )
 
 
@@ -4953,6 +4985,18 @@ def format_result_message(result):
     dry_run_banner = ''
     if result.dry_run:
         dry_run_banner = '【试运行模式】仅生成报告，未执行删除与写盘操作\n\n'
+
+    def _format_group_counts(title, counts, limit=10):
+        if not counts:
+            return ''
+        sorted_items = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        lines = [f'\n\n{title}（共 {len(counts)} 个）：']
+        for i, (name, count) in enumerate(sorted_items[:limit]):
+            prefix = '└─ ' if i == min(limit, len(sorted_items)) - 1 else '├─ '
+            lines.append(f'{prefix}{name}：{count} 条')
+        if len(sorted_items) > limit:
+            lines.append(f'└─ ... 等共 {len(sorted_items)} 个')
+        return ''.join(lines)
 
     if result.all_rows:
         if result.incremental_mode:
@@ -4975,6 +5019,10 @@ def format_result_message(result):
                 f'提取记录数：{len(result.all_rows)}\n'
                 f'总表路径：{result.output_path or "(试运行未写盘)"}'
             )
+
+        msg += _format_group_counts('按银行分布', result.bank_counts)
+        msg += _format_group_counts('按账号分布', result.account_counts)
+        msg += _format_group_counts('按主体分布', result.subject_counts)
 
         if result.dry_run and result.pending_deletion_files:
             msg += f'\n\n待删除文件（{len(result.pending_deletion_files)} 个）：'
@@ -14175,6 +14223,17 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     if resumed_from_checkpoint:
         logger.info('断点续跑完成，已清除状态文件')
 
+    bank_counts = defaultdict(int)
+    account_counts = defaultdict(int)
+    subject_counts = defaultdict(int)
+    for row in final_rows:
+        bank = str(row.get('银行') or '').strip() or '未知银行'
+        account = str(row.get('银行账号') or '').strip() or '未知账号'
+        subject = str(row.get('主体') or '').strip() or '未知主体'
+        bank_counts[bank] += 1
+        account_counts[account] += 1
+        subject_counts[subject] += 1
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -14225,6 +14284,9 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         working_folder_is_copy=working_folder_is_copy,
         resumed_from_checkpoint=resumed_from_checkpoint,
         checkpoint_skipped_files=checkpoint_skipped_files,
+        bank_counts=dict(bank_counts),
+        account_counts=dict(account_counts),
+        subject_counts=dict(subject_counts),
     )
 
 
