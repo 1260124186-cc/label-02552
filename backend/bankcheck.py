@@ -1119,10 +1119,13 @@ def open_workbook_compat(filepath, read_only=False):
 
 
 DEFAULT_CHUNK_SIZE = 1000
+DEFAULT_EMPTY_ROW_THRESHOLD = 50
 
 
 def iter_sheet_rows(ws, start_row=1, end_row=None, chunk_size=DEFAULT_CHUNK_SIZE,
-                    values_only=True):
+                    values_only=True, trim_trailing_empty=False,
+                    check_columns=None,
+                    consecutive_empty_threshold=DEFAULT_EMPTY_ROW_THRESHOLD):
     """
     分块迭代工作表行数据，适用于大文件以降低内存占用。
 
@@ -1137,10 +1140,24 @@ def iter_sheet_rows(ws, start_row=1, end_row=None, chunk_size=DEFAULT_CHUNK_SIZE
         chunk_size: 每块的行数，默认 1000
         values_only: 是否仅返回单元格值（True 时返回值元组，
                       False 时返回 Cell 对象元组）
+        trim_trailing_empty: 是否启用尾部空行截断，默认 False
+        check_columns: 用于判断空行的列号列表（1-based），None 表示检查所有列
+                       仅在 trim_trailing_empty=True 时有效
+        consecutive_empty_threshold: 连续空行阈值，达到该数量则认为数据已结束
+                                     仅在 trim_trailing_empty=True 时有效
 
     Yields:
         list: 每块的行数据列表，每行是一个值元组或 Cell 对象元组
     """
+    if trim_trailing_empty:
+        effective_end = get_effective_max_row(
+            ws, start_row=start_row, end_row=end_row,
+            check_columns=check_columns,
+            consecutive_empty_threshold=consecutive_empty_threshold)
+        if effective_end < start_row:
+            return
+        end_row = effective_end
+
     if end_row is not None and start_row > end_row:
         return
 
@@ -1160,7 +1177,9 @@ def iter_sheet_rows(ws, start_row=1, end_row=None, chunk_size=DEFAULT_CHUNK_SIZE
 
 
 def iter_sheet_records(ws, columns_map, start_row=1, end_row=None,
-                       chunk_size=DEFAULT_CHUNK_SIZE):
+                       chunk_size=DEFAULT_CHUNK_SIZE, trim_trailing_empty=False,
+                       check_columns=None,
+                       consecutive_empty_threshold=DEFAULT_EMPTY_ROW_THRESHOLD):
     """
     分块迭代工作表行并转换为字典记录，适用于大文件流式处理。
 
@@ -1173,6 +1192,11 @@ def iter_sheet_records(ws, columns_map, start_row=1, end_row=None,
         start_row: 起始行号（1-based，含）
         end_row: 结束行号（1-based，含），None 表示到工作表末尾
         chunk_size: 每块的记录数，默认 1000
+        trim_trailing_empty: 是否启用尾部空行截断，默认 False
+        check_columns: 用于判断空行的列号列表（1-based），None 表示检查所有列
+                       仅在 trim_trailing_empty=True 时有效
+        consecutive_empty_threshold: 连续空行阈值，达到该数量则认为数据已结束
+                                     仅在 trim_trailing_empty=True 时有效
 
     Yields:
         list: 每块的记录字典列表
@@ -1181,7 +1205,10 @@ def iter_sheet_records(ws, columns_map, start_row=1, end_row=None,
     col_indices = [columns_map[k] - 1 for k in col_keys]
 
     for chunk in iter_sheet_rows(ws, start_row=start_row, end_row=end_row,
-                                 chunk_size=chunk_size, values_only=True):
+                                 chunk_size=chunk_size, values_only=True,
+                                 trim_trailing_empty=trim_trailing_empty,
+                                 check_columns=check_columns,
+                                 consecutive_empty_threshold=consecutive_empty_threshold):
         records = []
         for row_vals in chunk:
             record = {}
@@ -1192,6 +1219,82 @@ def iter_sheet_records(ws, columns_map, start_row=1, end_row=None,
                     record[key] = None
             records.append(record)
         yield records
+
+
+def is_row_empty(ws, row_idx, check_columns=None):
+    """
+    判断工作表中指定行是否为空行。
+
+    Args:
+        ws: openpyxl Worksheet 对象
+        row_idx: 行号（1-based）
+        check_columns: 要检查的列号列表（1-based），None 表示检查所有列
+
+    Returns:
+        bool: 该行是否为空行
+    """
+    if check_columns is not None:
+        for col in check_columns:
+            val = ws.cell(row=row_idx, column=col).value
+            if val is not None and str(val).strip() != '':
+                return False
+        return True
+
+    max_col = ws.max_column
+    if max_col < 1:
+        return True
+
+    for col in range(1, max_col + 1):
+        val = ws.cell(row=row_idx, column=col).value
+        if val is not None and str(val).strip() != '':
+            return False
+    return True
+
+
+def get_effective_max_row(ws, start_row=1, end_row=None,
+                          check_columns=None,
+                          consecutive_empty_threshold=DEFAULT_EMPTY_ROW_THRESHOLD):
+    """
+    获取工作表中实际数据的最后一行行号（尾部空行截断）。
+
+    从前往后扫描，当检测到连续 N 个空行时，认为数据实际结束位置
+    在这些连续空行之前，从而避免遍历大量历史残留空行拖慢处理速度。
+
+    Args:
+        ws: openpyxl Worksheet 对象
+        start_row: 起始行号（1-based，含），仅在该范围之后查找数据末尾
+        end_row: 结束行号（1-based，含），None 表示使用 ws.max_row
+        check_columns: 用于判断空行的列号列表（1-based），None 表示检查所有列
+        consecutive_empty_threshold: 连续空行阈值，达到该数量则认为数据已结束
+
+    Returns:
+        int: 实际数据的最后一行行号；如果没有有效数据，返回 start_row - 1
+    """
+    if end_row is None:
+        end_row = ws.max_row
+
+    if end_row is None or end_row < 1:
+        return 0
+
+    if start_row > end_row:
+        return start_row - 1
+
+    if consecutive_empty_threshold <= 0:
+        consecutive_empty_threshold = DEFAULT_EMPTY_ROW_THRESHOLD
+
+    last_non_empty_row = start_row - 1
+    consecutive_empty = 0
+
+    for row_idx in range(start_row, end_row + 1):
+        if is_row_empty(ws, row_idx, check_columns):
+            consecutive_empty += 1
+            if consecutive_empty >= consecutive_empty_threshold:
+                return last_non_empty_row
+        else:
+            last_non_empty_row = row_idx
+            consecutive_empty = 0
+
+    return last_non_empty_row
 
 
 def estimate_row_count(filepath, sheet_name=None):
@@ -2001,7 +2104,10 @@ class GenericBankParser:
                     ws.max_row,
                 )
             else:
-                block['data_end_row'] = ws.max_row
+                check_cols = [col_idx]
+                block['data_end_row'] = get_effective_max_row(
+                    ws, start_row=block['data_start_row'],
+                    check_columns=check_cols)
 
         return account_blocks
 
@@ -2058,7 +2164,18 @@ class GenericBankParser:
         rows = []
         columns = self.rule.columns
 
-        for row_idx in range(data_start_row, data_end_row + 1):
+        check_cols = [columns['trade_date']] if 'trade_date' in columns else None
+        effective_end = get_effective_max_row(
+            ws, start_row=data_start_row, end_row=data_end_row,
+            check_columns=check_cols)
+        if effective_end < data_start_row:
+            self.logger.info(
+                '%s文件工作表「%s」账号「%s」未提取到记录',
+                self.rule.bank_name, sheet_name,
+                _mask_bank_account(account_value) if HAS_PII_CLASSIFIER else account_value)
+            return rows
+
+        for row_idx in range(data_start_row, effective_end + 1):
             trade_date = ws.cell(row=row_idx, column=columns['trade_date']).value
             if trade_date is None:
                 continue
@@ -2191,7 +2308,24 @@ class GenericBankParser:
         columns = self.rule.columns
         start_row = self.rule.start_row
 
-        for row_idx in range(start_row, ws.max_row + 1):
+        check_cols = [columns['trade_date']] if 'trade_date' in columns else None
+        effective_max_row = get_effective_max_row(
+            ws, start_row=start_row, check_columns=check_cols)
+        if effective_max_row < start_row:
+            if _traversal_start is not None:
+                import time as _time
+                _duration_ms = (_time.perf_counter() - _traversal_start) * 1000
+                perf_profiler.get_profiler().record_row_traversal(
+                    filepath, sheet_name,
+                    0, _duration_ms,
+                    self.rule.bank_name, 0,
+                )
+            self.logger.info(
+                '%s文件工作表「%s」未提取到记录，跳过',
+                self.rule.bank_name, sheet_name)
+            return rows
+
+        for row_idx in range(start_row, effective_max_row + 1):
             trade_date = ws.cell(row=row_idx, column=columns['trade_date']).value
             if trade_date is None:
                 continue
@@ -2235,7 +2369,7 @@ class GenericBankParser:
             _duration_ms = (_time.perf_counter() - _traversal_start) * 1000
             perf_profiler.get_profiler().record_row_traversal(
                 filepath, sheet_name,
-                ws.max_row - start_row + 1, _duration_ms,
+                effective_max_row - start_row + 1, _duration_ms,
                 self.rule.bank_name, len(rows),
             )
 
