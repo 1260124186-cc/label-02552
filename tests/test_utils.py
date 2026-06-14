@@ -6,7 +6,14 @@ import openpyxl
 import pytest
 
 import bankcheck
-from bankcheck import open_workbook_compat, cleanup_temp_file
+from bankcheck import (
+    open_workbook_compat,
+    cleanup_temp_file,
+    iter_sheet_rows,
+    iter_sheet_records,
+    estimate_row_count,
+    DEFAULT_CHUNK_SIZE,
+)
 
 
 class TestOpenWorkbookCompatXlsx:
@@ -31,6 +38,476 @@ class TestOpenWorkbookCompatXlsx:
 
         _, tmp_path = open_workbook_compat(path)
         assert tmp_path is None
+
+
+class TestOpenWorkbookCompatReadOnly:
+    def test_read_only_default_false(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'test.xlsx')
+        wb = openpyxl.Workbook()
+        wb.active['A1'] = 'hello'
+        wb.save(path)
+        wb.close()
+
+        result_wb, tmp_path = open_workbook_compat(path)
+        assert result_wb.read_only is False
+        result_wb.close()
+
+    def test_read_only_true(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'test.xlsx')
+        wb = openpyxl.Workbook()
+        wb.active['A1'] = 'hello'
+        wb.active['B1'] = 'world'
+        wb.save(path)
+        wb.close()
+
+        result_wb, tmp_path = open_workbook_compat(path, read_only=True)
+        assert result_wb.read_only is True
+        result_wb.close()
+
+    def test_read_only_can_read_values(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'test.xlsx')
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws['A1'] = 'name'
+        ws['B1'] = 'value'
+        ws['A2'] = 'test'
+        ws['B2'] = 123
+        wb.save(path)
+        wb.close()
+
+        result_wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws_result = result_wb.active
+        rows = list(ws_result.iter_rows(values_only=True))
+        assert len(rows) == 2
+        assert rows[0] == ('name', 'value')
+        assert rows[1] == ('test', 123)
+        result_wb.close()
+
+    def test_read_only_no_temp_file(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'test.xlsx')
+        wb = openpyxl.Workbook()
+        wb.save(path)
+        wb.close()
+
+        _, tmp_path = open_workbook_compat(path, read_only=True)
+        assert tmp_path is None
+
+    def test_read_only_multi_sheet(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'multi.xlsx')
+        wb = openpyxl.Workbook()
+        wb.active.title = 'Sheet1'
+        wb.active['A1'] = 's1'
+        ws2 = wb.create_sheet('Sheet2')
+        ws2['A1'] = 's2'
+        wb.save(path)
+        wb.close()
+
+        result_wb, tmp_path = open_workbook_compat(path, read_only=True)
+        assert len(result_wb.worksheets) == 2
+        assert result_wb['Sheet1'] is not None
+        assert result_wb['Sheet2'] is not None
+        result_wb.close()
+
+    def test_read_only_large_sheet(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'large.xlsx')
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for i in range(1, 101):
+            ws.cell(row=i, column=1, value=f'row_{i}')
+            ws.cell(row=i, column=2, value=i * 10)
+        wb.save(path)
+        wb.close()
+
+        result_wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws_result = result_wb.active
+        row_count = 0
+        for row in ws_result.iter_rows(values_only=True):
+            row_count += 1
+        assert row_count == 100
+        result_wb.close()
+
+
+class TestIterSheetRows:
+    def _create_test_sheet(self, tmp_dir, num_rows=100, num_cols=5):
+        path = os.path.join(tmp_dir, 'iter_test.xlsx')
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for r in range(1, num_rows + 1):
+            for c in range(1, num_cols + 1):
+                ws.cell(row=r, column=c, value=f'r{r}c{c}')
+        wb.save(path)
+        wb.close()
+        return path
+
+    def test_iter_all_rows_single_chunk(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=50)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws, chunk_size=100))
+        assert len(chunks) == 1
+        assert len(chunks[0]) == 50
+        wb.close()
+
+    def test_iter_all_rows_multiple_chunks(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=100)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws, chunk_size=30))
+        assert len(chunks) == 4
+        assert len(chunks[0]) == 30
+        assert len(chunks[1]) == 30
+        assert len(chunks[2]) == 30
+        assert len(chunks[3]) == 10
+        wb.close()
+
+    def test_iter_with_start_row(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=10)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws, start_row=5, chunk_size=100))
+        assert len(chunks) == 1
+        assert len(chunks[0]) == 6
+        assert chunks[0][0][0] == 'r5c1'
+        wb.close()
+
+    def test_iter_with_end_row(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=20)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws, end_row=5, chunk_size=100))
+        assert len(chunks) == 1
+        assert len(chunks[0]) == 5
+        assert chunks[0][-1][0] == 'r5c1'
+        wb.close()
+
+    def test_iter_with_start_and_end_row(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=20)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws, start_row=3, end_row=7, chunk_size=100))
+        assert len(chunks) == 1
+        assert len(chunks[0]) == 5
+        assert chunks[0][0][0] == 'r3c1'
+        assert chunks[0][-1][0] == 'r7c1'
+        wb.close()
+
+    def test_iter_values_only_true(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=3)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws, chunk_size=10, values_only=True))
+        assert isinstance(chunks[0][0][0], str)
+        assert chunks[0][0][0] == 'r1c1'
+        wb.close()
+
+    def test_iter_values_only_false(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=3)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws, chunk_size=10, values_only=False))
+        assert hasattr(chunks[0][0][0], 'value')
+        assert chunks[0][0][0].value == 'r1c1'
+        wb.close()
+
+    def test_iter_start_row_gt_end_row(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=10)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws, start_row=10, end_row=5, chunk_size=100))
+        assert len(chunks) == 0
+        wb.close()
+
+    def test_iter_default_chunk_size(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=5)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws))
+        assert len(chunks) == 1
+        assert len(chunks[0]) == 5
+        wb.close()
+
+    def test_iter_chunk_size_one(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=5)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws, chunk_size=1))
+        assert len(chunks) == 5
+        for chunk in chunks:
+            assert len(chunk) == 1
+        wb.close()
+
+    def test_iter_empty_sheet(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'empty.xlsx')
+        wb = openpyxl.Workbook()
+        wb.save(path)
+        wb.close()
+
+        wb2, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb2.active
+        chunks = list(iter_sheet_rows(ws))
+        assert len(chunks) == 0
+        wb2.close()
+
+    def test_iter_chunks_have_correct_order(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=10)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        all_rows = []
+        for chunk in iter_sheet_rows(ws, chunk_size=3):
+            all_rows.extend(chunk)
+
+        assert len(all_rows) == 10
+        for i, row in enumerate(all_rows, 1):
+            assert row[0] == f'r{i}c1'
+        wb.close()
+
+    def test_iter_without_read_only(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=10)
+        wb, tmp_path = open_workbook_compat(path, read_only=False)
+        ws = wb.active
+
+        chunks = list(iter_sheet_rows(ws, chunk_size=5))
+        assert len(chunks) == 2
+        assert len(chunks[0]) == 5
+        assert len(chunks[1]) == 5
+        wb.close()
+
+
+class TestIterSheetRecords:
+    def _create_test_sheet(self, tmp_dir, num_rows=50):
+        path = os.path.join(tmp_dir, 'records_test.xlsx')
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws['A1'] = 'name'
+        ws['B1'] = 'age'
+        ws['C1'] = 'city'
+        for i in range(2, num_rows + 2):
+            ws.cell(row=i, column=1, value=f'person_{i-1}')
+            ws.cell(row=i, column=2, value=20 + (i % 30))
+            ws.cell(row=i, column=3, value=f'city_{i % 5}')
+        wb.save(path)
+        wb.close()
+        return path
+
+    def test_iter_records_basic(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=10)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        columns_map = {
+            'name': 1,
+            'age': 2,
+            'city': 3,
+        }
+
+        chunks = list(iter_sheet_records(ws, columns_map, start_row=2, chunk_size=100))
+        assert len(chunks) == 1
+        assert len(chunks[0]) == 10
+        assert 'name' in chunks[0][0]
+        assert 'age' in chunks[0][0]
+        assert 'city' in chunks[0][0]
+        wb.close()
+
+    def test_iter_records_multiple_chunks(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=25)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        columns_map = {'name': 1, 'age': 2, 'city': 3}
+        chunks = list(iter_sheet_records(ws, columns_map, start_row=2, chunk_size=10))
+        assert len(chunks) == 3
+        assert len(chunks[0]) == 10
+        assert len(chunks[1]) == 10
+        assert len(chunks[2]) == 5
+        wb.close()
+
+    def test_iter_records_values_correct(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=3)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        columns_map = {'name': 1, 'age': 2, 'city': 3}
+        chunks = list(iter_sheet_records(ws, columns_map, start_row=2, chunk_size=100))
+        records = chunks[0]
+
+        assert records[0]['name'] == 'person_1'
+        assert records[1]['name'] == 'person_2'
+        assert records[2]['name'] == 'person_3'
+        assert records[0]['age'] == 22
+        assert records[0]['city'] == 'city_2'
+        wb.close()
+
+    def test_iter_records_subset_columns(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=5)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        columns_map = {'name': 1, 'city': 3}
+        chunks = list(iter_sheet_records(ws, columns_map, start_row=2, chunk_size=100))
+        record = chunks[0][0]
+        assert 'name' in record
+        assert 'city' in record
+        assert 'age' not in record
+        wb.close()
+
+    def test_iter_records_with_end_row(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=20)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        columns_map = {'name': 1}
+        chunks = list(iter_sheet_records(ws, columns_map, start_row=2, end_row=6, chunk_size=100))
+        assert len(chunks) == 1
+        assert len(chunks[0]) == 5
+        wb.close()
+
+    def test_iter_records_sparse_columns(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'sparse.xlsx')
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.cell(row=1, column=1, value='col1')
+        ws.cell(row=1, column=5, value='col5')
+        ws.cell(row=1, column=10, value='col10')
+        ws.cell(row=2, column=1, value='a')
+        ws.cell(row=2, column=5, value='b')
+        ws.cell(row=2, column=10, value='c')
+        wb.save(path)
+        wb.close()
+
+        wb2, tmp_path = open_workbook_compat(path, read_only=True)
+        ws2 = wb2.active
+
+        columns_map = {'col1': 1, 'col5': 5, 'col10': 10}
+        chunks = list(iter_sheet_records(ws2, columns_map, start_row=2, chunk_size=100))
+        record = chunks[0][0]
+        assert record['col1'] == 'a'
+        assert record['col5'] == 'b'
+        assert record['col10'] == 'c'
+        wb2.close()
+
+    def test_iter_records_chunk_order_preserved(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=20)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        columns_map = {'name': 1}
+        all_records = []
+        for chunk in iter_sheet_records(ws, columns_map, start_row=2, chunk_size=7):
+            all_records.extend(chunk)
+
+        assert len(all_records) == 20
+        for i, rec in enumerate(all_records, 1):
+            assert rec['name'] == f'person_{i}'
+        wb.close()
+
+    def test_iter_records_empty_result(self, tmp_dir):
+        path = self._create_test_sheet(tmp_dir, num_rows=0)
+        wb, tmp_path = open_workbook_compat(path, read_only=True)
+        ws = wb.active
+
+        columns_map = {'name': 1}
+        chunks = list(iter_sheet_records(ws, columns_map, start_row=2, chunk_size=100))
+        assert len(chunks) == 0
+        wb.close()
+
+
+class TestEstimateRowCount:
+    def test_estimate_row_count_small(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'count_test.xlsx')
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for i in range(1, 51):
+            ws.cell(row=i, column=1, value=i)
+        wb.save(path)
+        wb.close()
+
+        count = estimate_row_count(path)
+        assert count == 50
+
+    def test_estimate_row_count_specific_sheet(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'multi_sheet.xlsx')
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = 'Sheet1'
+        for i in range(1, 21):
+            ws1.cell(row=i, column=1, value=i)
+        ws2 = wb.create_sheet('Sheet2')
+        for i in range(1, 101):
+            ws2.cell(row=i, column=1, value=i)
+        wb.save(path)
+        wb.close()
+
+        count1 = estimate_row_count(path, sheet_name='Sheet1')
+        count2 = estimate_row_count(path, sheet_name='Sheet2')
+        assert count1 == 20
+        assert count2 == 100
+
+    def test_estimate_row_count_first_sheet_default(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'multi_sheet.xlsx')
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = 'First'
+        for i in range(1, 11):
+            ws1.cell(row=i, column=1, value=i)
+        ws2 = wb.create_sheet('Second')
+        for i in range(1, 101):
+            ws2.cell(row=i, column=1, value=i)
+        wb.save(path)
+        wb.close()
+
+        count = estimate_row_count(path)
+        assert count == 10
+
+    def test_estimate_row_count_returns_int(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'test.xlsx')
+        wb = openpyxl.Workbook()
+        wb.active['A1'] = 'test'
+        wb.save(path)
+        wb.close()
+
+        count = estimate_row_count(path)
+        assert isinstance(count, int)
+
+    def test_estimate_row_count_nonexistent_file(self, tmp_dir):
+        count = estimate_row_count('/nonexistent/path/file.xlsx')
+        assert count is None
+
+    def test_estimate_row_count_uses_read_only(self, tmp_dir, monkeypatch):
+        path = os.path.join(tmp_dir, 'spy.xlsx')
+        wb = openpyxl.Workbook()
+        wb.active['A1'] = 'test'
+        wb.save(path)
+        wb.close()
+
+        original_open = open_workbook_compat
+        call_args = []
+
+        def spy_open(filepath, read_only=False):
+            call_args.append({'filepath': filepath, 'read_only': read_only})
+            return original_open(filepath, read_only=read_only)
+
+        monkeypatch.setattr('bankcheck.open_workbook_compat', spy_open)
+        estimate_row_count(path)
+        assert len(call_args) == 1
+        assert call_args[0]['read_only'] is True
+
+
+class TestDefaultChunkSize:
+    def test_default_chunk_size_value(self):
+        assert isinstance(DEFAULT_CHUNK_SIZE, int)
+        assert DEFAULT_CHUNK_SIZE > 0
+        assert DEFAULT_CHUNK_SIZE == 1000
 
 
 class TestCleanupTempFile:

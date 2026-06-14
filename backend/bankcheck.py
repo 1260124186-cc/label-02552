@@ -947,12 +947,21 @@ def convert_xls_to_xlsx(xls_path):
     return tmp_path
 
 
-def open_workbook_compat(filepath):
+def open_workbook_compat(filepath, read_only=False):
     """
     兼容打开 .xlsx 和 .xls 文件，统一返回 (openpyxl.Workbook, 临时文件路径或None)。
     如果是 .xls 文件，先转换为 .xlsx 再打开。
     支持基于 Magic Bytes 的自动格式检测，当扩展名与实际格式不一致时按真实格式处理。
     调用方负责在使用完毕后清理临时文件。
+
+    Args:
+        filepath: Excel 文件路径
+        read_only: 是否以只读模式打开。只读模式下 openpyxl 采用惰性加载，
+                   适合大文件以降低内存占用。注意：只读模式下部分操作
+                   （如随机单元格访问、修改）受限，应配合 iter_rows 使用。
+
+    Returns:
+        tuple: (openpyxl.Workbook, 临时文件路径或 None)
     """
     logger = get_logger()
     tmp_path = None
@@ -976,20 +985,132 @@ def open_workbook_compat(filepath):
         _profiler_ctx.__enter__()
 
     try:
+        load_kwargs = {'data_only': True, 'read_only': read_only}
         if actual_format == 'xls':
             tmp_path = convert_xls_to_xlsx(filepath)
-            wb = openpyxl.load_workbook(tmp_path, data_only=True)
+            wb = openpyxl.load_workbook(tmp_path, **load_kwargs)
         else:
             if ext_format == 'xlsx' or ext_format == 'unknown':
-                wb = openpyxl.load_workbook(filepath, data_only=True)
+                wb = openpyxl.load_workbook(filepath, **load_kwargs)
             else:
                 with open(filepath, 'rb') as f:
-                    wb = openpyxl.load_workbook(f, data_only=True)
+                    wb = openpyxl.load_workbook(f, **load_kwargs)
     finally:
         if _profiler_ctx is not None:
             _profiler_ctx.__exit__(None, None, None)
 
     return wb, tmp_path
+
+
+DEFAULT_CHUNK_SIZE = 1000
+
+
+def iter_sheet_rows(ws, start_row=1, end_row=None, chunk_size=DEFAULT_CHUNK_SIZE,
+                    values_only=True):
+    """
+    分块迭代工作表行数据，适用于大文件以降低内存占用。
+
+    以生成器方式逐块产出行数据，每块包含 chunk_size 行。
+    内部使用 openpyxl 的 iter_rows 实现流式读取，配合 read_only 模式
+    可显著降低大文件的内存峰值。
+
+    Args:
+        ws: openpyxl Worksheet 对象（建议为 read_only 模式）
+        start_row: 起始行号（1-based，含）
+        end_row: 结束行号（1-based，含），None 表示到工作表末尾
+        chunk_size: 每块的行数，默认 1000
+        values_only: 是否仅返回单元格值（True 时返回值元组，
+                      False 时返回 Cell 对象元组）
+
+    Yields:
+        list: 每块的行数据列表，每行是一个值元组或 Cell 对象元组
+    """
+    if end_row is not None and start_row > end_row:
+        return
+
+    chunk = []
+    row_count = 0
+
+    for row in ws.iter_rows(min_row=start_row, max_row=end_row,
+                            values_only=values_only):
+        chunk.append(row)
+        row_count += 1
+        if len(chunk) >= chunk_size:
+            yield chunk
+            chunk = []
+
+    if chunk:
+        yield chunk
+
+
+def iter_sheet_records(ws, columns_map, start_row=1, end_row=None,
+                       chunk_size=DEFAULT_CHUNK_SIZE):
+    """
+    分块迭代工作表行并转换为字典记录，适用于大文件流式处理。
+
+    与 iter_sheet_rows 类似，但将每行数据根据列映射转换为字典，
+    方便直接使用。配合 read_only 模式使用可显著降低内存占用。
+
+    Args:
+        ws: openpyxl Worksheet 对象（建议为 read_only 模式）
+        columns_map: 列映射字典，key 为字段名，value 为 1-based 列号
+        start_row: 起始行号（1-based，含）
+        end_row: 结束行号（1-based，含），None 表示到工作表末尾
+        chunk_size: 每块的记录数，默认 1000
+
+    Yields:
+        list: 每块的记录字典列表
+    """
+    col_keys = sorted(columns_map.keys(), key=lambda k: columns_map[k])
+    col_indices = [columns_map[k] - 1 for k in col_keys]
+
+    for chunk in iter_sheet_rows(ws, start_row=start_row, end_row=end_row,
+                                 chunk_size=chunk_size, values_only=True):
+        records = []
+        for row_vals in chunk:
+            record = {}
+            for key, idx in zip(col_keys, col_indices):
+                if idx < len(row_vals):
+                    record[key] = row_vals[idx]
+                else:
+                    record[key] = None
+            records.append(record)
+        yield records
+
+
+def estimate_row_count(filepath, sheet_name=None):
+    """
+    预估 Excel 文件中指定工作表的行数，用于判断是否需要启用分块读取。
+
+    使用只读模式快速扫描，避免加载整个文件。对于极大文件，
+    可先调用此函数预估规模，再决定是否启用流式处理。
+
+    Args:
+        filepath: Excel 文件路径
+        sheet_name: 工作表名称，None 表示第一个工作表
+
+    Returns:
+        int: 预估的行数；无法预估时返回 None
+    """
+    logger = get_logger()
+    try:
+        wb, tmp_path = open_workbook_compat(filepath, read_only=True)
+        try:
+            if sheet_name:
+                ws = wb[sheet_name]
+            else:
+                ws = wb.worksheets[0]
+            try:
+                count = ws.max_row
+            except Exception:
+                count = None
+            wb.close()
+            return count
+        finally:
+            cleanup_temp_file(tmp_path)
+    except Exception as e:
+        logger.warning('预估行数失败 %s: %s', filepath, e)
+        return None
 
 
 def cleanup_temp_file(tmp_path):
