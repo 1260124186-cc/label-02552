@@ -248,11 +248,13 @@ class RiskType:
     LARGE_AMOUNT = 'large_amount'
     HIGH_FREQUENCY = 'high_frequency'
     COUNTERPARTY_FREQUENCY = 'counterparty_frequency'
+    AMOUNT_ANOMALY = 'amount_anomaly'
 
     LABELS = {
         LARGE_AMOUNT: '大额交易',
         HIGH_FREQUENCY: '高频交易',
         COUNTERPARTY_FREQUENCY: '对方户名频次异常',
+        AMOUNT_ANOMALY: '金额字段异常',
     }
 
 

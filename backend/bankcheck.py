@@ -25,7 +25,8 @@ import json
 import getpass
 import hashlib
 import unicodedata
-from dataclasses import dataclass, field
+from collections import defaultdict
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import List, Optional, Tuple, Dict, Any
 
@@ -2563,7 +2564,9 @@ def to_float(value):
     if isinstance(value, (int, float)):
         return float(value)
     try:
-        return float(str(value).strip())
+        s = str(value).strip()
+        s = s.replace(',', '')
+        return float(s)
     except (ValueError, TypeError):
         return None
 
@@ -2775,9 +2778,14 @@ def export_masked_summary(records, script_dir, output_dir=None, lookup_source=No
     return output_path
 
 
+# 异常标记列名
+ANOMALY_FLAG_COLUMN = '异常标记'
+ANOMALY_DETAIL_COLUMN = '异常详情'
+
 STANDARD_COLUMNS = [
     '唯一id', '银行', '银行账号', '主体', '交易日期',
     '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
+    ANOMALY_FLAG_COLUMN, ANOMALY_DETAIL_COLUMN,
 ]
 
 
@@ -3149,6 +3157,22 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                     existing_records, [], script_dir, lookup_source=lookup_data
                 )
                 final_rows = existing_records
+
+    if final_rows:
+        final_rows, _anomaly_summary = apply_amount_anomaly_detection(final_rows)
+        if _anomaly_summary.get('anomaly_count', 0) > 0:
+            logger.info('金额异常检测: 总记录 %d, 异常 %d (%.2f%%)',
+                        _anomaly_summary.get('total_records', 0),
+                        _anomaly_summary.get('anomaly_count', 0),
+                        _anomaly_summary.get('anomaly_rate', 0) * 100)
+            if output_path and not dry_run:
+                base_columns = get_summary_columns(final_rows, lookup_data)
+                _anomaly_columns = base_columns
+                pd.DataFrame(final_rows, columns=_anomaly_columns).to_excel(
+                    output_path, index=False, engine='openpyxl')
+                logger.info('已将金额异常检测结果回写到总表: %s', output_path)
+            elif dry_run:
+                logger.info('[试运行] 跳过金额异常检测结果回写总表')
 
     if final_rows:
         final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
@@ -3965,6 +3989,240 @@ DIFF_COLUMNS = [
 ]
 
 AMOUNT_FIELDS = ['付款', '收款', '余额']
+
+# ──────────────────────────────────────────────
+# 金额异常检测配置
+# ──────────────────────────────────────────────
+
+class AmountAnomalyType:
+    """金额异常类型常量"""
+    LARGE_AMOUNT = 'large_amount'
+    ZERO_WITH_COUNTERPARTY = 'zero_with_counterparty'
+    NEGATIVE_RECEIPT = 'negative_receipt'
+    POSITIVE_PAYMENT = 'positive_payment'
+    BALANCE_NEGATIVE = 'balance_negative'
+    BOTH_PAYMENT_AND_RECEIPT = 'both_payment_and_receipt'
+    NEITHER_PAYMENT_NOR_RECEIPT = 'neither_payment_nor_receipt'
+
+    LABELS = {
+        LARGE_AMOUNT: '单笔金额超过阈值',
+        ZERO_WITH_COUNTERPARTY: '金额为0但有对方户名',
+        NEGATIVE_RECEIPT: '收款金额为负数',
+        POSITIVE_PAYMENT: '付款金额为正数',
+        BALANCE_NEGATIVE: '余额为负数',
+        BOTH_PAYMENT_AND_RECEIPT: '付款和收款同时有值',
+        NEITHER_PAYMENT_NOR_RECEIPT: '付款和收款均无值',
+    }
+
+    RISK_LEVELS = {
+        LARGE_AMOUNT: 'high',
+        ZERO_WITH_COUNTERPARTY: 'medium',
+        NEGATIVE_RECEIPT: 'high',
+        POSITIVE_PAYMENT: 'high',
+        BALANCE_NEGATIVE: 'medium',
+        BOTH_PAYMENT_AND_RECEIPT: 'medium',
+        NEITHER_PAYMENT_NOR_RECEIPT: 'low',
+    }
+
+
+@dataclass
+class AmountAnomalyConfig:
+    """金额异常检测配置"""
+    single_amount_threshold: float = 500000.0
+    enable_zero_with_counterparty: bool = True
+    enable_negative_receipt: bool = True
+    enable_positive_payment: bool = True
+    enable_negative_balance: bool = True
+    enable_both_amounts: bool = True
+    enable_no_amounts: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def default(cls) -> 'AmountAnomalyConfig':
+        return cls()
+
+
+def detect_amount_anomalies(
+    record: Dict[str, Any],
+    config: Optional[AmountAnomalyConfig] = None
+) -> Tuple[bool, List[str], List[str]]:
+    """
+    检测单条记录的金额异常。
+
+    Args:
+        record: 交易记录字典
+        config: 异常检测配置，为空则使用默认配置
+
+    Returns:
+        Tuple[bool, List[str], List[str]]: (是否有异常, 异常类型列表, 异常描述列表)
+    """
+    if config is None:
+        config = AmountAnomalyConfig.default()
+
+    anomalies = []
+    descriptions = []
+
+    payment = to_float(record.get('付款'))
+    receipt = to_float(record.get('收款'))
+    balance = to_float(record.get('余额'))
+    counterparty = record.get('对方户名')
+
+    has_payment = payment is not None and payment != 0
+    has_receipt = receipt is not None and receipt != 0
+
+    # 1. 单笔金额超过阈值
+    if config.single_amount_threshold and config.single_amount_threshold > 0:
+        amount = None
+        if has_payment:
+            amount = abs(payment)
+        elif has_receipt:
+            amount = receipt
+        if amount is not None and amount >= config.single_amount_threshold:
+            anomalies.append(AmountAnomalyType.LARGE_AMOUNT)
+            descriptions.append(
+                f'{AmountAnomalyType.LABELS[AmountAnomalyType.LARGE_AMOUNT]}: '
+                f'{amount:,.2f} 元，阈值 {config.single_amount_threshold:,.2f} 元'
+            )
+
+    # 2. 金额为0但有对方户名
+    if config.enable_zero_with_counterparty and counterparty is not None:
+        cp_str = str(counterparty).strip()
+        if cp_str:
+            both_zero = (
+                (payment is not None and payment == 0) and
+                (receipt is not None and receipt == 0)
+            )
+            both_none = payment is None and receipt is None
+            one_zero_one_none = (
+                (payment == 0 and receipt is None) or
+                (payment is None and receipt == 0)
+            )
+            if both_zero or both_none or one_zero_one_none:
+                anomalies.append(AmountAnomalyType.ZERO_WITH_COUNTERPARTY)
+                descriptions.append(
+                    f'{AmountAnomalyType.LABELS[AmountAnomalyType.ZERO_WITH_COUNTERPARTY]}: '
+                    f'对方户名「{cp_str}」'
+                )
+
+    # 3. 收款金额为负数
+    if config.enable_negative_receipt and has_receipt and receipt < 0:
+        anomalies.append(AmountAnomalyType.NEGATIVE_RECEIPT)
+        descriptions.append(
+            f'{AmountAnomalyType.LABELS[AmountAnomalyType.NEGATIVE_RECEIPT]}: '
+            f'{receipt:,.2f} 元'
+        )
+
+    # 4. 付款金额为正数（付款约定为负数）
+    if config.enable_positive_payment and has_payment and payment > 0:
+        anomalies.append(AmountAnomalyType.POSITIVE_PAYMENT)
+        descriptions.append(
+            f'{AmountAnomalyType.LABELS[AmountAnomalyType.POSITIVE_PAYMENT]}: '
+            f'{payment:,.2f} 元'
+        )
+
+    # 5. 余额为负数
+    if config.enable_negative_balance and balance is not None and balance < 0:
+        anomalies.append(AmountAnomalyType.BALANCE_NEGATIVE)
+        descriptions.append(
+            f'{AmountAnomalyType.LABELS[AmountAnomalyType.BALANCE_NEGATIVE]}: '
+            f'{balance:,.2f} 元'
+        )
+
+    # 6. 付款和收款同时有非零值
+    if config.enable_both_amounts and has_payment and has_receipt:
+        anomalies.append(AmountAnomalyType.BOTH_PAYMENT_AND_RECEIPT)
+        descriptions.append(
+            f'{AmountAnomalyType.LABELS[AmountAnomalyType.BOTH_PAYMENT_AND_RECEIPT]}: '
+            f'付款 {payment:,.2f} 元，收款 {receipt:,.2f} 元'
+        )
+
+    # 7. 付款和收款均无值或均为0
+    if config.enable_no_amounts and not has_payment and not has_receipt:
+        anomalies.append(AmountAnomalyType.NEITHER_PAYMENT_NOR_RECEIPT)
+        descriptions.append(
+            AmountAnomalyType.LABELS[AmountAnomalyType.NEITHER_PAYMENT_NOR_RECEIPT]
+        )
+
+    has_anomaly = len(anomalies) > 0
+    return has_anomaly, anomalies, descriptions
+
+
+def apply_amount_anomaly_detection(
+    records: List[Dict[str, Any]],
+    config: Optional[AmountAnomalyConfig] = None
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    对记录列表应用金额异常检测，添加异常标记列。
+
+    Args:
+        records: 交易记录列表
+        config: 异常检测配置
+
+    Returns:
+        Tuple[List[Dict[str, Any]], Dict[str, Any]]: (处理后的记录列表, 统计摘要)
+    """
+    logger = get_logger()
+
+    if config is None:
+        config = AmountAnomalyConfig.default()
+
+    if not records:
+        logger.info('无记录可进行金额异常检测')
+        return records, {
+            'total_records': 0,
+            'anomaly_count': 0,
+            'anomaly_types': {},
+        }
+
+    threshold_str = f'{config.single_amount_threshold:,.2f}'
+    logger.info('开始金额异常检测，单笔阈值: %s 元', threshold_str)
+
+    anomaly_type_counts: Dict[str, int] = defaultdict(int)
+    anomaly_count = 0
+
+    for record in records:
+        has_anomaly, anomalies, descriptions = detect_amount_anomalies(record, config)
+
+        if has_anomaly:
+            anomaly_count += 1
+            flag_parts = []
+            for anomaly_type in anomalies:
+                anomaly_type_counts[anomaly_type] += 1
+                risk_level = AmountAnomalyType.RISK_LEVELS.get(anomaly_type, 'medium')
+                risk_label = {'high': '高', 'medium': '中', 'low': '低'}.get(risk_level, '中')
+                type_label = AmountAnomalyType.LABELS.get(anomaly_type, anomaly_type)
+                flag_parts.append(f'[{risk_label}]{type_label}')
+
+            record[ANOMALY_FLAG_COLUMN] = '; '.join(flag_parts)
+            record[ANOMALY_DETAIL_COLUMN] = '; '.join(descriptions)
+        else:
+            record[ANOMALY_FLAG_COLUMN] = ''
+            record[ANOMALY_DETAIL_COLUMN] = ''
+
+    summary = {
+        'total_records': len(records),
+        'anomaly_count': anomaly_count,
+        'anomaly_rate': anomaly_count / len(records) if records else 0,
+        'anomaly_types': dict(anomaly_type_counts),
+        'anomaly_type_labels': {
+            k: {'count': v, 'label': AmountAnomalyType.LABELS.get(k, k)}
+            for k, v in anomaly_type_counts.items()
+        },
+        'config': config.to_dict(),
+    }
+
+    logger.info(
+        '金额异常检测完成：共 %d 条记录，%d 条异常 (%.2f%%)',
+        len(records), anomaly_count,
+        summary['anomaly_rate'] * 100
+    )
+    for anomaly_type, count in anomaly_type_counts.items():
+        label = AmountAnomalyType.LABELS.get(anomaly_type, anomaly_type)
+        logger.info('  - %s: %d 条', label, count)
+
+    return records, summary
 
 
 def _make_match_key(row):
@@ -11731,6 +11989,22 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                     existing_records, [], script_dir, output_dir, lookup_source=lookup_data
                 )
                 final_rows = existing_records
+
+    if final_rows:
+        final_rows, _anomaly_summary = apply_amount_anomaly_detection(final_rows)
+        if _anomaly_summary.get('anomaly_count', 0) > 0:
+            logger.info('金额异常检测: 总记录 %d, 异常 %d (%.2f%%)',
+                        _anomaly_summary.get('total_records', 0),
+                        _anomaly_summary.get('anomaly_count', 0),
+                        _anomaly_summary.get('anomaly_rate', 0) * 100)
+            if output_path and not dry_run:
+                base_columns = get_summary_columns(final_rows, lookup_data)
+                _anomaly_columns = base_columns
+                pd.DataFrame(final_rows, columns=_anomaly_columns).to_excel(
+                    output_path, index=False, engine='openpyxl')
+                logger.info('已将金额异常检测结果回写到总表: %s', output_path)
+            elif dry_run:
+                logger.info('[试运行] 跳过金额异常检测结果回写总表')
 
     if final_rows:
         final_rows, _cp_tag_summary = apply_counterparty_rules(final_rows, script_dir)
