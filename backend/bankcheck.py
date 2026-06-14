@@ -1221,7 +1221,7 @@ def iter_sheet_records(ws, columns_map, start_row=1, end_row=None,
         yield records
 
 
-def is_row_empty(ws, row_idx, check_columns=None):
+def is_row_empty(ws, row_idx, check_columns=None, merged_map=None):
     """
     判断工作表中指定行是否为空行。
 
@@ -1229,13 +1229,14 @@ def is_row_empty(ws, row_idx, check_columns=None):
         ws: openpyxl Worksheet 对象
         row_idx: 行号（1-based）
         check_columns: 要检查的列号列表（1-based），None 表示检查所有列
+        merged_map: 合并单元格值映射，None 时不做回退
 
     Returns:
         bool: 该行是否为空行
     """
     if check_columns is not None:
         for col in check_columns:
-            val = ws.cell(row=row_idx, column=col).value
+            val = get_cell_value_with_merge(ws, row_idx, col, merged_map)
             if val is not None and str(val).strip() != '':
                 return False
         return True
@@ -1245,7 +1246,7 @@ def is_row_empty(ws, row_idx, check_columns=None):
         return True
 
     for col in range(1, max_col + 1):
-        val = ws.cell(row=row_idx, column=col).value
+        val = get_cell_value_with_merge(ws, row_idx, col, merged_map)
         if val is not None and str(val).strip() != '':
             return False
     return True
@@ -1253,7 +1254,8 @@ def is_row_empty(ws, row_idx, check_columns=None):
 
 def get_effective_max_row(ws, start_row=1, end_row=None,
                           check_columns=None,
-                          consecutive_empty_threshold=DEFAULT_EMPTY_ROW_THRESHOLD):
+                          consecutive_empty_threshold=DEFAULT_EMPTY_ROW_THRESHOLD,
+                          merged_map=None):
     """
     获取工作表中实际数据的最后一行行号（尾部空行截断）。
 
@@ -1266,6 +1268,7 @@ def get_effective_max_row(ws, start_row=1, end_row=None,
         end_row: 结束行号（1-based，含），None 表示使用 ws.max_row
         check_columns: 用于判断空行的列号列表（1-based），None 表示检查所有列
         consecutive_empty_threshold: 连续空行阈值，达到该数量则认为数据已结束
+        merged_map: 合并单元格值映射，None 时不做回退
 
     Returns:
         int: 实际数据的最后一行行号；如果没有有效数据，返回 start_row - 1
@@ -1286,7 +1289,7 @@ def get_effective_max_row(ws, start_row=1, end_row=None,
     consecutive_empty = 0
 
     for row_idx in range(start_row, end_row + 1):
-        if is_row_empty(ws, row_idx, check_columns):
+        if is_row_empty(ws, row_idx, check_columns, merged_map):
             consecutive_empty += 1
             if consecutive_empty >= consecutive_empty_threshold:
                 return last_non_empty_row
@@ -1339,6 +1342,62 @@ def cleanup_temp_file(tmp_path):
             os.remove(tmp_path)
         except OSError:
             pass
+
+
+def build_merged_cell_map(ws):
+    """
+    构建合并单元格值填充映射。
+
+    openpyxl 读取合并单元格时，仅首格（左上角）保留值，其余位置返回 None。
+    本函数遍历工作表所有合并区域，将首格值向下、向右填充到区域内每个单元格，
+    返回 {(row_idx, col_idx): value} 映射，供后续读取时回退查找。
+
+    Args:
+        ws: openpyxl Worksheet 对象（非 read_only 模式）
+
+    Returns:
+        dict: 键为 (row_idx, col_idx) 元组（1-based），值为对应合并首格的值
+    """
+    merged_map = {}
+    try:
+        for merged_range in ws.merged_cells.ranges:
+            min_row = merged_range.min_row
+            max_row = merged_range.max_row
+            min_col = merged_range.min_col
+            max_col = merged_range.max_col
+            top_left_value = ws.cell(row=min_row, column=min_col).value
+            if top_left_value is None:
+                continue
+            for row_idx in range(min_row, max_row + 1):
+                for col_idx in range(min_col, max_col + 1):
+                    if row_idx == min_row and col_idx == min_col:
+                        continue
+                    merged_map[(row_idx, col_idx)] = top_left_value
+    except Exception:
+        pass
+    return merged_map
+
+
+def get_cell_value_with_merge(ws, row, col, merged_map=None):
+    """
+    读取单元格值，兼容合并单元格非首格返回 None 的情况。
+
+    先尝试直接读取单元格值；若为 None 且提供了 merged_map，
+    则从映射中查找合并首格的值作为回退。
+
+    Args:
+        ws: openpyxl Worksheet 对象
+        row: 行号（1-based）
+        col: 列号（1-based）
+        merged_map: build_merged_cell_map() 返回的映射，None 时不做回退
+
+    Returns:
+        单元格值（可能为 None）
+    """
+    value = ws.cell(row=row, column=col).value
+    if value is None and merged_map is not None:
+        value = merged_map.get((row, col))
+    return value
 
 
 # ──────────────────────────────────────────────
@@ -1831,14 +1890,14 @@ def read_excel_preview(filepath: str, sheet_name: Optional[str] = None,
         actual_max_row = min(ws.max_row, max_rows)
         actual_max_col = min(ws.max_column, max_cols)
 
+        preview_merged_map = build_merged_cell_map(ws)
         data = []
         cell_refs = []
         for row_idx in range(1, actual_max_row + 1):
             row_data = []
             row_refs = []
             for col_idx in range(1, actual_max_col + 1):
-                cell = ws.cell(row=row_idx, column=col_idx)
-                val = cell.value
+                val = get_cell_value_with_merge(ws, row_idx, col_idx, preview_merged_map)
                 if val is not None:
                     row_data.append(str(val))
                 else:
@@ -1936,9 +1995,10 @@ def preview_extraction(filepath: str, rule_data: Dict[str, Any],
 
                 header_row_idx = temp_rule.start_row - 1
                 if header_row_idx >= 1:
+                    preview_merged_map = build_merged_cell_map(ws)
                     for col_key, col_idx in temp_rule.columns.items():
                         try:
-                            hv = ws.cell(row=header_row_idx, column=col_idx).value
+                            hv = get_cell_value_with_merge(ws, header_row_idx, col_idx, preview_merged_map)
                             if hv is not None:
                                 header_values[col_key] = str(hv).strip()
                         except Exception:
@@ -1982,7 +2042,8 @@ class GenericBankParser:
         self.rule = rule
         self.logger = get_logger()
 
-    def validate_headers(self, ws, filepath: str, sheet_name: str) -> List[str]:
+    def validate_headers(self, ws, filepath: str, sheet_name: str,
+                         merged_map=None) -> List[str]:
         """
         校验工作表表头与预期是否一致，返回不匹配的字段列表。
 
@@ -1993,6 +2054,7 @@ class GenericBankParser:
             ws: openpyxl Worksheet 对象
             filepath: 文件路径（用于日志）
             sheet_name: 工作表名称（用于日志）
+            merged_map: 合并单元格值映射，None 时不做回退
 
         Returns:
             不匹配的字段名列表（空列表表示全部匹配或未配置 expected_headers）
@@ -2011,7 +2073,7 @@ class GenericBankParser:
             if col_idx is None:
                 continue
 
-            actual_value = ws.cell(row=header_row, column=col_idx).value
+            actual_value = get_cell_value_with_merge(ws, header_row, col_idx, merged_map)
             actual_text = str(actual_value).strip() if actual_value is not None else ''
 
             if not actual_text:
@@ -2043,13 +2105,17 @@ class GenericBankParser:
 
         return mismatches
 
-    def _detect_account_blocks(self, ws):
+    def _detect_account_blocks(self, ws, merged_map=None):
         """
         扫描工作表中是否包含多个账号区块。
 
         在账号所在列中查找所有看起来像银行账号的值（6位及以上纯数字），
         并根据配置中的 account_cell 与 start_row 偏移量，推算每个区块的
         表头行和数据起始行。
+
+        Args:
+            ws: openpyxl Worksheet 对象
+            merged_map: 合并单元格值映射，None 时不做回退
 
         Returns:
             列表，每项为字典：
@@ -2078,7 +2144,7 @@ class GenericBankParser:
 
         account_blocks = []
         for row_idx in range(1, ws.max_row + 1):
-            cell_value = ws.cell(row=row_idx, column=col_idx).value
+            cell_value = get_cell_value_with_merge(ws, row_idx, col_idx, merged_map)
             if cell_value is None:
                 continue
             cell_str = _normalize_width(str(cell_value).strip())
@@ -2107,11 +2173,12 @@ class GenericBankParser:
                 check_cols = [col_idx]
                 block['data_end_row'] = get_effective_max_row(
                     ws, start_row=block['data_start_row'],
-                    check_columns=check_cols)
+                    check_columns=check_cols, merged_map=merged_map)
 
         return account_blocks
 
-    def _validate_headers_at_row(self, ws, filepath, sheet_name, header_row):
+    def _validate_headers_at_row(self, ws, filepath, sheet_name, header_row,
+                                 merged_map=None):
         """
         在指定行校验表头，返回不匹配的字段列表。
         """
@@ -2128,7 +2195,7 @@ class GenericBankParser:
             if col_idx is None:
                 continue
 
-            actual_value = ws.cell(row=header_row, column=col_idx).value
+            actual_value = get_cell_value_with_merge(ws, header_row, col_idx, merged_map)
             actual_text = str(actual_value).strip() if actual_value is not None else ''
 
             if not actual_text:
@@ -2141,7 +2208,8 @@ class GenericBankParser:
         return mismatches
 
     def _parse_segment(self, ws, filepath, sheet_name, lookup_source,
-                       account_value, data_start_row, data_end_row):
+                       account_value, data_start_row, data_end_row,
+                       merged_map=None):
         """
         解析工作表中指定行范围的数据段，用于多账号场景。
 
@@ -2153,6 +2221,7 @@ class GenericBankParser:
             account_value: 当前段的银行账号
             data_start_row: 数据起始行号
             data_end_row: 数据结束行号（含）
+            merged_map: 合并单元格值映射，None 时不做回退
 
         Returns:
             当前段的记录列表
@@ -2167,7 +2236,7 @@ class GenericBankParser:
         check_cols = [columns['trade_date']] if 'trade_date' in columns else None
         effective_end = get_effective_max_row(
             ws, start_row=data_start_row, end_row=data_end_row,
-            check_columns=check_cols)
+            check_columns=check_cols, merged_map=merged_map)
         if effective_end < data_start_row:
             self.logger.info(
                 '%s文件工作表「%s」账号「%s」未提取到记录',
@@ -2176,11 +2245,11 @@ class GenericBankParser:
             return rows
 
         for row_idx in range(data_start_row, effective_end + 1):
-            trade_date = ws.cell(row=row_idx, column=columns['trade_date']).value
+            trade_date = get_cell_value_with_merge(ws, row_idx, columns['trade_date'], merged_map)
             if trade_date is None:
                 continue
 
-            payment_val = ws.cell(row=row_idx, column=columns['payment']).value
+            payment_val = get_cell_value_with_merge(ws, row_idx, columns['payment'], merged_map)
             if is_numeric(payment_val):
                 payment = to_float(payment_val)
                 if self.rule.payment_sign == 'negative':
@@ -2188,13 +2257,13 @@ class GenericBankParser:
             else:
                 payment = None
 
-            receipt_val = ws.cell(row=row_idx, column=columns['receipt']).value
+            receipt_val = get_cell_value_with_merge(ws, row_idx, columns['receipt'], merged_map)
             receipt = to_float(receipt_val) if is_numeric(receipt_val) else None
 
-            summary = ws.cell(row=row_idx, column=columns['summary']).value
-            counterpart = ws.cell(row=row_idx, column=columns['counterpart']).value
-            balance = ws.cell(row=row_idx, column=columns['balance']).value
-            transaction_id = ws.cell(row=row_idx, column=columns['transaction_id']).value
+            summary = get_cell_value_with_merge(ws, row_idx, columns['summary'], merged_map)
+            counterpart = get_cell_value_with_merge(ws, row_idx, columns['counterpart'], merged_map)
+            balance = get_cell_value_with_merge(ws, row_idx, columns['balance'], merged_map)
+            transaction_id = get_cell_value_with_merge(ws, row_idx, columns['transaction_id'], merged_map)
 
             record = {
                 '唯一id': generate_unique_id(),
@@ -2228,12 +2297,13 @@ class GenericBankParser:
 
         return rows
 
-    def _parse_sheet_multi_account(self, ws, filepath, sheet_name, lookup_source):
+    def _parse_sheet_multi_account(self, ws, filepath, sheet_name, lookup_source,
+                                    merged_map=None):
         """
         多账号单文件拆分解析：自动检测同一工作表中的多个账号区块，
         按账号切段并分别匹配主体后返回记录列表。
         """
-        blocks = self._detect_account_blocks(ws)
+        blocks = self._detect_account_blocks(ws, merged_map)
         if not blocks:
             self.logger.info(
                 '%s文件工作表「%s」未检测到账号区块，跳过',
@@ -2253,7 +2323,7 @@ class GenericBankParser:
             data_end_row = block['data_end_row']
 
             mismatches = self._validate_headers_at_row(
-                ws, filepath, sheet_name, header_row)
+                ws, filepath, sheet_name, header_row, merged_map)
             if mismatches and self.rule.header_validation == 'strict':
                 detail = ', '.join(mismatches)
                 raise HeaderValidationError(
@@ -2267,7 +2337,8 @@ class GenericBankParser:
 
             segment_rows = self._parse_segment(
                 ws, filepath, sheet_name, lookup_source,
-                account_value, data_start_row, data_end_row)
+                account_value, data_start_row, data_end_row,
+                merged_map=merged_map)
             all_rows.extend(segment_rows)
 
         self.logger.info(
@@ -2278,10 +2349,13 @@ class GenericBankParser:
 
     def _parse_sheet(self, ws, filepath: str, sheet_name: str,
                      lookup_source) -> List[Dict[str, Any]]:
-        if self.rule.multi_account:
-            return self._parse_sheet_multi_account(ws, filepath, sheet_name, lookup_source)
+        merged_map = build_merged_cell_map(ws)
 
-        mismatches = self.validate_headers(ws, filepath, sheet_name)
+        if self.rule.multi_account:
+            return self._parse_sheet_multi_account(ws, filepath, sheet_name, lookup_source,
+                                                    merged_map=merged_map)
+
+        mismatches = self.validate_headers(ws, filepath, sheet_name, merged_map)
 
         if mismatches and self.rule.header_validation == 'strict':
             detail = ', '.join(mismatches)
@@ -2310,7 +2384,7 @@ class GenericBankParser:
 
         check_cols = [columns['trade_date']] if 'trade_date' in columns else None
         effective_max_row = get_effective_max_row(
-            ws, start_row=start_row, check_columns=check_cols)
+            ws, start_row=start_row, check_columns=check_cols, merged_map=merged_map)
         if effective_max_row < start_row:
             if _traversal_start is not None:
                 import time as _time
@@ -2326,11 +2400,11 @@ class GenericBankParser:
             return rows
 
         for row_idx in range(start_row, effective_max_row + 1):
-            trade_date = ws.cell(row=row_idx, column=columns['trade_date']).value
+            trade_date = get_cell_value_with_merge(ws, row_idx, columns['trade_date'], merged_map)
             if trade_date is None:
                 continue
 
-            payment_val = ws.cell(row=row_idx, column=columns['payment']).value
+            payment_val = get_cell_value_with_merge(ws, row_idx, columns['payment'], merged_map)
             if is_numeric(payment_val):
                 payment = to_float(payment_val)
                 if self.rule.payment_sign == 'negative':
@@ -2338,13 +2412,13 @@ class GenericBankParser:
             else:
                 payment = None
 
-            receipt_val = ws.cell(row=row_idx, column=columns['receipt']).value
+            receipt_val = get_cell_value_with_merge(ws, row_idx, columns['receipt'], merged_map)
             receipt = to_float(receipt_val) if is_numeric(receipt_val) else None
 
-            summary = ws.cell(row=row_idx, column=columns['summary']).value
-            counterpart = ws.cell(row=row_idx, column=columns['counterpart']).value
-            balance = ws.cell(row=row_idx, column=columns['balance']).value
-            transaction_id = ws.cell(row=row_idx, column=columns['transaction_id']).value
+            summary = get_cell_value_with_merge(ws, row_idx, columns['summary'], merged_map)
+            counterpart = get_cell_value_with_merge(ws, row_idx, columns['counterpart'], merged_map)
+            balance = get_cell_value_with_merge(ws, row_idx, columns['balance'], merged_map)
+            transaction_id = get_cell_value_with_merge(ws, row_idx, columns['transaction_id'], merged_map)
 
             record = {
                 '唯一id': generate_unique_id(),
