@@ -506,3 +506,247 @@ class TestNumberFormat:
         row = result.by_subject[0]
         assert str(row['total_income']).split('.')[-1] in ['12', '13'] or row['total_income'] == pytest.approx(100.12)
         assert len(str(row['net_amount']).split('.')[-1]) <= 2
+
+
+class TestUnmatchedAccounts:
+    """测试未匹配账号汇总功能"""
+
+    def test_no_unmatched_accounts_when_all_matched(self):
+        """测试所有账号都匹配时，未匹配账号列表为空"""
+        records = [
+            {
+                '唯一id': 'T1', '银行': '测试银行', '银行账号': '123456',
+                '主体': '匹配主体A', '交易日期': '2024-01-01',
+                '付款': None, '收款': 1000.0, '摘要': '收入',
+                '对方户名': '', '余额': 1000.0, '交易流水号': 'T1',
+            },
+        ]
+        result = bankcheck.summarize_transactions(records)
+        assert result.unmatched_accounts == []
+        assert result.overall_summary.get('unmatched_account_count', 0) == 0
+
+    def test_single_unmatched_account(self):
+        """测试单个未匹配账号的收集"""
+        records = [
+            {
+                '唯一id': 'U1', '银行': '测试银行', '银行账号': '999999',
+                '主体': '', '交易日期': '2024-01-05',
+                '付款': None, '收款': 5000.0, '摘要': '收入',
+                '对方户名': '', '余额': 5000.0, '交易流水号': 'U1',
+            },
+            {
+                '唯一id': 'U2', '银行': '测试银行', '银行账号': '999999',
+                '主体': '', '交易日期': '2024-01-10',
+                '付款': -2000.0, '收款': None, '摘要': '支出',
+                '对方户名': '', '余额': 3000.0, '交易流水号': 'U2',
+            },
+        ]
+        result = bankcheck.summarize_transactions(records)
+
+        assert len(result.unmatched_accounts) == 1
+        ua = result.unmatched_accounts[0]
+        assert ua['account'] == '999999'
+        assert ua['banks'] == '测试银行'
+        assert ua['first_date'] == '2024-01-05'
+        assert ua['last_date'] == '2024-01-10'
+        assert ua['total_income'] == pytest.approx(5000.0)
+        assert ua['total_expense'] == pytest.approx(2000.0)
+        assert ua['net_amount'] == pytest.approx(3000.0)
+        assert ua['transaction_count'] == 2
+        assert result.overall_summary.get('unmatched_account_count') == 1
+
+    def test_multiple_unmatched_accounts(self):
+        """测试多个未匹配账号的收集，按交易笔数降序排列"""
+        records = [
+            {
+                '唯一id': 'A1', '银行': '银行A', '银行账号': '111111',
+                '主体': '', '交易日期': '2024-01-01',
+                '付款': None, '收款': 100.0, '摘要': '',
+                '对方户名': '', '余额': 100.0, '交易流水号': 'A1',
+            },
+            {
+                '唯一id': 'B1', '银行': '银行B', '银行账号': '222222',
+                '主体': '', '交易日期': '2024-01-01',
+                '付款': None, '收款': 200.0, '摘要': '',
+                '对方户名': '', '余额': 200.0, '交易流水号': 'B1',
+            },
+            {
+                '唯一id': 'B2', '银行': '银行B', '银行账号': '222222',
+                '主体': '', '交易日期': '2024-01-02',
+                '付款': None, '收款': 300.0, '摘要': '',
+                '对方户名': '', '余额': 500.0, '交易流水号': 'B2',
+            },
+            {
+                '唯一id': 'B3', '银行': '银行B', '银行账号': '222222',
+                '主体': '', '交易日期': '2024-01-03',
+                '付款': None, '收款': 400.0, '摘要': '',
+                '对方户名': '', '余额': 900.0, '交易流水号': 'B3',
+            },
+        ]
+        result = bankcheck.summarize_transactions(records)
+
+        assert len(result.unmatched_accounts) == 2
+        assert result.unmatched_accounts[0]['account'] == '222222'
+        assert result.unmatched_accounts[0]['transaction_count'] == 3
+        assert result.unmatched_accounts[1]['account'] == '111111'
+        assert result.unmatched_accounts[1]['transaction_count'] == 1
+        assert result.overall_summary.get('unmatched_account_count') == 2
+
+    def test_unmatched_account_multiple_banks(self):
+        """测试同一账号出现在多家银行的情况"""
+        records = [
+            {
+                '唯一id': 'M1', '银行': '银行A', '银行账号': '888888',
+                '主体': '', '交易日期': '2024-01-01',
+                '付款': None, '收款': 1000.0, '摘要': '',
+                '对方户名': '', '余额': 1000.0, '交易流水号': 'M1',
+            },
+            {
+                '唯一id': 'M2', '银行': '银行B', '银行账号': '888888',
+                '主体': '', '交易日期': '2024-01-02',
+                '付款': None, '收款': 2000.0, '摘要': '',
+                '对方户名': '', '余额': 2000.0, '交易流水号': 'M2',
+            },
+        ]
+        result = bankcheck.summarize_transactions(records)
+
+        assert len(result.unmatched_accounts) == 1
+        ua = result.unmatched_accounts[0]
+        assert ua['account'] == '888888'
+        assert '银行A' in ua['banks']
+        assert '银行B' in ua['banks']
+        assert ua['first_date'] == '2024-01-01'
+        assert ua['last_date'] == '2024-01-02'
+        assert ua['total_income'] == pytest.approx(3000.0)
+        assert ua['transaction_count'] == 2
+
+    def test_empty_account_not_collected(self):
+        """测试空银行账号不会被收集为未匹配账号"""
+        records = [
+            {
+                '唯一id': 'E1', '银行': '测试银行', '银行账号': '',
+                '主体': '', '交易日期': '2024-01-01',
+                '付款': None, '收款': 500.0, '摘要': '',
+                '对方户名': '', '余额': 500.0, '交易流水号': 'E1',
+            },
+        ]
+        result = bankcheck.summarize_transactions(records)
+        assert result.unmatched_accounts == []
+
+    def test_matched_and_unmatched_mixed(self):
+        """测试匹配和未匹配账号混合的情况"""
+        records = [
+            {
+                '唯一id': 'M1', '银行': '测试银行', '银行账号': '111',
+                '主体': '匹配主体', '交易日期': '2024-01-01',
+                '付款': None, '收款': 1000.0, '摘要': '',
+                '对方户名': '', '余额': 1000.0, '交易流水号': 'M1',
+            },
+            {
+                '唯一id': 'U1', '银行': '测试银行', '银行账号': '999',
+                '主体': '', '交易日期': '2024-01-02',
+                '付款': None, '收款': 500.0, '摘要': '',
+                '对方户名': '', '余额': 500.0, '交易流水号': 'U1',
+            },
+        ]
+        result = bankcheck.summarize_transactions(records)
+
+        subjects = [r['subject'] for r in result.by_subject]
+        assert '匹配主体' in subjects
+        assert '未指定主体' in subjects
+
+        assert len(result.unmatched_accounts) == 1
+        assert result.unmatched_accounts[0]['account'] == '999'
+        assert result.overall_summary.get('unmatched_account_count') == 1
+
+    def test_export_creates_unmatched_sheet(self, tmp_dir):
+        """测试导出时创建未匹配账号汇总 Sheet"""
+        records = [
+            {
+                '唯一id': 'U1', '银行': '测试银行', '银行账号': '999999',
+                '主体': '', '交易日期': '2024-01-05',
+                '付款': None, '收款': 5000.0, '摘要': '收入',
+                '对方户名': '', '余额': 5000.0, '交易流水号': 'U1',
+            },
+        ]
+        summary = bankcheck.summarize_transactions(records)
+        output_path = os.path.join(tmp_dir, '未匹配测试.xlsx')
+
+        bankcheck.export_subject_summary(summary, output_path)
+
+        assert os.path.exists(output_path)
+        wb = openpyxl.load_workbook(output_path)
+        assert '未匹配账号汇总' in wb.sheetnames
+
+        df = pd.read_excel(output_path, sheet_name='未匹配账号汇总')
+        assert '银行账号' in df.columns
+        assert '涉及银行' in df.columns
+        assert '首次交易日期' in df.columns
+        assert '最后交易日期' in df.columns
+        assert len(df) == 1
+        assert str(df.iloc[0]['银行账号']) == '999999'
+
+    def test_export_no_unmatched_sheet_when_none(self, tmp_dir):
+        """测试没有未匹配账号时不创建该 Sheet"""
+        records = [
+            {
+                '唯一id': 'M1', '银行': '测试银行', '银行账号': '111',
+                '主体': '匹配主体', '交易日期': '2024-01-01',
+                '付款': None, '收款': 1000.0, '摘要': '',
+                '对方户名': '', '余额': 1000.0, '交易流水号': 'M1',
+            },
+        ]
+        summary = bankcheck.summarize_transactions(records)
+        output_path = os.path.join(tmp_dir, '无未匹配测试.xlsx')
+
+        bankcheck.export_subject_summary(summary, output_path)
+
+        wb = openpyxl.load_workbook(output_path)
+        assert '未匹配账号汇总' not in wb.sheetnames
+
+    def test_overview_shows_unmatched_count(self, tmp_dir):
+        """测试汇总总览中显示未匹配账号数量"""
+        records = [
+            {
+                '唯一id': 'U1', '银行': '测试银行', '银行账号': '111',
+                '主体': '', '交易日期': '2024-01-01',
+                '付款': None, '收款': 1000.0, '摘要': '',
+                '对方户名': '', '余额': 1000.0, '交易流水号': 'U1',
+            },
+            {
+                '唯一id': 'U2', '银行': '测试银行', '银行账号': '222',
+                '主体': '', '交易日期': '2024-01-02',
+                '付款': None, '收款': 2000.0, '摘要': '',
+                '对方户名': '', '余额': 2000.0, '交易流水号': 'U2',
+            },
+        ]
+        summary = bankcheck.summarize_transactions(records)
+        output_path = os.path.join(tmp_dir, '总览测试.xlsx')
+        bankcheck.export_subject_summary(summary, output_path)
+
+        df = pd.read_excel(output_path, sheet_name='汇总总览')
+        data = dict(zip(df['统计项'], df['数值']))
+        assert '未匹配账号数' in data
+        assert data['未匹配账号数'] == 2
+
+    def test_generate_from_records_includes_unmatched(self, tmp_dir):
+        """测试 generate_subject_summary_from_records 包含未匹配账号"""
+        records = [
+            {
+                '唯一id': 'G1', '银行': '测试银行', '银行账号': '777',
+                '主体': '', '交易日期': '2024-01-01',
+                '付款': None, '收款': 1000.0, '摘要': '',
+                '对方户名': '', '余额': 1000.0, '交易流水号': 'G1',
+            },
+        ]
+        result_path = bankcheck.generate_subject_summary_from_records(
+            records, tmp_dir, {'来源': '测试'}
+        )
+
+        assert result_path is not None
+        wb = openpyxl.load_workbook(result_path)
+        assert '未匹配账号汇总' in wb.sheetnames
+
+        df = pd.read_excel(result_path, sheet_name='未匹配账号汇总')
+        assert len(df) == 1
+        assert str(df.iloc[0]['银行账号']) == '777'

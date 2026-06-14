@@ -13024,6 +13024,7 @@ class SubjectSummaryResult:
     by_bank: List[Dict[str, Any]] = field(default_factory=list)
     by_month: List[Dict[str, Any]] = field(default_factory=list)
     overall_summary: Dict[str, Any] = field(default_factory=dict)
+    unmatched_accounts: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _extract_year_month(trade_date) -> str:
@@ -13115,6 +13116,8 @@ def summarize_transactions(
     total_income_count = 0
     total_expense_count = 0
 
+    unmatched_accounts_agg: Dict[str, Dict[str, Any]] = {}
+
     def _update(entry, income, expense, is_income, is_expense):
         entry.total_income += income
         entry.total_expense += expense
@@ -13124,10 +13127,24 @@ def summarize_transactions(
         if is_expense:
             entry.expense_count += 1
 
+    def _normalize_date_for_compare(date_val):
+        if date_val is None:
+            return None
+        dt = _normalize_date(date_val)
+        if dt is not None:
+            return dt.strftime('%Y-%m-%d')
+        s = str(date_val).strip()
+        if len(s) >= 10 and s[4] in '-/.' and s[7] in '-/.':
+            return s[:10].replace('/', '-').replace('.', '-')
+        return None
+
     for rec in records:
-        subject = str(rec.get('主体') or '').strip() or '未指定主体'
+        original_subject = str(rec.get('主体') or '').strip()
+        subject = original_subject or '未指定主体'
         bank = str(rec.get('银行') or '').strip() or '未知银行'
         year_month = _extract_year_month(rec.get('交易日期'))
+        bank_account = str(rec.get('银行账号') or '').strip()
+        trade_date_str = _normalize_date_for_compare(rec.get('交易日期'))
 
         payment = to_float(rec.get('付款'))
         receipt = to_float(rec.get('收款'))
@@ -13154,6 +13171,29 @@ def summarize_transactions(
             total_income_count += 1
         if is_expense:
             total_expense_count += 1
+
+        if not original_subject and bank_account:
+            acc_key = bank_account
+            if acc_key not in unmatched_accounts_agg:
+                unmatched_accounts_agg[acc_key] = {
+                    'account': bank_account,
+                    'banks': set(),
+                    'first_date': trade_date_str,
+                    'last_date': trade_date_str,
+                    'total_income': 0.0,
+                    'total_expense': 0.0,
+                    'transaction_count': 0,
+                }
+            ua = unmatched_accounts_agg[acc_key]
+            ua['banks'].add(bank)
+            if trade_date_str:
+                if ua['first_date'] is None or trade_date_str < ua['first_date']:
+                    ua['first_date'] = trade_date_str
+                if ua['last_date'] is None or trade_date_str > ua['last_date']:
+                    ua['last_date'] = trade_date_str
+            ua['total_income'] += income
+            ua['total_expense'] += expense
+            ua['transaction_count'] += 1
 
         if subject not in agg_subject:
             agg_subject[subject] = SubjectDimensionSummary(subject=subject)
@@ -13217,6 +13257,20 @@ def summarize_transactions(
     fields_m = ['year_month', 'total_income', 'total_expense', 'net_amount',
                 'transaction_count', 'income_count', 'expense_count']
 
+    unmatched_accounts_list = []
+    for ua in unmatched_accounts_agg.values():
+        unmatched_accounts_list.append({
+            'account': ua['account'],
+            'banks': '、'.join(sorted(ua['banks'])),
+            'first_date': ua['first_date'] or '',
+            'last_date': ua['last_date'] or '',
+            'total_income': round(ua['total_income'], 2),
+            'total_expense': round(ua['total_expense'], 2),
+            'net_amount': round(ua['total_income'] - ua['total_expense'], 2),
+            'transaction_count': ua['transaction_count'],
+        })
+    unmatched_accounts_list.sort(key=lambda x: x['transaction_count'], reverse=True)
+
     result = SubjectSummaryResult(
         by_subject=sorted(
             to_dict_list(agg_subject.values(), fields_s),
@@ -13252,12 +13306,15 @@ def summarize_transactions(
             'subject_count': len(agg_subject),
             'bank_count': len(agg_bank),
             'month_count': len(agg_month),
+            'unmatched_account_count': len(unmatched_accounts_list),
         },
+        unmatched_accounts=unmatched_accounts_list,
     )
 
     logger.info(
-        '主体维度汇总完成: %d 条记录, %d 个主体, %d 家银行, %d 个月份',
-        total_count, len(agg_subject), len(agg_bank), len(agg_month)
+        '主体维度汇总完成: %d 条记录, %d 个主体, %d 家银行, %d 个月份, %d 个未匹配账号',
+        total_count, len(agg_subject), len(agg_bank), len(agg_month),
+        len(unmatched_accounts_list)
     )
 
     return result
@@ -13369,6 +13426,7 @@ def export_subject_summary(summary_result: SubjectSummaryResult,
                 ('涉及主体数', overall.get('subject_count', 0)),
                 ('涉及银行数', overall.get('bank_count', 0)),
                 ('覆盖月份数', overall.get('month_count', 0)),
+                ('未匹配账号数', overall.get('unmatched_account_count', 0)),
             ]
             if source_info:
                 for k, v in source_info.items():
@@ -13409,6 +13467,39 @@ def export_subject_summary(summary_result: SubjectSummaryResult,
                     ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
 
                 _apply_number_format(ws, amount_cols, count_cols)
+
+            unmatched = summary_result.unmatched_accounts
+            if unmatched:
+                ua_col_map = {
+                    'account': '银行账号',
+                    'banks': '涉及银行',
+                    'first_date': '首次交易日期',
+                    'last_date': '最后交易日期',
+                    'total_income': '收入总额(元)',
+                    'total_expense': '支出总额(元)',
+                    'net_amount': '净额(元)',
+                    'transaction_count': '交易笔数',
+                }
+                ua_df = pd.DataFrame(unmatched)
+                ua_df = _rename_columns(ua_df, ua_col_map)
+                ua_df.to_excel(writer, sheet_name='未匹配账号汇总', index=False)
+
+                ws_ua = writer.sheets['未匹配账号汇总']
+                ua_amount_cols = set()
+                ua_count_cols = set()
+                for idx, col_name in enumerate(ua_df.columns, 1):
+                    col_letter = openpyxl.utils.get_column_letter(idx)
+                    if '元' in str(col_name):
+                        ua_amount_cols.add(col_letter)
+                    elif '笔数' in str(col_name):
+                        ua_count_cols.add(col_letter)
+                    max_len = max(
+                        len(str(col_name)),
+                        max((len(str(v)) for v in ua_df.iloc[:, idx - 1].astype(str)), default=0)
+                    )
+                    ws_ua.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+                _apply_number_format(ws_ua, ua_amount_cols, ua_count_cols)
 
             ws_overview = writer.sheets['汇总总览']
             for col_idx in range(1, 3):
