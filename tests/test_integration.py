@@ -1963,3 +1963,127 @@ class TestContentHashDeduplication:
 
         assert len(result.processed_files) == 1
         assert len(result.skipped_duplicate_files) == 2
+
+
+class TestPipelineCheckpointResume:
+    """断点续跑功能集成测试"""
+
+    def _setup_folder(self, tmp_dir, script_dir, files=None):
+        source_folder = os.path.join(tmp_dir, '流水文件夹')
+        os.makedirs(source_folder, exist_ok=True)
+
+        if files is None:
+            files = ['北京银行', '东亚银行']
+
+        for bank in files:
+            if bank == '北京银行':
+                _create_beijing_bank_excel(os.path.join(source_folder, '北京银行_流水.xlsx'))
+            elif bank == '东亚银行':
+                _create_east_asia_bank_excel(os.path.join(source_folder, '东亚银行_流水.xlsx'))
+
+        _create_lookup_table(os.path.join(script_dir, '主体查找表.xlsx'))
+        return source_folder
+
+    def test_pipeline_state_cleared_after_success(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir)
+
+        assert len(result.all_rows) == 2
+        state_path = os.path.join(script_dir, bankcheck.PIPELINE_STATE_FILENAME)
+        assert not os.path.exists(state_path)
+
+    def test_pipeline_state_persists_processed_files(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        checkpoint = bankcheck.PipelineState(script_dir)
+        checkpoint.processed_files = ['/fake/path/北京银行_流水.xlsx']
+        checkpoint.all_rows = [{'银行': '北京银行', '测试': True}]
+        checkpoint.save()
+
+        loaded = bankcheck.PipelineState.load(script_dir)
+        assert len(loaded.processed_files) == 1
+        assert loaded.processed_files[0] == '/fake/path/北京银行_流水.xlsx'
+        assert len(loaded.all_rows) == 1
+        assert loaded.all_rows[0]['银行'] == '北京银行'
+
+        checkpoint.clear()
+        assert not os.path.exists(checkpoint.state_path)
+
+    def test_pipeline_resumes_from_checkpoint(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行', '东亚银行'])
+
+        working_folder = source + '＋检验版'
+        os.makedirs(working_folder, exist_ok=True)
+
+        beijing_path = os.path.join(working_folder, '北京银行_流水.xlsx')
+        _create_beijing_bank_excel(beijing_path)
+        east_asia_path = os.path.join(working_folder, '东亚银行_流水.xlsx')
+        _create_east_asia_bank_excel(east_asia_path)
+
+        lookup_data = bankcheck.load_lookup_table(bankcheck.find_lookup_file(script_dir))
+        beijing_rows = bankcheck.process_beijing_bank(beijing_path, lookup_data)
+
+        checkpoint = bankcheck.PipelineState(script_dir)
+        checkpoint.processed_files = [beijing_path]
+        checkpoint.all_rows = beijing_rows
+        checkpoint.save()
+
+        result = bankcheck.run_pipeline(source, script_dir)
+
+        assert result.resumed_from_checkpoint is True
+        assert beijing_path in result.checkpoint_skipped_files
+        assert len(result.all_rows) == 4
+        beijing_count = sum(1 for r in result.all_rows if r['银行'] == '北京银行')
+        east_asia_count = sum(1 for r in result.all_rows if r['银行'] == '东亚银行')
+        assert beijing_count == 2
+        assert east_asia_count == 2
+
+        state_path = os.path.join(script_dir, bankcheck.PIPELINE_STATE_FILENAME)
+        assert not os.path.exists(state_path)
+
+    def test_pipeline_no_resume_without_state(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script')
+        os.makedirs(script_dir, exist_ok=True)
+        source = self._setup_folder(tmp_dir, script_dir, ['北京银行'])
+
+        result = bankcheck.run_pipeline(source, script_dir)
+
+        assert result.resumed_from_checkpoint is False
+        assert len(result.checkpoint_skipped_files) == 0
+        assert len(result.all_rows) == 2
+
+    def test_pipeline_state_load_returns_empty_on_missing(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script_empty')
+        os.makedirs(script_dir, exist_ok=True)
+
+        state = bankcheck.PipelineState.load(script_dir)
+        assert state.processed_files == []
+        assert state.all_rows == []
+        assert state.has_state() is False
+
+    def test_pipeline_state_load_handles_corrupt_file(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script_corrupt')
+        os.makedirs(script_dir, exist_ok=True)
+
+        state_path = os.path.join(script_dir, bankcheck.PIPELINE_STATE_FILENAME)
+        with open(state_path, 'w') as f:
+            f.write('{invalid json content')
+
+        state = bankcheck.PipelineState.load(script_dir)
+        assert state.processed_files == []
+        assert state.all_rows == []
+
+    def test_pipeline_clear_idempotent(self, tmp_dir):
+        script_dir = os.path.join(tmp_dir, 'script_clear')
+        os.makedirs(script_dir, exist_ok=True)
+
+        state = bankcheck.PipelineState(script_dir)
+        state.clear()
+        state.clear()

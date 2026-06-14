@@ -2732,6 +2732,61 @@ process_construction_bank = process_ccb_bank
 process_merchants_bank = process_cmb_bank
 
 
+PIPELINE_STATE_FILENAME = '.pipeline_state.json'
+
+
+def _pipeline_state_path(script_dir):
+    return os.path.join(script_dir, PIPELINE_STATE_FILENAME)
+
+
+class PipelineState:
+    def __init__(self, script_dir):
+        self.script_dir = script_dir
+        self.processed_files = []
+        self.all_rows = []
+
+    @property
+    def state_path(self):
+        return _pipeline_state_path(self.script_dir)
+
+    def save(self):
+        data = {
+            'processed_files': self.processed_files,
+            'all_rows': self.all_rows,
+            'updated_at': datetime.now().isoformat(),
+        }
+        tmp_path = self.state_path + '.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp_path, self.state_path)
+
+    @classmethod
+    def load(cls, script_dir):
+        state = cls(script_dir)
+        path = state.state_path
+        if not os.path.isfile(path):
+            return state
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            state.processed_files = data.get('processed_files', [])
+            state.all_rows = data.get('all_rows', [])
+            return state
+        except Exception:
+            return cls(script_dir)
+
+    def clear(self):
+        path = self.state_path
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def has_state(self):
+        return os.path.isfile(self.state_path)
+
+
 # ──────────────────────────────────────────────
 # 主流程
 # ──────────────────────────────────────────────
@@ -2797,6 +2852,8 @@ class ProcessingResult:
     working_folder: Optional[str] = None
     working_folder_is_copy: bool = False
     changes_committed: bool = False
+    resumed_from_checkpoint: bool = False
+    checkpoint_skipped_files: List[str] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -3212,12 +3269,25 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
     if _profiler is not None:
         _phase_process_start = __import__('time').perf_counter()
 
-    all_rows = []
-    processed_files = []
+    checkpoint = PipelineState.load(script_dir)
+    resumed_from_checkpoint = checkpoint.has_state() and len(checkpoint.processed_files) > 0
+    checkpoint_skipped_files = []
+
+    if resumed_from_checkpoint:
+        logger.info('===== 断点续跑：检测到上次未完成的处理状态 =====')
+        logger.info('已完成文件 %d 个，将跳过这些文件继续处理', len(checkpoint.processed_files))
+
+    all_rows = list(checkpoint.all_rows)
+    processed_files = list(checkpoint.processed_files)
     unprocessed_files = []
     error_files = []
 
     for filepath in all_files:
+        if filepath in checkpoint.processed_files:
+            checkpoint_skipped_files.append(filepath)
+            logger.info('断点续跑跳过已处理文件: %s', filepath)
+            continue
+
         file_is_pdf = is_pdf_file(filepath) if 'is_pdf_file' in dir() else filepath.lower().endswith('.pdf')
         if file_is_pdf:
             try:
@@ -3226,6 +3296,9 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                     all_rows.extend(rows)
                     processed_files.append(filepath)
                     logger.info('成功处理 PDF 文件: %s（%d 条记录）', filepath, len(rows))
+                    checkpoint.processed_files = list(processed_files)
+                    checkpoint.all_rows = list(all_rows)
+                    checkpoint.save()
                 else:
                     unprocessed_files.append(filepath)
                     logger.warning('PDF 文件未解析出有效记录: %s', filepath)
@@ -3242,6 +3315,9 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                 all_rows.extend(rows)
                 processed_files.append(filepath)
                 logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
+                checkpoint.processed_files = list(processed_files)
+                checkpoint.all_rows = list(all_rows)
+                checkpoint.save()
             except Exception as e:
                 error_files.append((filepath, str(e)))
                 logger.error('处理文件「%s」时发生错误: %s', filepath, e, exc_info=True)
@@ -3715,6 +3791,10 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
     elif (unprocessed_files or error_files or skipped_duplicate_files) and dry_run:
         logger.info('[试运行] 跳过待处理清单生成')
 
+    checkpoint.clear()
+    if resumed_from_checkpoint:
+        logger.info('断点续跑完成，已清除状态文件')
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -3772,6 +3852,8 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         pending_folder_suffix=folder_suffix,
         working_folder=working_folder,
         working_folder_is_copy=working_folder_is_copy,
+        resumed_from_checkpoint=resumed_from_checkpoint,
+        checkpoint_skipped_files=checkpoint_skipped_files,
     )
 
 
@@ -12390,7 +12472,23 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     error_files = []
     filtered_out_count = 0
 
+    checkpoint = PipelineState.load(script_dir)
+    resumed_from_checkpoint = checkpoint.has_state() and len(checkpoint.processed_files) > 0
+    checkpoint_skipped_files = []
+
+    if resumed_from_checkpoint:
+        logger.info('===== 断点续跑：检测到上次未完成的处理状态 =====')
+        logger.info('已完成文件 %d 个，将跳过这些文件继续处理', len(checkpoint.processed_files))
+
+    all_rows = list(checkpoint.all_rows)
+    processed_files = list(checkpoint.processed_files)
+
     for filepath in excel_files:
+        if filepath in checkpoint.processed_files:
+            checkpoint_skipped_files.append(filepath)
+            logger.info('断点续跑跳过已处理文件: %s', filepath)
+            continue
+
         bank = identify_bank(filepath)
         if bank and bank in BANK_PROCESSORS and bank in enabled_banks:
             try:
@@ -12405,6 +12503,9 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                 all_rows.extend(rows)
                 processed_files.append(filepath)
                 logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
+                checkpoint.processed_files = list(processed_files)
+                checkpoint.all_rows = list(all_rows)
+                checkpoint.save()
             except Exception as e:
                 error_files.append((filepath, str(e)))
                 logger.error('处理文件「%s」时发生错误: %s', filepath, e, exc_info=True)
@@ -12788,6 +12889,10 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     elif (unprocessed_files or error_files or skipped_duplicate_files) and dry_run:
         logger.info('[试运行] 跳过待处理清单生成')
 
+    checkpoint.clear()
+    if resumed_from_checkpoint:
+        logger.info('断点续跑完成，已清除状态文件')
+
     return ProcessingResult(
         all_rows=final_rows,
         processed_files=processed_files,
@@ -12836,6 +12941,8 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         pending_folder_suffix=folder_suffix,
         working_folder=working_folder,
         working_folder_is_copy=working_folder_is_copy,
+        resumed_from_checkpoint=resumed_from_checkpoint,
+        checkpoint_skipped_files=checkpoint_skipped_files,
     )
 
 
