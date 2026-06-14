@@ -3371,7 +3371,7 @@ def export_masked_summary(records, script_dir, output_dir=None, lookup_source=No
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    df.to_excel(output_path, index=False, engine='openpyxl')
+    df_to_excel_text_safe(df, output_path, index=False)
 
     logger.info('脱敏版总表输出完成: %s（共 %d 条记录）', output_path, len(records))
     return output_path
@@ -3385,6 +3385,11 @@ STANDARD_COLUMNS = [
     '唯一id', '银行', '银行账号', '主体', '交易日期',
     '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
     ANOMALY_FLAG_COLUMN, ANOMALY_DETAIL_COLUMN,
+]
+
+LONG_DIGIT_TEXT_FIELDS = [
+    '唯一id', '银行账号', '对方账号', '交易流水号',
+    '票据号', '结算号', '凭证号',
 ]
 
 
@@ -3418,6 +3423,140 @@ def get_summary_columns(records=None, lookup_source=None):
             columns.append(field)
 
     return columns
+
+
+def normalize_long_digit_value(value):
+    """
+    将长数字值规范化为字符串格式，保留前导零，防止科学计数法。
+
+    Args:
+        value: 输入值，可以是数字、字符串或 None
+
+    Returns:
+        str 或 None: 规范化后的字符串值
+    """
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return str(value)
+    if isinstance(value, int):
+        return str(value)
+    return str(value).strip()
+
+
+def ensure_text_fields_in_df(df, text_fields=None):
+    """
+    确保 DataFrame 中指定列的值为文本字符串格式，防止写入 Excel 时变为科学计数法。
+
+    Args:
+        df: 输入的 DataFrame
+        text_fields: 需要确保为文本格式的列名列表，None 则使用默认的 LONG_DIGIT_TEXT_FIELDS
+
+    Returns:
+        pandas.DataFrame: 处理后的 DataFrame
+    """
+    if df is None or df.empty:
+        return df
+
+    if text_fields is None:
+        text_fields = LONG_DIGIT_TEXT_FIELDS
+
+    result_df = df.copy()
+    for col in text_fields:
+        if col in result_df.columns:
+            result_df[col] = result_df[col].apply(normalize_long_digit_value)
+    return result_df
+
+
+def df_to_excel_text_safe(df, output_path, text_fields=None,
+                          sheet_name='Sheet1', index=False,
+                          engine='openpyxl'):
+    """
+    将 DataFrame 写入 Excel 文件，确保指定列为文本格式，防止科学计数法。
+
+    实现方式：
+    1. 先将指定列的值转换为字符串
+    2. 使用 openpyxl 设置对应列的单元格格式为文本（@）
+
+    Args:
+        df: 要写入的 DataFrame
+        output_path: 输出文件路径
+        text_fields: 需要设置为文本格式的列名列表，None 则使用默认的 LONG_DIGIT_TEXT_FIELDS
+        sheet_name: 工作表名称
+        index: 是否写入索引
+        engine: Excel 写入引擎，默认 openpyxl
+    """
+    if text_fields is None:
+        text_fields = LONG_DIGIT_TEXT_FIELDS
+
+    df_safe = ensure_text_fields_in_df(df, text_fields)
+    df_safe.to_excel(output_path, sheet_name=sheet_name, index=index, engine=engine)
+
+    wb = openpyxl.load_workbook(output_path)
+    ws = wb[sheet_name]
+
+    col_indices = {}
+    for col_idx, col_name in enumerate(df_safe.columns, start=1):
+        if col_name in text_fields:
+            col_indices[col_name] = col_idx
+
+    if col_indices:
+        for col_name, col_idx in col_indices.items():
+            for row_idx in range(2, ws.max_row + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.number_format = '@'
+                if cell.value is not None:
+                    cell.value = str(cell.value)
+
+    wb.save(output_path)
+    wb.close()
+
+
+def apply_text_format_to_excel(filepath, sheet_text_fields=None):
+    """
+    对已保存的 Excel 文件应用文本格式，防止科学计数法。
+
+    适用于使用 ExcelWriter 多 Sheet 导出后的后处理。
+
+    Args:
+        filepath: Excel 文件路径
+        sheet_text_fields: 字典，key 为 sheet 名称，value 为该 sheet 需要设置为文本格式的列名列表。
+                          如果为 None，则对所有 sheet 应用默认的 LONG_DIGIT_TEXT_FIELDS
+    """
+    if not os.path.exists(filepath):
+        return
+
+    wb = openpyxl.load_workbook(filepath)
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        if ws.max_row < 2 or ws.max_column < 1:
+            continue
+
+        header_row = [cell.value for cell in ws[1]]
+
+        if sheet_text_fields and sheet_name in sheet_text_fields:
+            text_fields = sheet_text_fields[sheet_name]
+        else:
+            text_fields = LONG_DIGIT_TEXT_FIELDS
+
+        col_indices = {}
+        for col_idx, col_name in enumerate(header_row, start=1):
+            if col_name in text_fields:
+                col_indices[col_name] = col_idx
+
+        if col_indices:
+            for col_name, col_idx in col_indices.items():
+                for row_idx in range(2, ws.max_row + 1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.number_format = '@'
+                    if cell.value is not None:
+                        cell.value = str(cell.value)
+
+    wb.save(filepath)
+    wb.close()
 
 
 def load_existing_keys(summary_path):
@@ -3534,7 +3673,7 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir, out
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    df.to_excel(output_path, index=False, engine='openpyxl')
+    df_to_excel_text_safe(df, output_path, index=False)
 
     logger.info('总表输出完成: %s（历史 %d 条 + 新增 %d 条 = 共 %d 条）',
                 output_path, len(existing_records), len(incremental_rows), len(merged_records))
@@ -7795,6 +7934,8 @@ def export_yonyou_voucher(vouchers, output_path):
                 max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in col)
                 ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
 
+        apply_text_format_to_excel(output_path, {'凭证导入': ['银行账号', '票据号', '凭证编号', '科目编码']})
+
         logger.info('用友凭证导出成功: %s (共 %d 张凭证，%d 条分录)',
                     output_path, len(vouchers), len(rows))
         return output_path
@@ -7865,6 +8006,8 @@ def export_kingdee_voucher(vouchers, output_path):
             for col in ws.columns:
                 max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in col)
                 ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
+
+        apply_text_format_to_excel(output_path, {'凭证导入': ['结算号', '凭证字号', '科目代码', '核算项目代码']})
 
         logger.info('金蝶凭证导出成功: %s (共 %d 张凭证，%d 条分录)',
                     output_path, len(vouchers), len(rows))
@@ -7941,6 +8084,8 @@ def export_bank_journal(vouchers, output_path):
                 for cell in row:
                     if cell.column_letter in ['E', 'F', 'H']:
                         cell.number_format = '#,##0.00'
+
+        apply_text_format_to_excel(output_path, {'银行日记账': ['银行账号', '交易流水号', '凭证号']})
 
         logger.info('银行日记账导出成功: %s (共 %d 条记录)', output_path, len(rows))
         return output_path
@@ -15614,6 +15759,14 @@ def export_balance_check_result(check_result: BalanceCheckResult,
                             else:
                                 cell.number_format = '#,##0'
 
+        apply_text_format_to_excel(
+            output_path,
+            {
+                '异常明细': ['银行账号', '交易流水号'],
+                '异常账号清单': ['银行账号'],
+            }
+        )
+
         logger.info('余额连续性校验结果已导出: %s', output_path)
         return output_path
 
@@ -16284,6 +16437,14 @@ def export_duplicate_check_result(check_result: DuplicateCheckResult,
                                 cell.number_format = '#,##0.00'
                             else:
                                 cell.number_format = '#,##0'
+
+        apply_text_format_to_excel(
+            output_path,
+            {
+                '疑似重复明细': ['银行账号', '交易流水号'],
+                '重复组汇总': ['银行账号', '交易流水号', '重复组ID'],
+            }
+        )
 
         logger.info('重复交易检测结果已导出: %s', output_path)
         return output_path
