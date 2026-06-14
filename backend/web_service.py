@@ -101,6 +101,10 @@ def _job_to_web_task(job_context: JobContext) -> WebTask:
         upload_folder=job_context.input_folder,
         output_path=job_context.output_path,
         incremental=job_context.incremental,
+        keep_strategy=job_context.keep_strategy,
+        folder_strategy=job_context.folder_strategy,
+        folder_output_dir=job_context.folder_output_dir,
+        folder_suffix=job_context.folder_suffix,
         operator=job_context.operator,
         total_files=job_context.total_files,
         processed_files=job_context.processed_files,
@@ -228,6 +232,10 @@ class WebTask:
     output_path: Optional[str] = None
     masked_output_path: Optional[str] = None
     incremental: bool = True
+    keep_strategy: str = 'keep_unprocessed'
+    folder_strategy: str = 'copy_sibling'
+    folder_output_dir: Optional[str] = None
+    folder_suffix: str = '＋检验版'
     operator: str = ''
     total_files: int = 0
     processed_files: int = 0
@@ -383,6 +391,10 @@ def _run_pipeline_async(task: WebTask, cancel_event: threading.Event):
             folder=task.upload_folder,
             script_dir=BACKEND_DIR,
             incremental=task.incremental,
+            keep_strategy=task.keep_strategy,
+            folder_strategy=task.folder_strategy,
+            folder_output_dir=task.folder_output_dir,
+            folder_suffix=task.folder_suffix,
             batch_id=batch_info.batch_id,
         )
 
@@ -792,7 +804,10 @@ def _run_pipeline_with_task_queue(task: WebTask, cancel_event: threading.Event):
             input_folder=task.upload_folder,
             script_dir=BACKEND_DIR,
             incremental=task.incremental,
-            keep_strategy='keep_unprocessed',
+            keep_strategy=task.keep_strategy,
+            folder_strategy=task.folder_strategy,
+            folder_output_dir=task.folder_output_dir,
+            folder_suffix=task.folder_suffix,
             operator=task.operator,
             user_id='web_user',
             on_progress=progress_callback,
@@ -859,6 +874,10 @@ def api_upload():
         return jsonify({'success': False, 'message': '未选择文件'}), 400
 
     incremental = request.form.get('incremental', 'true').lower() == 'true'
+    keep_strategy = request.form.get('keep_strategy', 'keep_unprocessed')
+    folder_strategy = request.form.get('folder_strategy', 'copy_sibling')
+    folder_output_dir = request.form.get('folder_output_dir', None)
+    folder_suffix = request.form.get('folder_suffix', '＋检验版')
     operator = request.form.get('operator', '').strip()
     use_async = request.form.get('use_async', 'false').lower() == 'true'
 
@@ -924,6 +943,10 @@ def api_upload():
         created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         upload_folder=task_upload_dir,
         incremental=incremental,
+        keep_strategy=keep_strategy,
+        folder_strategy=folder_strategy,
+        folder_output_dir=folder_output_dir,
+        folder_suffix=folder_suffix,
         operator=operator,
         total_files=saved_count,
         file_names=file_names,

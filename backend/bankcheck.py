@@ -2671,6 +2671,11 @@ class ProcessingResult:
     pending_internal_transfer_result: Any = None
     pending_keep_strategy: str = 'keep_unprocessed'
     pending_archive_dir_name: str = '已处理归档'
+    pending_folder_strategy: str = 'copy_sibling'
+    pending_folder_output_dir: Optional[str] = None
+    pending_folder_suffix: str = '＋检验版'
+    working_folder: Optional[str] = None
+    working_folder_is_copy: bool = False
     changes_committed: bool = False
 
 
@@ -2999,7 +3004,9 @@ else:
 def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                  enable_signature=False, signature_password=None, auto_generate_key=True,
                  enable_encryption=False, encryption_password=None, encryption_mode='excel_password',
-                 dry_run=False, keep_strategy='keep_unprocessed', archive_dir_name='已处理归档'):
+                 dry_run=False, keep_strategy='keep_unprocessed', archive_dir_name='已处理归档',
+                 folder_strategy='copy_sibling', folder_output_dir=None,
+                 folder_suffix='＋检验版'):
     logger = get_logger()
     if dry_run:
         logger.info('===== 试运行模式已启用（不执行删除与写盘操作）=====')
@@ -3047,29 +3054,24 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
     if _profiler is not None:
         _phase_copy_start = __import__('time').perf_counter()
 
-    folder_name = os.path.basename(folder.rstrip('/\\'))
-    parent_dir = os.path.dirname(folder.rstrip('/\\'))
-    new_folder = os.path.join(parent_dir, f"{folder_name}＋检验版")
-
-    if os.path.exists(new_folder):
-        logger.info('＋检验版文件夹已存在，先删除: %s', new_folder)
-        shutil.rmtree(new_folder)
-    shutil.copytree(folder, new_folder)
-    logger.info('已复制文件夹为＋检验版: %s', new_folder)
+    working_folder, working_folder_is_copy = prepare_working_folder(
+        folder, strategy=folder_strategy, output_dir=folder_output_dir,
+        suffix=folder_suffix, logger=logger
+    )
 
     if _profiler is not None and _phase_copy_start is not None:
         _copy_dur = (__import__('time').perf_counter() - _phase_copy_start) * 1000
         _profiler.record_phase('folder_copy', _copy_dur, '复制文件夹')
 
-    excel_files = scan_excel_files(new_folder)
+    excel_files = scan_excel_files(working_folder)
     try:
         from pdf_bank_parser import scan_pdf_files, is_pdf_file, process_pdf_file
-        pdf_files = scan_pdf_files(new_folder)
+        pdf_files = scan_pdf_files(working_folder)
     except ImportError:
         pdf_files = []
     all_files = excel_files + pdf_files
     if not all_files:
-        logger.warning('检验版文件夹中未发现任何 Excel 或 PDF 文件')
+        logger.warning('工作文件夹中未发现任何 Excel 或 PDF 文件')
         if _profiler is not None:
             _profiler.stop()
         return ProcessingResult(
@@ -3080,6 +3082,8 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
             dry_run=dry_run,
             pending_script_dir=script_dir if dry_run else None,
             pending_input_folder=folder if dry_run else None,
+            working_folder=working_folder,
+            working_folder_is_copy=working_folder_is_copy,
         )
 
     _phase_process_start = None
@@ -3636,6 +3640,11 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         pending_internal_transfer_result=_it_result,
         pending_keep_strategy=keep_strategy,
         pending_archive_dir_name=archive_dir_name,
+        pending_folder_strategy=folder_strategy,
+        pending_folder_output_dir=folder_output_dir,
+        pending_folder_suffix=folder_suffix,
+        working_folder=working_folder,
+        working_folder_is_copy=working_folder_is_copy,
     )
 
 
@@ -10099,6 +10108,26 @@ def build_cli_parser():
         dest='auto_commit',
         help='试运行后自动确认提交，无需交互式确认（配合 --dry-run 使用）',
     )
+    process_parser.add_argument(
+        '--folder-strategy',
+        type=str,
+        choices=list(FOLDER_STRATEGIES.keys()),
+        default=FOLDER_STRATEGY_DEFAULT,
+        help=f'文件夹处理策略 (默认: {FOLDER_STRATEGY_DEFAULT})',
+    )
+    process_parser.add_argument(
+        '--folder-output-dir',
+        type=str,
+        metavar='DIR',
+        default=None,
+        help='文件夹复制目标目录（仅 copy_to_output 策略使用）',
+    )
+    process_parser.add_argument(
+        '--folder-suffix',
+        type=str,
+        default=INSPECTION_FOLDER_SUFFIX,
+        help=f'复制文件夹时追加的后缀（默认: {INSPECTION_FOLDER_SUFFIX}）',
+    )
 
     validate_parser = subparsers.add_parser(
         'validate-lookup',
@@ -10249,6 +10278,9 @@ def _cmd_process(args):
             encryption_mode=args.encryption_mode,
             dry_run=dry_run,
             archive_dir_name=archive_dir_name,
+            folder_strategy=args.folder_strategy,
+            folder_output_dir=args.folder_output_dir,
+            folder_suffix=args.folder_suffix,
         )
 
     if result.folder_empty:
@@ -11834,6 +11866,102 @@ KEEP_STRATEGIES = {
 }
 
 
+INSPECTION_FOLDER_SUFFIX = '＋检验版'
+
+FOLDER_STRATEGIES = {
+    'copy_sibling': '同级复制为原名+检验版（默认，覆盖已存在）',
+    'copy_sibling_keep': '同级复制为原名+检验版（保留旧版，不覆盖）',
+    'copy_to_output': '复制到指定输出目录（原名+检验版）',
+    'in_place': '原地处理（直接在原文件夹操作）',
+}
+
+FOLDER_STRATEGY_DEFAULT = 'copy_sibling'
+
+
+def prepare_working_folder(source_folder,
+                           strategy=FOLDER_STRATEGY_DEFAULT,
+                           output_dir=None,
+                           suffix=INSPECTION_FOLDER_SUFFIX,
+                           logger=None):
+    """
+    根据策略准备工作文件夹，返回 (working_folder_path, created_flag)。
+
+    策略说明：
+    - copy_sibling: 在同级目录复制一份「原名＋检验版」，若已存在则先删除后复制
+    - copy_sibling_keep: 在同级目录复制一份「原名＋检验版」，若已存在则在名称后加时间戳避免冲突
+    - copy_to_output: 复制到指定 output_dir 目录下，命名为「原名＋检验版」
+    - in_place: 不做任何复制，直接返回原文件夹路径
+
+    Args:
+        source_folder: 源文件夹绝对路径
+        strategy: 文件夹处理策略，见 FOLDER_STRATEGIES
+        output_dir: 目标输出目录（仅 copy_to_output 策略需要）
+        suffix: 复制文件夹时追加的后缀，默认「＋检验版」
+        logger: 可选日志实例，默认使用 get_logger()
+
+    Returns:
+        tuple: (working_folder_path: str, is_copy: bool)
+            - working_folder_path: 用于后续处理的工作文件夹绝对路径
+            - is_copy: 是否为复制出的文件夹（原地处理时为 False）
+    """
+    if logger is None:
+        logger = get_logger()
+
+    source_folder = os.path.abspath(source_folder.rstrip('/\\'))
+    if not os.path.isdir(source_folder):
+        raise ValueError(f"源文件夹不存在或不是目录: {source_folder}")
+
+    folder_name = os.path.basename(source_folder)
+    parent_dir = os.path.dirname(source_folder)
+
+    if strategy == 'in_place':
+        logger.info('文件夹策略 in_place：直接在原文件夹上处理，不做复制')
+        return source_folder, False
+
+    if strategy not in FOLDER_STRATEGIES:
+        logger.warning('未知的文件夹策略「%s」，回退到默认 %s',
+                       strategy, FOLDER_STRATEGY_DEFAULT)
+        strategy = FOLDER_STRATEGY_DEFAULT
+
+    if strategy == 'copy_sibling':
+        target = os.path.join(parent_dir, f"{folder_name}{suffix}")
+        if os.path.exists(target):
+            logger.info('文件夹已存在，先删除: %s', target)
+            shutil.rmtree(target)
+        shutil.copytree(source_folder, target)
+        logger.info('已复制文件夹到同级目录: %s', target)
+        return target, True
+
+    if strategy == 'copy_sibling_keep':
+        base_target = os.path.join(parent_dir, f"{folder_name}{suffix}")
+        target = base_target
+        if os.path.exists(target):
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            target = f"{base_target}_{ts}"
+            logger.info('同级目标已存在，改用时间戳命名避免冲突: %s', target)
+        shutil.copytree(source_folder, target)
+        logger.info('已复制文件夹到同级目录（保留旧版）: %s', target)
+        return target, True
+
+    if strategy == 'copy_to_output':
+        if not output_dir:
+            logger.warning('copy_to_output 策略未提供 output_dir，回退到 copy_sibling')
+            target = os.path.join(parent_dir, f"{folder_name}{suffix}")
+        else:
+            output_dir = os.path.abspath(output_dir)
+            os.makedirs(output_dir, exist_ok=True)
+            target = os.path.join(output_dir, f"{folder_name}{suffix}")
+            if os.path.exists(target):
+                logger.info('目标输出目录已存在同名文件夹，先删除: %s', target)
+                shutil.rmtree(target)
+        shutil.copytree(source_folder, target)
+        logger.info('已复制文件夹到指定输出目录: %s', target)
+        return target, True
+
+    logger.warning('策略 %s 未实现逻辑，回退到原文件夹原地处理', strategy)
+    return source_folder, False
+
+
 def get_preset_config_path(script_dir=None):
     if script_dir is None:
         script_dir = get_script_dir()
@@ -11896,6 +12024,9 @@ def save_preset(preset_data, script_dir=None):
     preset_data['enabled_banks'] = preset_data.get('enabled_banks') or list(BANK_PREFIXES)
     preset_data['keep_strategy'] = preset_data.get('keep_strategy') or 'keep_unprocessed'
     preset_data['incremental'] = preset_data.get('incremental', True)
+    preset_data['folder_strategy'] = preset_data.get('folder_strategy') or FOLDER_STRATEGY_DEFAULT
+    preset_data['folder_output_dir'] = preset_data.get('folder_output_dir') or ''
+    preset_data['folder_suffix'] = preset_data.get('folder_suffix') or INSPECTION_FOLDER_SUFFIX
 
     existing = None
     for i, p in enumerate(config['presets']):
@@ -11984,6 +12115,9 @@ def apply_preset_to_pipeline(preset, folder, script_dir, dry_run=False):
     start_date = preset.get('start_date', '')
     end_date = preset.get('end_date', '')
     output_dir = preset.get('output_dir', '') or None
+    folder_strategy = preset.get('folder_strategy', FOLDER_STRATEGY_DEFAULT)
+    folder_output_dir = preset.get('folder_output_dir', '') or None
+    folder_suffix = preset.get('folder_suffix', INSPECTION_FOLDER_SUFFIX)
 
     result = run_pipeline_with_options(
         folder=folder,
@@ -11995,6 +12129,9 @@ def apply_preset_to_pipeline(preset, folder, script_dir, dry_run=False):
         end_date=end_date,
         output_dir=output_dir,
         dry_run=dry_run,
+        folder_strategy=folder_strategy,
+        folder_output_dir=folder_output_dir,
+        folder_suffix=folder_suffix,
     )
 
     return result
@@ -12004,7 +12141,9 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                               enabled_banks=None, keep_strategy='keep_unprocessed',
                               start_date='', end_date='', batch_id=None, output_dir=None,
                               enable_encryption=False, encryption_password=None, encryption_mode='excel_password',
-                              dry_run=False, archive_dir_name='已处理归档'):
+                              dry_run=False, archive_dir_name='已处理归档',
+                              folder_strategy='copy_sibling', folder_output_dir=None,
+                              folder_suffix='＋检验版'):
     logger = get_logger()
     if dry_run:
         logger.info('===== 试运行模式已启用（不执行删除与写盘操作）=====')
@@ -12042,18 +12181,14 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             logger.info('无历史数据，将以全量模式运行')
 
     folder_name = os.path.basename(folder.rstrip('/\\'))
-    parent_dir = os.path.dirname(folder.rstrip('/\\'))
-    new_folder = os.path.join(parent_dir, f"{folder_name}＋检验版")
+    working_folder, working_folder_is_copy = prepare_working_folder(
+        folder, strategy=folder_strategy, output_dir=folder_output_dir,
+        suffix=folder_suffix, logger=logger
+    )
 
-    if os.path.exists(new_folder):
-        logger.info('＋检验版文件夹已存在，先删除: %s', new_folder)
-        shutil.rmtree(new_folder)
-    shutil.copytree(folder, new_folder)
-    logger.info('已复制文件夹为＋检验版: %s', new_folder)
-
-    excel_files = scan_excel_files(new_folder)
+    excel_files = scan_excel_files(working_folder)
     if not excel_files:
-        logger.warning('检验版文件夹中未发现任何 Excel 文件')
+        logger.warning('工作文件夹中未发现任何 Excel 文件')
         return ProcessingResult(
             lookup_missing=lookup_missing,
             folder_empty=True,
@@ -12063,6 +12198,8 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             pending_script_dir=script_dir if dry_run else None,
             pending_output_dir=output_dir if dry_run else None,
             pending_input_folder=folder if dry_run else None,
+            working_folder=working_folder,
+            working_folder_is_copy=working_folder_is_copy,
         )
 
     def _parse_date(value):
@@ -12539,6 +12676,11 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         pending_internal_transfer_result=_it_result,
         pending_keep_strategy=keep_strategy,
         pending_archive_dir_name=archive_dir_name,
+        pending_folder_strategy=folder_strategy,
+        pending_folder_output_dir=folder_output_dir,
+        pending_folder_suffix=folder_suffix,
+        working_folder=working_folder,
+        working_folder_is_copy=working_folder_is_copy,
     )
 
 
@@ -12639,6 +12781,9 @@ def gui_preset_manager(script_dir):
         banks = ', '.join(preset.get('enabled_banks', []))
         keep = KEEP_STRATEGIES.get(preset.get('keep_strategy'), '未知')
         incremental = '是' if preset.get('incremental', True) else '否'
+        folder_strat = FOLDER_STRATEGIES.get(preset.get('folder_strategy'), '未知')
+        folder_out = preset.get('folder_output_dir') or '默认'
+        folder_suf = preset.get('folder_suffix') or INSPECTION_FOLDER_SUFFIX
 
         detail = f"""预设名称: {preset.get('name', '')}
 预设ID: {preset.get('preset_id', '')}
@@ -12647,6 +12792,9 @@ def gui_preset_manager(script_dir):
 输出目录: {preset.get('output_dir', '默认')}
 开始日期: {preset.get('start_date', '不限制')}
 结束日期: {preset.get('end_date', '不限制')}
+文件夹策略: {folder_strat}
+文件夹输出目录: {folder_out}
+文件夹后缀: {folder_suf}
 保留策略: {keep}
 启用银行: {banks}
 增量合并: {incremental}
@@ -12786,7 +12934,7 @@ class PresetEditorDialog:
 
         self.dialog = tk.Toplevel(parent)
         self.dialog.title('编辑预设' if preset else '新增预设')
-        self.dialog.geometry('500x560')
+        self.dialog.geometry('540x720')
         self.dialog.transient(parent)
         self.dialog.grab_set()
 
@@ -12834,6 +12982,31 @@ class PresetEditorDialog:
         tk.Entry(date_frame2, textvariable=self.end_date_var, width=15, font=('Arial', 11)).pack(side=tk.LEFT, padx=5)
         tk.Label(date_frame2, text='(YYYY-MM-DD)', font=('Arial', 9), fg='#666').pack(side=tk.LEFT)
 
+        tk.Label(self.dialog, text='文件夹处理策略:', font=('Arial', 11, 'bold')).pack(anchor=tk.W, **pad)
+        self.folder_strategy_var = tk.StringVar(value=FOLDER_STRATEGY_DEFAULT)
+        folder_strat_frame = tk.Frame(self.dialog)
+        folder_strat_frame.pack(anchor=tk.W, **pad)
+        for key, desc in FOLDER_STRATEGIES.items():
+            tk.Radiobutton(folder_strat_frame, text=desc, variable=self.folder_strategy_var,
+                           value=key, font=('Arial', 10)).pack(anchor=tk.W)
+
+        tk.Label(self.dialog, text='文件夹复制目标目录（copy_to_output 策略）:', font=('Arial', 11)).pack(anchor=tk.W, **pad)
+        folder_out_frame = tk.Frame(self.dialog)
+        folder_out_frame.pack(fill=tk.X, **pad)
+        self.folder_output_var = tk.StringVar()
+        tk.Entry(folder_out_frame, textvariable=self.folder_output_var, font=('Arial', 11)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def browse_folder_output():
+            d = gui_askdirectory(title='选择文件夹复制目标目录', show_recent_dialog=False)
+            if d:
+                self.folder_output_var.set(d)
+
+        tk.Button(folder_out_frame, text='浏览...', command=browse_folder_output).pack(side=tk.LEFT, padx=5)
+
+        tk.Label(self.dialog, text='复制文件夹后缀（默认: ＋检验版）:', font=('Arial', 11)).pack(anchor=tk.W, **pad)
+        self.folder_suffix_var = tk.StringVar(value=INSPECTION_FOLDER_SUFFIX)
+        tk.Entry(self.dialog, textvariable=self.folder_suffix_var, font=('Arial', 11)).pack(fill=tk.X, **pad)
+
         tk.Label(self.dialog, text='保留策略:', font=('Arial', 11)).pack(anchor=tk.W, **pad)
         self.keep_var = tk.StringVar(value='keep_unprocessed')
         keep_frame = tk.Frame(self.dialog)
@@ -12872,6 +13045,9 @@ class PresetEditorDialog:
         self.output_var.set(preset.get('output_dir', ''))
         self.start_date_var.set(preset.get('start_date', ''))
         self.end_date_var.set(preset.get('end_date', ''))
+        self.folder_strategy_var.set(preset.get('folder_strategy', FOLDER_STRATEGY_DEFAULT))
+        self.folder_output_var.set(preset.get('folder_output_dir', ''))
+        self.folder_suffix_var.set(preset.get('folder_suffix', INSPECTION_FOLDER_SUFFIX))
         self.keep_var.set(preset.get('keep_strategy', 'keep_unprocessed'))
         self.incremental_var.set(preset.get('incremental', True))
 
@@ -12916,6 +13092,9 @@ class PresetEditorDialog:
             'output_dir': self.output_var.get().strip(),
             'start_date': start_date,
             'end_date': end_date,
+            'folder_strategy': self.folder_strategy_var.get(),
+            'folder_output_dir': self.folder_output_var.get().strip(),
+            'folder_suffix': self.folder_suffix_var.get().strip(),
             'keep_strategy': self.keep_var.get(),
             'enabled_banks': enabled_banks,
             'incremental': self.incremental_var.get(),
@@ -12961,6 +13140,25 @@ def _save_preset_cli(script_dir):
     start_date = input('开始日期（YYYY-MM-DD，可选）: ').strip()
     end_date = input('结束日期（YYYY-MM-DD，可选）: ').strip()
 
+    print('\n文件夹处理策略选项：')
+    for key, desc in FOLDER_STRATEGIES.items():
+        print(f'  {key}: {desc}')
+    folder_strategy = input(
+        f'文件夹策略（默认: {FOLDER_STRATEGY_DEFAULT}）: '
+    ).strip() or FOLDER_STRATEGY_DEFAULT
+    if folder_strategy not in FOLDER_STRATEGIES:
+        print(f'无效的文件夹策略，使用默认: {FOLDER_STRATEGY_DEFAULT}')
+        folder_strategy = FOLDER_STRATEGY_DEFAULT
+
+    folder_output_dir = ''
+    if folder_strategy == 'copy_to_output':
+        folder_output_dir = input('文件夹复制目标输出目录: ').strip()
+
+    folder_suffix_input = input(
+        f'复制文件夹后缀（默认: {INSPECTION_FOLDER_SUFFIX}）: '
+    ).strip()
+    folder_suffix = folder_suffix_input or INSPECTION_FOLDER_SUFFIX
+
     print('\n保留策略选项：')
     for key, desc in KEEP_STRATEGIES.items():
         print(f'  {key}: {desc}')
@@ -12992,6 +13190,9 @@ def _save_preset_cli(script_dir):
         'output_dir': output_dir,
         'start_date': start_date,
         'end_date': end_date,
+        'folder_strategy': folder_strategy,
+        'folder_output_dir': folder_output_dir,
+        'folder_suffix': folder_suffix,
         'keep_strategy': keep_strategy,
         'enabled_banks': enabled_banks,
         'incremental': incremental,
@@ -13110,6 +13311,12 @@ def _print_preset_detail(preset):
     print(f'输出目录: {preset.get("output_dir", "默认")}')
     print(f'开始日期: {preset.get("start_date", "不限制")}')
     print(f'结束日期: {preset.get("end_date", "不限制")}')
+    folder_strat = FOLDER_STRATEGIES.get(preset.get('folder_strategy'), '未知')
+    folder_out = preset.get('folder_output_dir') or '默认'
+    folder_suf = preset.get('folder_suffix') or INSPECTION_FOLDER_SUFFIX
+    print(f'文件夹策略: {folder_strat}')
+    print(f'文件夹输出目录: {folder_out}')
+    print(f'文件夹后缀: {folder_suf}')
     print(f'保留策略: {KEEP_STRATEGIES.get(preset.get("keep_strategy"), "未知")}')
     print(f'启用银行: {", ".join(preset.get("enabled_banks", []))}')
     print(f'增量合并: {"是" if preset.get("incremental", True) else "否"}')

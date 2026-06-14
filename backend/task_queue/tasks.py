@@ -69,22 +69,21 @@ def task_scan_files(payload: ScanTaskPayload) -> TaskResult:
         if not os.path.isdir(payload.source_folder):
             raise ValueError(f"源文件夹不存在: {payload.source_folder}")
 
-        folder_name = os.path.basename(payload.source_folder.rstrip('/\\'))
-        parent_dir = os.path.dirname(payload.source_folder.rstrip('/\\'))
-        new_folder = os.path.join(parent_dir, f"{folder_name}＋检验版")
+        working_folder, working_folder_is_copy = bankcheck.prepare_working_folder(
+            payload.source_folder,
+            strategy=payload.folder_strategy,
+            output_dir=payload.folder_output_dir,
+            suffix=payload.folder_suffix,
+            logger=logger,
+        )
 
-        if os.path.exists(new_folder):
-            logger.info('＋检验版文件夹已存在，先删除: %s', new_folder)
-            shutil.rmtree(new_folder)
-        shutil.copytree(payload.source_folder, new_folder)
-        logger.info('已复制文件夹为＋检验版: %s', new_folder)
-
-        excel_files = bankcheck.scan_excel_files(new_folder)
+        excel_files = bankcheck.scan_excel_files(working_folder)
         logger.info('扫描完成，发现 %d 个 Excel 文件', len(excel_files))
 
         result_data = {
             'source_folder': payload.source_folder,
-            'working_folder': new_folder,
+            'working_folder': working_folder,
+            'working_folder_is_copy': working_folder_is_copy,
             'excel_files': excel_files,
             'total_files': len(excel_files),
         }

@@ -106,6 +106,9 @@ class JobContext:
     script_dir: str = ''
     incremental: bool = True
     keep_strategy: str = 'keep_unprocessed'
+    folder_strategy: str = 'copy_sibling'
+    folder_output_dir: Optional[str] = None
+    folder_suffix: str = '＋检验版'
     status: str = TaskStatus.PENDING.value
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     started_at: Optional[str] = None
@@ -154,6 +157,9 @@ class ScanTaskPayload(TaskPayload):
     source_folder: str = ''
     recursive: bool = True
     file_extensions: List[str] = field(default_factory=lambda: ['.xlsx', '.xls'])
+    folder_strategy: str = 'copy_sibling'
+    folder_output_dir: Optional[str] = None
+    folder_suffix: str = '＋检验版'
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ScanTaskPayload':

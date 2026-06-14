@@ -96,6 +96,9 @@ class TaskOrchestrator:
     def publish_scan_task(self,
                           job_id: str,
                           source_folder: str,
+                          folder_strategy: str = 'copy_sibling',
+                          folder_output_dir=None,
+                          folder_suffix='＋检验版',
                           priority: int = TaskPriority.HIGH.value) -> str:
         """
         发布扫描任务
@@ -103,6 +106,9 @@ class TaskOrchestrator:
         Args:
             job_id: 作业ID
             source_folder: 源文件夹路径
+            folder_strategy: 文件夹处理策略
+            folder_output_dir: 文件夹输出目录（仅 copy_to_output 策略）
+            folder_suffix: 复制文件夹后缀
             priority: 任务优先级
 
         Returns:
@@ -111,6 +117,9 @@ class TaskOrchestrator:
         payload = ScanTaskPayload(
             job_id=job_id,
             source_folder=source_folder,
+            folder_strategy=folder_strategy,
+            folder_output_dir=folder_output_dir,
+            folder_suffix=folder_suffix,
             priority=priority,
         )
         return self._mq.publish_task('scan', payload, priority=priority)
@@ -389,6 +398,9 @@ class JobOrchestrator:
                    script_dir: str,
                    incremental: bool = True,
                    keep_strategy: str = 'keep_unprocessed',
+                   folder_strategy: str = 'copy_sibling',
+                   folder_output_dir=None,
+                   folder_suffix: str = '＋检验版',
                    operator: str = '',
                    user_id: str = '',
                    on_progress: Optional[Callable[[JobContext], None]] = None) -> JobContext:
@@ -400,6 +412,9 @@ class JobOrchestrator:
             script_dir: 脚本目录
             incremental: 是否增量模式
             keep_strategy: 文件保留策略
+            folder_strategy: 文件夹处理策略
+            folder_output_dir: 文件夹复制目标目录
+            folder_suffix: 复制文件夹后缀
             operator: 操作员
             user_id: 用户ID
             on_progress: 进度回调函数
@@ -418,6 +433,9 @@ class JobOrchestrator:
             script_dir=script_dir,
             incremental=incremental,
             keep_strategy=keep_strategy,
+            folder_strategy=folder_strategy,
+            folder_output_dir=folder_output_dir,
+            folder_suffix=folder_suffix,
             status=TaskStatus.QUEUED.value,
         )
 
@@ -465,7 +483,10 @@ class JobOrchestrator:
             self._notify_progress(job_context, 'scanning', 10, '正在扫描文件...')
 
             scan_task_id = self._task_orchestrator.publish_scan_task(
-                job_id, job_context.input_folder
+                job_id, job_context.input_folder,
+                folder_strategy=job_context.folder_strategy,
+                folder_output_dir=job_context.folder_output_dir,
+                folder_suffix=job_context.folder_suffix,
             )
             job_context.task_ids.append(scan_task_id)
 
