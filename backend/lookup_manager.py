@@ -427,7 +427,8 @@ def read_lookup_entries(lookup_file=None) -> List[LookupEntry]:
     return entries
 
 
-def save_lookup_entries(entries: List[LookupEntry], lookup_file=None) -> bool:
+def save_lookup_entries(entries: List[LookupEntry], lookup_file=None,
+                        run_impact_eval: bool = True) -> Tuple[bool, Optional[Any]]:
     """
     保存条目列表到查找表
     完全覆盖原有内容，按现有格式写入（支持优先级和扩展字段）
@@ -435,14 +436,18 @@ def save_lookup_entries(entries: List[LookupEntry], lookup_file=None) -> bool:
     Args:
         entries: 要保存的条目列表
         lookup_file: 查找表文件路径，不传则使用默认路径
+        run_impact_eval: 是否运行变更影响评估
 
     Returns:
-        是否保存成功
+        (是否保存成功, ImpactReport对象或None)
     """
     logger = get_logger()
+    impact_report = None
 
     if lookup_file is None:
         lookup_file = get_lookup_file_path()
+
+    old_lookup_file = lookup_file if os.path.exists(lookup_file) else None
 
     try:
         wb = openpyxl.Workbook()
@@ -481,10 +486,30 @@ def save_lookup_entries(entries: List[LookupEntry], lookup_file=None) -> bool:
         wb.save(lookup_file)
         wb.close()
         logger.info('查找表已保存到 %s，共 %d 条记录', lookup_file, len(entries))
-        return True
+
+        if run_impact_eval:
+            try:
+                from change_impact_evaluator import ChangeImpactEvaluator
+                evaluator = ChangeImpactEvaluator()
+                impact_report = evaluator.evaluate_lookup_change(
+                    old_lookup_file=old_lookup_file,
+                    new_lookup_entries=entries,
+                )
+                if impact_report.total_records > 0:
+                    report_path = impact_report.save_report()
+                    logger.info(
+                        '变更影响评估完成：总计 %d 条，受影响 %d 条，报告已保存至 %s',
+                        impact_report.total_records,
+                        impact_report.affected_records,
+                        report_path,
+                    )
+            except Exception as eval_e:
+                logger.warning('变更影响评估执行失败: %s', eval_e)
+
+        return True, impact_report
     except Exception as e:
         logger.error('保存查找表失败: %s', e, exc_info=True)
-        return False
+        return False, None
 
 
 def _load_entries_with_duplicate_check() -> Tuple[List[LookupEntry], Dict[str, List[int]]]:
@@ -700,7 +725,7 @@ def add_entry(subject: str, account: str, lookup_file=None) -> Tuple[bool, str]:
         account=account_normalized
     ))
 
-    success = save_lookup_entries(entries, lookup_file)
+    success, _ = save_lookup_entries(entries, lookup_file)
     if success:
         logger.info('已添加条目: %s -> %s', account_normalized, subject.strip())
         return True, '添加成功'
@@ -751,7 +776,7 @@ def update_entry(old_account: str, new_subject: str, new_account: str,
     entries[found_idx].subject = new_subject.strip()
     entries[found_idx].account = new_account_normalized
 
-    success = save_lookup_entries(entries, lookup_file)
+    success, _ = save_lookup_entries(entries, lookup_file)
     if success:
         logger.info('已更新条目: %s -> %s (原账号: %s)',
                     new_account_normalized, new_subject.strip(), old_account)
@@ -781,7 +806,7 @@ def delete_entry(account: str, lookup_file=None) -> Tuple[bool, str]:
     if len(entries) == original_len:
         return False, f'未找到账号 {account} 对应的条目'
 
-    success = save_lookup_entries(entries, lookup_file)
+    success, _ = save_lookup_entries(entries, lookup_file)
     if success:
         deleted_count = original_len - len(entries)
         logger.info('已删除 %d 条条目，账号: %s', deleted_count, account)
@@ -814,7 +839,7 @@ def import_from_excel(import_file: str, overwrite: bool = False,
         stats['total'] = len(imported_entries)
 
         if overwrite:
-            success = save_lookup_entries(imported_entries, lookup_file)
+            success, _ = save_lookup_entries(imported_entries, lookup_file)
             if success:
                 stats['imported'] = len(imported_entries)
                 return True, f'全量导入成功，共 {len(imported_entries)} 条记录', stats
@@ -840,7 +865,7 @@ def import_from_excel(import_file: str, overwrite: bool = False,
                 existing_entries.append(entry)
                 stats['imported'] += 1
 
-        success = save_lookup_entries(existing_entries, lookup_file)
+        success, _ = save_lookup_entries(existing_entries, lookup_file)
         if success:
             return True, (f'增量导入完成：新增 {stats["imported"]} 条，'
                          f'更新 {stats["updated"]} 条，跳过 {stats["skipped"]} 条'), stats

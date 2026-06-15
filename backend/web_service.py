@@ -754,10 +754,13 @@ def api_save_bank_rule():
     }
     try:
         config = bankcheck.get_bank_config()
-        ok = config.save_rule(rule_data)
+        ok, impact_report = config.save_rule(rule_data)
         if ok:
             logger.info('银行规则已保存: %s', bank_name)
-            return jsonify({'success': True, 'message': '银行规则保存成功'})
+            response = {'success': True, 'message': '银行规则保存成功'}
+            if impact_report is not None:
+                response['impact_report'] = impact_report.to_dict()
+            return jsonify(response)
         return jsonify({'success': False, 'message': '保存失败，请检查日志'}), 500
     except Exception as e:
         logger.error('保存银行规则失败: %s', e, exc_info=True)

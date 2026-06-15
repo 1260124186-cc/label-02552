@@ -441,7 +441,7 @@ def confirm_and_save(inferred: Dict[str, Any], bank_name: str,
         config = get_bank_config()
         if config_path:
             config._config_path = config_path
-        ok = config.save_rule(rule_data)
+        ok, _ = config.save_rule(rule_data)
         if ok:
             logger.info('银行模板推断结果已保存: %s', bank_name)
             return True, f'银行规则「{bank_name}」保存成功'

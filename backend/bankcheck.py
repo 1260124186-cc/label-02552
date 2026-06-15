@@ -1998,17 +1998,19 @@ class BankRuleConfig:
             })
         return result
 
-    def save_rule(self, rule_data: Dict[str, Any]) -> bool:
+    def save_rule(self, rule_data: Dict[str, Any], run_impact_eval: bool = True) -> Tuple[bool, Optional[Any]]:
         """
         保存（新增或更新）一条银行规则到 YAML 配置文件。
 
         Args:
             rule_data: 包含银行规则字段的字典
+            run_impact_eval: 是否运行变更影响评估
 
         Returns:
-            是否保存成功
+            (是否保存成功, ImpactReport对象或None)
         """
         logger = get_logger()
+        impact_report = None
         try:
             if not os.path.exists(self._config_path):
                 config_data = {'banks': []}
@@ -2021,7 +2023,13 @@ class BankRuleConfig:
             bank_name = rule_data.get('bank_name', '').strip()
             if not bank_name:
                 logger.error('保存银行规则失败：银行名称不能为空')
-                return False
+                return False, None
+
+            old_rule_data = None
+            for bank_cfg in config_data.get('banks', []):
+                if bank_cfg.get('bank_name') == bank_name:
+                    old_rule_data = dict(bank_cfg)
+                    break
 
             expected_headers = rule_data.get('expected_headers', {})
             normalized_headers = {}
@@ -2065,10 +2073,31 @@ class BankRuleConfig:
             reload_bank_processors()
 
             logger.info('银行规则「%s」已保存到配置文件', bank_name)
-            return True
+
+            if run_impact_eval and old_rule_data is not None:
+                try:
+                    from change_impact_evaluator import ChangeImpactEvaluator
+                    evaluator = ChangeImpactEvaluator()
+                    impact_report = evaluator.evaluate_bank_rule_change(
+                        bank_name=bank_name,
+                        old_rule_data=old_rule_data,
+                        new_rule_data=new_entry,
+                    )
+                    if impact_report.total_records > 0:
+                        report_path = impact_report.save_report()
+                        logger.info(
+                            '变更影响评估完成：总计 %d 条，受影响 %d 条，报告已保存至 %s',
+                            impact_report.total_records,
+                            impact_report.affected_records,
+                            report_path,
+                        )
+                except Exception as eval_e:
+                    logger.warning('变更影响评估执行失败: %s', eval_e)
+
+            return True, impact_report
         except Exception as e:
             logger.error('保存银行规则失败: %s', e, exc_info=True)
-            return False
+            return False, None
 
     def delete_rule(self, bank_name: str) -> bool:
         """

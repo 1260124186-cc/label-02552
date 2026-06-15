@@ -118,3 +118,11 @@ banks:
     counterpart: 对方户名
     balance: 余额
     transaction_id: 交易流水号
+- bank_name: 测试银行
+  account_cell: B2
+  start_row: 3
+  payment_sign: negative
+  enabled: true
+  columns:
+    trade_date: 1
+    payment: 2

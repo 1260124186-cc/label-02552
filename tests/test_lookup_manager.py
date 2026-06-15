@@ -112,7 +112,7 @@ class TestSaveLookupEntries:
             lm.LookupEntry(subject='公司A', account='111'),
             lm.LookupEntry(subject='公司B', account='222'),
         ]
-        success = lm.save_lookup_entries(entries, path)
+        success, _ = lm.save_lookup_entries(entries, path)
         assert success is True
         assert os.path.exists(path)
 
@@ -128,7 +128,7 @@ class TestSaveLookupEntries:
         new_entries = [
             lm.LookupEntry(subject='新公司', account='999'),
         ]
-        success = lm.save_lookup_entries(new_entries, sample_lookup_file)
+        success, _ = lm.save_lookup_entries(new_entries, sample_lookup_file)
         assert success is True
 
         saved_entries = lm.read_lookup_entries(sample_lookup_file)
@@ -713,7 +713,7 @@ class TestExtraFieldsSave:
             lm.LookupEntry(subject='公司B', account='222',
                           extra_fields={'部门': '市场部'}),
         ]
-        success = lm.save_lookup_entries(entries, path)
+        success, _ = lm.save_lookup_entries(entries, path)
         assert success is True
 
         saved = lm.read_lookup_entries(path)
