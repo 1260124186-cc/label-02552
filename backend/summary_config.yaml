@@ -48,6 +48,30 @@ columns:
     异常详情: true
 
 # ──────────────────────────────────────────────
+# 派生列配置
+# ──────────────────────────────────────────────
+# 在总表中追加由轻量计算生成的列，不影响银行原始解析规则。
+# 内置计算器：
+#   net_amount            净额（收款 + 付款合计，付款约定为负数）
+#   transaction_direction 交易方向（收入/支出/无流向）
+#   accounting_period     会计期间（按 bank_rules.yaml 中 accounting_period 节规则归属）
+# 启用后，派生列名会自动加入 columns.order 和 columns.enabled，
+# 可在其中调整顺序或关闭输出。
+
+derived_columns:
+  - name: 净额
+    calculator: net_amount
+    enabled: false
+
+  - name: 交易方向
+    calculator: transaction_direction
+    enabled: false
+
+  - name: 会计期间
+    calculator: accounting_period
+    enabled: false
+
+# ──────────────────────────────────────────────
 # Excel 样式配置
 # ──────────────────────────────────────────────
 excel_style:

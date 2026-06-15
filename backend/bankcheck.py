@@ -3919,6 +3919,8 @@ def export_masked_summary(records, script_dir, output_dir=None, lookup_source=No
     if config is None:
         config = load_summary_config(script_dir)
 
+    apply_derived_columns(records, config)
+
     if columns is None:
         columns = get_summary_columns(records, lookup_source, config)
 
@@ -3977,6 +3979,11 @@ DEFAULT_SUMMARY_CONFIG = {
             ANOMALY_FLAG_COLUMN: True, ANOMALY_DETAIL_COLUMN: True,
         },
     },
+    'derived_columns': [
+        {'name': '净额', 'calculator': 'net_amount', 'enabled': False},
+        {'name': '交易方向', 'calculator': 'transaction_direction', 'enabled': False},
+        {'name': '会计期间', 'calculator': 'accounting_period', 'enabled': False},
+    ],
     'excel_style': {
         'freeze_header': True,
         'auto_column_width': {
@@ -3987,6 +3994,120 @@ DEFAULT_SUMMARY_CONFIG = {
         },
     },
 }
+
+
+DERIVED_COLUMN_CALCULATORS = {}
+
+def _register_derived_calculator(name, fn):
+    DERIVED_COLUMN_CALCULATORS[name] = fn
+
+def _calc_net_amount(record):
+    receipt = to_float(record.get('收款'))
+    payment = to_float(record.get('付款'))
+    if receipt is None and payment is None:
+        return None
+    r = receipt if receipt is not None else 0.0
+    p = payment if payment is not None else 0.0
+    return round(r + p, 2)
+
+def _calc_transaction_direction(record):
+    receipt = to_float(record.get('收款'))
+    payment = to_float(record.get('付款'))
+    has_receipt = receipt is not None and receipt > 0
+    has_payment = payment is not None and payment < 0
+    if has_receipt and has_payment:
+        return '收支'
+    if has_receipt:
+        return '收入'
+    if has_payment:
+        return '支出'
+    return '无流向'
+
+def _calc_accounting_period(record):
+    dt = _normalize_date(record.get('交易日期'))
+    if dt is None:
+        return '未知期间'
+    try:
+        manager = get_accounting_period_manager()
+        config = manager.get_config()
+        year = dt.year
+        month = dt.month
+        day = dt.day
+        if config.period_type == 'quarterly':
+            adj_year, q_index = _determine_quarterly_period(
+                year, month, day, config.cutoff_day, config.fiscal_year_start_month)
+            return _quarter_label(
+                adj_year, q_index, config.fiscal_year_start_month, config.period_name_format)
+        else:
+            adj_year, adj_month = _determine_monthly_period(
+                year, month, day, config.cutoff_day)
+            if config.period_name_format == 'YYYY-QN':
+                q_index = (adj_month - 1) // 3
+                return f'{adj_year}-Q{q_index + 1}'
+            return f'{adj_year}-{adj_month:02d}'
+    except Exception:
+        return f'{dt.year}-{dt.month:02d}'
+
+_register_derived_calculator('net_amount', _calc_net_amount)
+_register_derived_calculator('transaction_direction', _calc_transaction_direction)
+_register_derived_calculator('accounting_period', _calc_accounting_period)
+
+
+def get_enabled_derived_columns(config=None):
+    """
+    从配置中提取已启用的派生列定义列表。
+
+    Args:
+        config: 总表配置字典，None 表示使用默认配置
+
+    Returns:
+        list[dict]: 已启用的派生列定义，每项含 name / calculator / enabled
+    """
+    if config is None:
+        config = DEFAULT_SUMMARY_CONFIG
+    derived = config.get('derived_columns', [])
+    return [d for d in derived if d.get('enabled', False)]
+
+
+def apply_derived_columns(records, config=None):
+    """
+    按配置为每条记录追加派生列字段。
+
+    仅对配置中 enabled=True 的派生列执行计算，将结果写入记录字典。
+    不修改银行原始解析规则，仅在输出层追加轻量计算列。
+
+    Args:
+        records: 交易记录列表
+        config: 总表配置字典，None 表示使用默认配置
+
+    Returns:
+        list[dict]: 追加派生字段后的记录列表（原地修改并返回）
+    """
+    logger = get_logger()
+    if not records:
+        return records
+
+    enabled = get_enabled_derived_columns(config)
+    if not enabled:
+        return records
+
+    for rec in records:
+        for dc in enabled:
+            col_name = dc['name']
+            calc_key = dc['calculator']
+            calc_fn = DERIVED_COLUMN_CALCULATORS.get(calc_key)
+            if calc_fn is None:
+                logger.warning('派生列「%s」的计算器「%s」未注册，跳过', col_name, calc_key)
+                continue
+            try:
+                rec[col_name] = calc_fn(rec)
+            except Exception as e:
+                logger.debug('派生列「%s」计算失败: %s', col_name, e)
+                rec[col_name] = None
+
+    derived_names = [dc['name'] for dc in enabled]
+    logger.info('派生列计算完成: %s，共 %d 条记录', derived_names, len(records))
+    return records
 
 
 def get_summary_config_path(script_dir=None):
@@ -4055,6 +4176,9 @@ def _merge_summary_config(default_config, user_config):
                 merged[key] = user_val
         else:
             merged[key] = default_val
+    for key, user_val in user_config.items():
+        if key not in default_config:
+            merged[key] = user_val
     return merged
 
 
@@ -4148,7 +4272,7 @@ def apply_excel_style(ws, config):
 
 def get_summary_columns(records=None, lookup_source=None, config=None):
     """
-    获取总表列名列表，包含标准列和扩展字段列。
+    获取总表列名列表，包含标准列、扩展字段列和派生列。
     支持通过配置自定义列顺序和可选列。
 
     Args:
@@ -4176,6 +4300,12 @@ def get_summary_columns(records=None, lookup_source=None, config=None):
     for field in sorted(extra_fields):
         if field not in columns:
             columns.append(field)
+
+    enabled_derived = get_enabled_derived_columns(config)
+    for dc in enabled_derived:
+        col_name = dc['name']
+        if col_name not in columns:
+            columns.append(col_name)
 
     if config and isinstance(config, dict) and 'columns' in config:
         columns = apply_column_config(columns, config['columns'])
@@ -4413,6 +4543,7 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir,
                              output_dir=None, lookup_source=None, config=None):
     """
     合并历史记录与增量记录，并输出到总表。
+    自动对合并后记录应用已启用的派生列计算。
 
     Args:
         existing_records: 历史记录列表
@@ -4435,6 +4566,8 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir,
 
     if config is None:
         config = load_summary_config(script_dir)
+
+    apply_derived_columns(merged_records, config)
 
     columns = get_summary_columns(merged_records, lookup_source, config)
     df = pd.DataFrame(merged_records, columns=columns)

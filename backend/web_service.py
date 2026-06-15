@@ -1926,6 +1926,105 @@ def api_dashboard_subject_breakdown():
 
 
 # ──────────────────────────────────────────────
+# 派生列配置 API
+# ──────────────────────────────────────────────
+
+@app.route('/api/derived-columns', methods=['GET'])
+def api_list_derived_columns():
+    """获取派生列配置列表"""
+    try:
+        config = bankcheck.load_summary_config(BACKEND_DIR)
+        derived = config.get('derived_columns', [])
+        calculators = list(bankcheck.DERIVED_COLUMN_CALCULATORS.keys())
+        return jsonify({
+            'success': True,
+            'data': derived,
+            'available_calculators': calculators,
+        })
+    except Exception as e:
+        logger.error('获取派生列配置失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/derived-columns', methods=['PUT'])
+def api_update_derived_columns():
+    """更新派生列配置"""
+    body = request.get_json(silent=True) or {}
+    derived_list = body.get('derived_columns')
+    if not isinstance(derived_list, list):
+        return jsonify({'success': False, 'message': 'derived_columns 必须为列表'}), 400
+
+    for item in derived_list:
+        if not isinstance(item, dict):
+            return jsonify({'success': False, 'message': '每项必须为字典'}), 400
+        name = item.get('name', '').strip()
+        calc = item.get('calculator', '').strip()
+        if not name or not calc:
+            return jsonify({'success': False, 'message': '每项须包含 name 和 calculator'}), 400
+        if calc not in bankcheck.DERIVED_COLUMN_CALCULATORS:
+            return jsonify({
+                'success': False,
+                'message': f'计算器「{calc}」未注册，可用: {list(bankcheck.DERIVED_COLUMN_CALCULATORS.keys())}',
+            }), 400
+
+    try:
+        config = bankcheck.load_summary_config(BACKEND_DIR)
+        config['derived_columns'] = derived_list
+        config_path = bankcheck.get_summary_config_path(BACKEND_DIR)
+
+        import yaml
+        with open(config_path, 'w', encoding='utf-8') as f:
+            yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+
+        logger.info('派生列配置已更新: %d 项', len(derived_list))
+        return jsonify({'success': True, 'data': derived_list})
+    except Exception as e:
+        logger.error('更新派生列配置失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/derived-columns/apply', methods=['POST'])
+def api_apply_derived_columns():
+    """对当前总表数据应用派生列并重新导出"""
+    try:
+        import pandas as pd
+
+        config = bankcheck.load_summary_config(BACKEND_DIR)
+        enabled = bankcheck.get_enabled_derived_columns(config)
+        if not enabled:
+            return jsonify({'success': False, 'message': '无已启用的派生列'}), 400
+
+        summary_path = os.path.join(BACKEND_DIR, '银行流水总表.xlsx')
+        if not os.path.exists(summary_path):
+            return jsonify({'success': False, 'message': '总表文件不存在'}), 404
+
+        df = pd.read_excel(summary_path, engine='openpyxl')
+        records = df.to_dict(orient='records')
+
+        bankcheck.apply_derived_columns(records, config)
+
+        columns = bankcheck.get_summary_columns(records, config=config)
+        df_out = pd.DataFrame(records, columns=columns)
+
+        excel_style_config = config.get('excel_style')
+        bankcheck.df_to_excel_text_safe(
+            df_out, summary_path, index=False,
+            excel_style_config=excel_style_config,
+        )
+
+        derived_names = [dc['name'] for dc in enabled]
+        logger.info('派生列已应用到总表: %s', derived_names)
+        return jsonify({
+            'success': True,
+            'applied_columns': derived_names,
+            'record_count': len(records),
+        })
+    except Exception as e:
+        logger.error('应用派生列失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# ──────────────────────────────────────────────
 # 银企直连目录对接 API
 # ──────────────────────────────────────────────
 
