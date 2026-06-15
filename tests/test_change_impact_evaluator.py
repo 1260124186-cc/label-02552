@@ -70,6 +70,46 @@ def _make_record(trade_date='2024-01-05', payment=None, receipt=None,
     return rec
 
 
+def _create_test_bank_excel(filepath: str):
+    """创建一个测试用的北京银行格式Excel文件"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = '流水'
+
+    ws['A1'] = '户名'
+    ws['B1'] = '账号'
+    ws['A2'] = '测试公司'
+    ws['B2'] = '01090312345678901'
+
+    headers = ['交易日期', '凭证号', '对方账号', '对方户名',
+               '借方发生额', '贷方发生额', '余额', '摘要', '交易流水号']
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=4, column=col, value=header)
+
+    ws.cell(row=5, column=1, value='2024-01-15')
+    ws.cell(row=5, column=2, value='P001')
+    ws.cell(row=5, column=3, value='1234567890')
+    ws.cell(row=5, column=4, value='供应商A')
+    ws.cell(row=5, column=5, value=1000.00)
+    ws.cell(row=5, column=6, value=None)
+    ws.cell(row=5, column=7, value=9000.00)
+    ws.cell(row=5, column=8, value='采购办公用品')
+    ws.cell(row=5, column=9, value='TX202401150001')
+
+    ws.cell(row=6, column=1, value='2024-01-16')
+    ws.cell(row=6, column=2, value='P002')
+    ws.cell(row=6, column=3, value='9876543210')
+    ws.cell(row=6, column=4, value='客户B')
+    ws.cell(row=6, column=5, value=None)
+    ws.cell(row=6, column=6, value=5000.00)
+    ws.cell(row=6, column=7, value=14000.00)
+    ws.cell(row=6, column=8, value='销售收入')
+    ws.cell(row=6, column=9, value='TX202401160002')
+
+    wb.save(filepath)
+    wb.close()
+
+
 class TestNormalizeValue:
     def test_none(self):
         assert _normalize_value(None) is None
@@ -250,6 +290,27 @@ class TestHistorySampleManager:
         assert loaded['bank_name'] == '北京银行'
         assert loaded['record_count'] == 2
         assert len(loaded['records']) == 2
+        assert loaded['source_full_path'] == os.path.abspath(src_file)
+        assert 'source_hash' in loaded
+        assert loaded['source_hash'] != ''
+
+        meta = sample_manager.list_samples('北京银行')
+        assert len(meta) == 1
+        assert meta[0]['source_full_path'] == os.path.abspath(src_file)
+        assert 'source_hash' in meta[0]
+
+    def test_save_with_nonexistent_source_file(self, sample_manager, tmp_dir):
+        """测试源文件不存在时仍能保存样本（哈希为空）"""
+        records = [_make_record(transaction_id='TX001')]
+        nonexistent_file = os.path.join(tmp_dir, 'not_exists.xlsx')
+
+        saved_path = sample_manager.save_sample(nonexistent_file, '测试银行', records)
+        assert saved_path is not None
+
+        loaded = sample_manager.load_sample(saved_path)
+        assert loaded is not None
+        assert loaded['source_full_path'] == os.path.abspath(nonexistent_file)
+        assert loaded['source_hash'] == ''
 
     def test_save_empty_records(self, sample_manager, tmp_dir):
         src_file = os.path.join(tmp_dir, 'empty.xlsx')
@@ -448,6 +509,114 @@ class TestChangeImpactEvaluator:
         path = evaluator.save_sample_from_records(src, '测试银行', records)
         assert path is not None
         assert os.path.exists(path)
+
+    def test_evaluate_bank_rule_change_real_reparse(self, evaluator, tmp_dir):
+        """测试银行规则变更时使用真实样本文件重跑"""
+        import bankcheck
+
+        test_xlsx = os.path.join(tmp_dir, '北京银行_test.xlsx')
+        _create_test_bank_excel(test_xlsx)
+
+        rule_data = {
+            'bank_name': '北京银行',
+            'account_cell': 'B2',
+            'start_row': 5,
+            'payment_sign': 'negative',
+            'enabled': True,
+            'columns': {
+                'trade_date': 1,
+                'counterpart': 4,
+                'payment': 5,
+                'receipt': 6,
+                'balance': 7,
+                'summary': 8,
+                'transaction_id': 9,
+            },
+        }
+
+        rule = bankcheck.BankRule(**rule_data)
+        parser = bankcheck.GenericBankParser(rule)
+        lookup_data = bankcheck.load_lookup_table(None)
+        records = parser.parse(test_xlsx, lookup_data, base_dir=tmp_dir)
+
+        assert len(records) == 2
+        assert records[0]['摘要'] == '采购办公用品'
+        assert records[0]['对方户名'] == '供应商A'
+
+        evaluator.save_sample_from_records(test_xlsx, '北京银行', records)
+
+        old_rule = dict(rule_data)
+        new_rule = dict(rule_data)
+        new_rule['columns'] = dict(rule_data['columns'])
+        new_rule['columns']['summary'] = 2
+        new_rule['columns']['counterpart'] = 3
+
+        report = evaluator.evaluate_bank_rule_change('北京银行', old_rule, new_rule)
+
+        assert report.change_type == 'bank_rule'
+        assert report.total_records >= 2
+        assert '真实重跑' in report.details
+        assert '模拟解析' in report.details
+
+        if report.affected_records > 0:
+            assert '摘要' in report.field_diff_summary or '对方户名' in report.field_diff_summary
+
+    def test_evaluate_bank_rule_change_fallback_to_simulated(self, evaluator, tmp_dir):
+        """测试原始文件不存在时自动降级到模拟解析"""
+        nonexistent_xlsx = os.path.join(tmp_dir, '已删除_北京银行.xlsx')
+
+        records = [
+            _make_record(bank='北京银行', account='01090312345678901',
+                        transaction_id='TX001', summary='测试摘要', counterpart='测试对方'),
+        ]
+
+        sample_data = {
+            'source_file': os.path.basename(nonexistent_xlsx),
+            'source_full_path': os.path.abspath(nonexistent_xlsx),
+            'source_hash': '',
+            'bank_name': '北京银行',
+            'saved_at': '20240101_000000',
+            'record_count': 1,
+            'records': records,
+        }
+
+        sample_filename = '北京银行_20240101_000000.json'
+        sample_path = os.path.join(evaluator.sample_manager.samples_dir, sample_filename)
+        with open(sample_path, 'w', encoding='utf-8') as f:
+            json.dump(sample_data, f, ensure_ascii=False, default=str)
+
+        evaluator.sample_manager._load_metadata()
+        metadata = [{
+            'filename': sample_filename,
+            'bank_name': '北京银行',
+            'source_file': os.path.basename(nonexistent_xlsx),
+            'source_full_path': os.path.abspath(nonexistent_xlsx),
+            'source_hash': '',
+            'saved_at': '20240101_000000',
+            'record_count': 1,
+            'sample_path': sample_path,
+        }]
+        evaluator.sample_manager._save_metadata(metadata)
+
+        old_rule = {
+            'bank_name': '北京银行',
+            'account_cell': 'B2',
+            'start_row': 5,
+            'columns': {
+                'trade_date': 1,
+                'summary': 8,
+                'counterpart': 4,
+            },
+        }
+        new_rule = dict(old_rule)
+        new_rule['columns'] = dict(old_rule['columns'])
+        new_rule['columns']['summary'] = 9
+
+        report = evaluator.evaluate_bank_rule_change('北京银行', old_rule, new_rule)
+
+        assert report.change_type == 'bank_rule'
+        assert report.total_records >= 1
+        assert '模拟解析' in report.details
 
 
 class TestIntegrationWithExistingCode:

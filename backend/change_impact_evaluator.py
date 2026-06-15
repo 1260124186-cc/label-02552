@@ -274,6 +274,7 @@ class HistorySampleManager:
 
             sample_data = {
                 'source_file': os.path.basename(source_filepath),
+                'source_full_path': os.path.abspath(source_filepath),
                 'source_hash': self._file_hash(source_filepath) if os.path.exists(source_filepath) else '',
                 'bank_name': bank_name,
                 'saved_at': timestamp,
@@ -289,6 +290,8 @@ class HistorySampleManager:
                 'filename': sample_filename,
                 'bank_name': bank_name,
                 'source_file': os.path.basename(source_filepath),
+                'source_full_path': os.path.abspath(source_filepath),
+                'source_hash': sample_data['source_hash'],
                 'saved_at': timestamp,
                 'record_count': len(records),
                 'sample_path': sample_path,
@@ -555,6 +558,7 @@ class ChangeImpactEvaluator:
                 cleanup_temp_file,
                 GenericBankParser,
                 BankRule,
+                load_lookup_table,
             )
         except ImportError as e:
             self.logger.error('导入 bankcheck 模块失败: %s', e)
@@ -582,6 +586,9 @@ class ChangeImpactEvaluator:
         unaffected_all = 0
         added_all = 0
         removed_all = 0
+        real_reparse_count = 0
+        simulated_reparse_count = 0
+        failed_reparse_count = 0
 
         for sample in samples:
             old_records = sample.get('records', [])
@@ -603,10 +610,44 @@ class ChangeImpactEvaluator:
                 )
                 parser = GenericBankParser(new_rule)
 
+                sample_full_path = sample.get('source_full_path', '')
+                sample_hash = sample.get('source_hash', '')
                 sample_src = sample.get('source_file', '')
-                new_records = self._reparse_with_rule(
-                    parser, new_rule, sample_src, old_records
-                )
+
+                new_records = None
+                used_real_reparse = False
+
+                if sample_full_path and os.path.exists(sample_full_path):
+                    try:
+                        current_hash = self.sample_manager._file_hash(sample_full_path)
+                        if sample_hash and current_hash != sample_hash:
+                            self.logger.warning(
+                                '样本文件 %s 哈希校验失败，文件可能已被篡改，使用模拟解析',
+                                sample_full_path
+                            )
+                        else:
+                            self.logger.info(
+                                '使用原始样本文件真实重跑: %s', sample_full_path
+                            )
+                            lookup_data = load_lookup_table(None)
+                            new_records = parser.parse(
+                                sample_full_path, lookup_data, base_dir=None
+                            )
+                            used_real_reparse = True
+                            real_reparse_count += 1
+                    except Exception as parse_e:
+                        self.logger.warning(
+                            '真实重跑样本 %s 失败，降级使用模拟解析: %s',
+                            sample_full_path, parse_e
+                        )
+                        new_records = None
+
+                if new_records is None:
+                    new_records = self._reparse_with_rule(
+                        parser, new_rule, sample_src, old_records
+                    )
+                    if not used_real_reparse:
+                        simulated_reparse_count += 1
 
                 diffs, total, affected, unaffected, added, removed = _compare_records(
                     old_records, new_records
@@ -619,6 +660,7 @@ class ChangeImpactEvaluator:
                 removed_all += removed
 
             except Exception as e:
+                failed_reparse_count += 1
                 self.logger.warning('样本 %s 重新解析失败: %s', sample.get('source_file'), e)
                 continue
 
@@ -637,12 +679,21 @@ class ChangeImpactEvaluator:
             if ov != nv:
                 changed_fields.append(f'{k}: {ov} → {nv}')
 
+        details_parts = []
         if changed_fields:
-            report.details = '列映射变更内容:\n' + '\n'.join(f'  - {f}' for f in changed_fields)
+            details_parts.append('列映射变更内容:\n' + '\n'.join(f'  - {f}' for f in changed_fields))
+        reparse_info = (
+            f'解析方式: 真实重跑 {real_reparse_count} 个样本，'
+            f'模拟解析 {simulated_reparse_count} 个样本'
+        )
+        if failed_reparse_count > 0:
+            reparse_info += f'，失败 {failed_reparse_count} 个样本'
+        details_parts.append(reparse_info)
+        report.details = '\n\n'.join(details_parts)
 
         self.logger.info(
-            '银行「%s」规则变更评估完成: 总计 %d 条，受影响 %d 条',
-            bank_name, total_all, affected_all
+            '银行「%s」规则变更评估完成: 总计 %d 条，受影响 %d 条（真实重跑 %d，模拟 %d）',
+            bank_name, total_all, affected_all, real_reparse_count, simulated_reparse_count
         )
         return report
 
@@ -654,8 +705,10 @@ class ChangeImpactEvaluator:
         sample_records: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """
-        使用新规则重新解析。由于原始 Excel 文件可能不存在，
-        这里从旧记录中反向构造数据进行模拟解析。
+        使用新规则重新解析（降级模拟方案）。
+        当原始 Excel 文件不存在或无法使用时，
+        从旧记录中反向构造数据进行模拟解析。
+        优先使用真实样本文件重跑（evaluate_bank_rule_change 中实现）。
         """
         if not sample_records:
             return []

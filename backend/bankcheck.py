@@ -14562,6 +14562,22 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
                     processed_at=_now_str(),
                 ))
                 logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
+
+                try:
+                    from change_impact_evaluator import HistorySampleManager
+                    sample_manager = HistorySampleManager()
+                    original_filepath = filepath
+                    if working_folder_is_copy and working_folder and folder:
+                        original_filepath = filepath.replace(working_folder, folder, 1)
+                    if rows:
+                        sample_manager.save_sample(
+                            source_filepath=original_filepath,
+                            bank_name=bank,
+                            records=rows,
+                        )
+                except Exception as sample_e:
+                    logger.debug('保存历史样本失败（不影响主流程）: %s', sample_e)
+
                 checkpoint.processed_files = list(processed_files)
                 checkpoint.all_rows = list(all_rows)
                 checkpoint.save()
