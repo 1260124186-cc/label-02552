@@ -3894,7 +3894,8 @@ def mask_records(records, fields=None):
     return [mask_record(r, fields) for r in records]
 
 
-def export_masked_summary(records, script_dir, output_dir=None, lookup_source=None, columns=None):
+def export_masked_summary(records, script_dir, output_dir=None, lookup_source=None,
+                          columns=None, config=None):
     """
     导出脱敏版总表。
 
@@ -3904,6 +3905,7 @@ def export_masked_summary(records, script_dir, output_dir=None, lookup_source=No
         output_dir: 输出目录
         lookup_source: 查找表来源
         columns: 列名列表，如为 None 则自动获取
+        config: 总表配置字典，None 表示自动从配置文件加载
 
     Returns:
         str: 脱敏版总表文件路径，无记录时返回 None
@@ -3914,8 +3916,11 @@ def export_masked_summary(records, script_dir, output_dir=None, lookup_source=No
         logger.warning('无记录可导出脱敏版')
         return None
 
+    if config is None:
+        config = load_summary_config(script_dir)
+
     if columns is None:
-        columns = get_summary_columns(records, lookup_source)
+        columns = get_summary_columns(records, lookup_source, config)
 
     masked_records = mask_records(records)
     df = pd.DataFrame(masked_records, columns=columns)
@@ -3925,7 +3930,9 @@ def export_masked_summary(records, script_dir, output_dir=None, lookup_source=No
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    df_to_excel_text_safe(df, output_path, index=False)
+    excel_style_config = config.get('excel_style') if config else None
+    df_to_excel_text_safe(df, output_path, index=False,
+                          excel_style_config=excel_style_config)
 
     logger.info('脱敏版总表输出完成: %s（共 %d 条记录）', output_path, len(records))
     return output_path
@@ -3947,13 +3954,207 @@ LONG_DIGIT_TEXT_FIELDS = [
 ]
 
 
-def get_summary_columns(records=None, lookup_source=None):
+# ──────────────────────────────────────────────
+# 总表导出配置
+# ──────────────────────────────────────────────
+
+SUMMARY_CONFIG_FILENAME = 'summary_config.yaml'
+
+DEFAULT_SUMMARY_CONFIG = {
+    'columns': {
+        'order': [
+            '唯一id', '银行', '银行账号', '主体', '交易日期',
+            '付款', '收款', '摘要', '对方户名', '对方账号',
+            '余额', '交易流水号', '票据号', '结算号', '凭证号',
+            ANOMALY_FLAG_COLUMN, ANOMALY_DETAIL_COLUMN,
+        ],
+        'enabled': {
+            '唯一id': True, '银行': True, '银行账号': True,
+            '主体': True, '交易日期': True, '付款': True,
+            '收款': True, '摘要': True, '对方户名': True,
+            '对方账号': True, '余额': True, '交易流水号': True,
+            '票据号': True, '结算号': True, '凭证号': True,
+            ANOMALY_FLAG_COLUMN: True, ANOMALY_DETAIL_COLUMN: True,
+        },
+    },
+    'excel_style': {
+        'freeze_header': True,
+        'auto_column_width': {
+            'enabled': True,
+            'min_width': 8,
+            'max_width': 50,
+            'padding': 2,
+        },
+    },
+}
+
+
+def get_summary_config_path(script_dir=None):
+    """获取总表导出配置文件路径"""
+    if script_dir is None:
+        script_dir = get_script_dir()
+    return os.path.join(script_dir, SUMMARY_CONFIG_FILENAME)
+
+
+def load_summary_config(script_dir=None):
+    """
+    加载总表导出配置。
+    优先从 summary_config.yaml 读取，配置文件不存在或读取失败时回退到默认配置。
+
+    Args:
+        script_dir: 脚本所在目录，None 表示自动检测
+
+    Returns:
+        dict: 配置字典
+    """
+    logger = get_logger()
+    config_path = get_summary_config_path(script_dir)
+
+    if not os.path.exists(config_path):
+        return _deep_copy_default_summary_config()
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            user_config = yaml.safe_load(f)
+
+        if not isinstance(user_config, dict):
+            logger.warning('总表配置文件格式无效，使用默认配置')
+            return _deep_copy_default_summary_config()
+
+        return _merge_summary_config(DEFAULT_SUMMARY_CONFIG, user_config)
+
+    except Exception as e:
+        logger.warning('加载总表配置文件失败: %s，使用默认配置', e)
+        return _deep_copy_default_summary_config()
+
+
+def _deep_copy_default_summary_config():
+    """深拷贝默认配置，避免修改全局默认值"""
+    import copy
+    return copy.deepcopy(DEFAULT_SUMMARY_CONFIG)
+
+
+def _merge_summary_config(default_config, user_config):
+    """
+    递归合并用户配置与默认配置，用户配置覆盖默认配置。
+
+    Args:
+        default_config: 默认配置
+        user_config: 用户配置
+
+    Returns:
+        dict: 合并后的配置
+    """
+    merged = {}
+    for key, default_val in default_config.items():
+        if key in user_config:
+            user_val = user_config[key]
+            if isinstance(default_val, dict) and isinstance(user_val, dict):
+                merged[key] = _merge_summary_config(default_val, user_val)
+            else:
+                merged[key] = user_val
+        else:
+            merged[key] = default_val
+    return merged
+
+
+def apply_column_config(columns, config):
+    """
+    根据列配置过滤和排序列。
+
+    Args:
+        columns: 原始列名列表
+        config: 总表配置字典（columns 部分）
+
+    Returns:
+        list: 过滤和排序后的列名列表
+    """
+    if not columns:
+        return []
+
+    order_list = config.get('order', [])
+    enabled_map = config.get('enabled', {})
+
+    configured_columns = []
+    for col in order_list:
+        if col in columns and enabled_map.get(col, True):
+            configured_columns.append(col)
+
+    remaining_columns = []
+    for col in columns:
+        if col not in configured_columns and enabled_map.get(col, True):
+            remaining_columns.append(col)
+
+    return configured_columns + remaining_columns
+
+
+def _get_display_width(value):
+    """
+    计算值的显示宽度（中文按2字符计，其他按1字符计）。
+
+    Args:
+        value: 单元格值
+
+    Returns:
+        int: 显示宽度
+    """
+    if value is None:
+        return 0
+    text = str(value)
+    width = 0
+    for ch in text:
+        if unicodedata.east_asian_width(ch) in ('W', 'F'):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def apply_excel_style(ws, config):
+    """
+    对工作表应用 Excel 样式配置（冻结首行、列宽自适应）。
+
+    Args:
+        ws: openpyxl Worksheet 对象
+        config: excel_style 配置字典
+    """
+    if ws is None or ws.max_row < 1 or ws.max_column < 1:
+        return
+
+    if config.get('freeze_header', True):
+        ws.freeze_panes = 'A2'
+
+    acw_config = config.get('auto_column_width', {})
+    if not acw_config.get('enabled', True):
+        return
+
+    min_width = acw_config.get('min_width', 8)
+    max_width = acw_config.get('max_width', 50)
+    padding = acw_config.get('padding', 2)
+
+    for col_idx in range(1, ws.max_column + 1):
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        max_len = 0
+
+        for row_idx in range(1, ws.max_row + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            display_width = _get_display_width(cell.value)
+            if display_width > max_len:
+                max_len = display_width
+
+        adjusted_width = max(min_width, min(max_len + padding, max_width))
+        ws.column_dimensions[col_letter].width = adjusted_width
+
+
+def get_summary_columns(records=None, lookup_source=None, config=None):
     """
     获取总表列名列表，包含标准列和扩展字段列。
+    支持通过配置自定义列顺序和可选列。
 
     Args:
         records: 记录列表，用于从中提取扩展字段（可选）
         lookup_source: 查找表文件路径(str) 或 load_lookup_table() 返回的预加载 dict（可选）
+        config: 总表配置字典（完整配置，函数内部自动取 columns 部分），None 表示不应用配置
 
     Returns:
         列名列表
@@ -3975,6 +4176,9 @@ def get_summary_columns(records=None, lookup_source=None):
     for field in sorted(extra_fields):
         if field not in columns:
             columns.append(field)
+
+    if config and isinstance(config, dict) and 'columns' in config:
+        columns = apply_column_config(columns, config['columns'])
 
     return columns
 
@@ -4026,13 +4230,15 @@ def ensure_text_fields_in_df(df, text_fields=None):
 
 def df_to_excel_text_safe(df, output_path, text_fields=None,
                           sheet_name='Sheet1', index=False,
-                          engine='openpyxl'):
+                          engine='openpyxl', excel_style_config=None):
     """
     将 DataFrame 写入 Excel 文件，确保指定列为文本格式，防止科学计数法。
+    支持冻结首行和列宽自适应等 Excel 样式配置。
 
     实现方式：
     1. 先将指定列的值转换为字符串
     2. 使用 openpyxl 设置对应列的单元格格式为文本（@）
+    3. 可选：应用冻结首行、列宽自适应等样式
 
     Args:
         df: 要写入的 DataFrame
@@ -4041,6 +4247,8 @@ def df_to_excel_text_safe(df, output_path, text_fields=None,
         sheet_name: 工作表名称
         index: 是否写入索引
         engine: Excel 写入引擎，默认 openpyxl
+        excel_style_config: Excel 样式配置字典（对应 summary_config 的 excel_style 部分），
+                           None 表示不应用样式
     """
     if text_fields is None:
         text_fields = LONG_DIGIT_TEXT_FIELDS
@@ -4063,6 +4271,9 @@ def df_to_excel_text_safe(df, output_path, text_fields=None,
                 cell.number_format = '@'
                 if cell.value is not None:
                     cell.value = str(cell.value)
+
+    if excel_style_config and isinstance(excel_style_config, dict):
+        apply_excel_style(ws, excel_style_config)
 
     wb.save(output_path)
     wb.close()
@@ -4198,7 +4409,8 @@ def filter_incremental_records(new_rows, existing_keys):
     return incremental_rows, duplicate_count
 
 
-def merge_and_export_summary(existing_records, incremental_rows, script_dir, output_dir=None, lookup_source=None):
+def merge_and_export_summary(existing_records, incremental_rows, script_dir,
+                             output_dir=None, lookup_source=None, config=None):
     """
     合并历史记录与增量记录，并输出到总表。
 
@@ -4208,6 +4420,7 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir, out
         script_dir: 脚本目录
         output_dir: 输出目录，默认为script_dir
         lookup_source: 查找表文件路径(str) 或 load_lookup_table() 返回的预加载 dict
+        config: 总表配置字典，None 表示自动从配置文件加载
 
     Returns:
         str: 输出文件路径
@@ -4220,14 +4433,19 @@ def merge_and_export_summary(existing_records, incremental_rows, script_dir, out
         logger.warning('无任何记录可输出')
         return None
 
-    columns = get_summary_columns(merged_records, lookup_source)
+    if config is None:
+        config = load_summary_config(script_dir)
+
+    columns = get_summary_columns(merged_records, lookup_source, config)
     df = pd.DataFrame(merged_records, columns=columns)
     output_path = get_summary_table_path(script_dir, output_dir)
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    df_to_excel_text_safe(df, output_path, index=False)
+    excel_style_config = config.get('excel_style') if config else None
+    df_to_excel_text_safe(df, output_path, index=False,
+                          excel_style_config=excel_style_config)
 
     logger.info('总表输出完成: %s（历史 %d 条 + 新增 %d 条 = 共 %d 条）',
                 output_path, len(existing_records), len(incremental_rows), len(merged_records))
