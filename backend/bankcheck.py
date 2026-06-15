@@ -3762,6 +3762,32 @@ class ProcessingResult:
     bank_counts: Dict[str, int] = field(default_factory=dict)
     account_counts: Dict[str, int] = field(default_factory=dict)
     subject_counts: Dict[str, int] = field(default_factory=dict)
+    file_records: List['FileProcessingRecord'] = field(default_factory=list)
+    manifest_json_path: Optional[str] = None
+    manifest_csv_path: Optional[str] = None
+
+
+@dataclass
+class FileProcessingRecord:
+    """单个文件的处理记录，用于生成机器可读的处理清单"""
+    file_path: str
+    file_name: str = ''
+    status: str = 'pending'
+    bank_type: Optional[str] = None
+    record_count: int = 0
+    error_message: Optional[str] = None
+    processed_at: Optional[str] = None
+
+    def to_dict(self):
+        return {
+            'file_path': self.file_path,
+            'file_name': self.file_name,
+            'status': self.status,
+            'bank_type': self.bank_type,
+            'record_count': self.record_count,
+            'error_message': self.error_message,
+            'processed_at': self.processed_at,
+        }
 
 
 @dataclass
@@ -4710,6 +4736,10 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         logger.warning('工作文件夹中未发现任何 Excel 或 PDF 文件')
         if _profiler is not None:
             _profiler.stop()
+        _manifest_json, _manifest_csv = generate_processing_manifest(
+            [], script_dir, output_dir=working_folder or script_dir,
+            dry_run=dry_run, extra_metadata={'input_folder': folder, 'folder_empty': True},
+        )
         return ProcessingResult(
             lookup_missing=lookup_missing,
             folder_empty=True,
@@ -4721,6 +4751,9 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
             pending_input_folder=folder if dry_run else None,
             working_folder=working_folder,
             working_folder_is_copy=working_folder_is_copy,
+            file_records=[],
+            manifest_json_path=_manifest_json,
+            manifest_csv_path=_manifest_csv,
         )
 
     _phase_process_start = None
@@ -4739,10 +4772,21 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
     processed_files = list(checkpoint.processed_files)
     unprocessed_files = []
     error_files = []
+    file_records: List[FileProcessingRecord] = []
+    _now_str = lambda: datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     for filepath in all_files:
         if filepath in checkpoint.processed_files:
             checkpoint_skipped_files.append(filepath)
+            file_records.append(FileProcessingRecord(
+                file_path=filepath,
+                file_name=os.path.basename(filepath),
+                status='checkpoint_skipped',
+                bank_type=None,
+                record_count=0,
+                error_message='断点续跑跳过已处理文件',
+                processed_at=_now_str(),
+            ))
             logger.info('断点续跑跳过已处理文件: %s', filepath)
             continue
 
@@ -4753,15 +4797,42 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                 if rows:
                     all_rows.extend(rows)
                     processed_files.append(filepath)
+                    file_records.append(FileProcessingRecord(
+                        file_path=filepath,
+                        file_name=os.path.basename(filepath),
+                        status='success',
+                        bank_type='PDF',
+                        record_count=len(rows),
+                        error_message=None,
+                        processed_at=_now_str(),
+                    ))
                     logger.info('成功处理 PDF 文件: %s（%d 条记录）', filepath, len(rows))
                     checkpoint.processed_files = list(processed_files)
                     checkpoint.all_rows = list(all_rows)
                     checkpoint.save()
                 else:
                     unprocessed_files.append(filepath)
+                    file_records.append(FileProcessingRecord(
+                        file_path=filepath,
+                        file_name=os.path.basename(filepath),
+                        status='no_records',
+                        bank_type='PDF',
+                        record_count=0,
+                        error_message='PDF 文件未解析出有效记录',
+                        processed_at=_now_str(),
+                    ))
                     logger.warning('PDF 文件未解析出有效记录: %s', filepath)
             except Exception as e:
                 error_files.append((filepath, str(e)))
+                file_records.append(FileProcessingRecord(
+                    file_path=filepath,
+                    file_name=os.path.basename(filepath),
+                    status='error',
+                    bank_type='PDF',
+                    record_count=0,
+                    error_message=str(e),
+                    processed_at=_now_str(),
+                ))
                 logger.error('处理 PDF 文件「%s」时发生错误: %s', filepath, e, exc_info=True)
             continue
 
@@ -4772,15 +4843,53 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
                 rows = processor(filepath, lookup_data)
                 all_rows.extend(rows)
                 processed_files.append(filepath)
+                file_records.append(FileProcessingRecord(
+                    file_path=filepath,
+                    file_name=os.path.basename(filepath),
+                    status='success',
+                    bank_type=bank,
+                    record_count=len(rows),
+                    error_message=None,
+                    processed_at=_now_str(),
+                ))
                 logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
                 checkpoint.processed_files = list(processed_files)
                 checkpoint.all_rows = list(all_rows)
                 checkpoint.save()
             except Exception as e:
                 error_files.append((filepath, str(e)))
+                file_records.append(FileProcessingRecord(
+                    file_path=filepath,
+                    file_name=os.path.basename(filepath),
+                    status='error',
+                    bank_type=bank,
+                    record_count=0,
+                    error_message=str(e),
+                    processed_at=_now_str(),
+                ))
                 logger.error('处理文件「%s」时发生错误: %s', filepath, e, exc_info=True)
         else:
             unprocessed_files.append(filepath)
+            file_records.append(FileProcessingRecord(
+                file_path=filepath,
+                file_name=os.path.basename(filepath),
+                status='unrecognized',
+                bank_type=None,
+                record_count=0,
+                error_message='无法识别银行类型',
+                processed_at=_now_str(),
+            ))
+
+    for filepath, skip_reason in skipped_duplicate_files:
+        file_records.append(FileProcessingRecord(
+            file_path=filepath,
+            file_name=os.path.basename(filepath),
+            status='duplicate_skipped',
+            bank_type=None,
+            record_count=0,
+            error_message=skip_reason,
+            processed_at=_now_str(),
+        ))
 
     if _profiler is not None and _phase_process_start is not None:
         _process_dur = (__import__('time').perf_counter() - _phase_process_start) * 1000
@@ -5249,6 +5358,23 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
     elif (unprocessed_files or error_files or skipped_duplicate_files) and dry_run:
         logger.info('[试运行] 跳过待处理清单生成')
 
+    manifest_output_dir = script_dir
+    if output_path:
+        manifest_output_dir = os.path.dirname(output_path) or script_dir
+    manifest_extra_meta = {
+        'input_folder': folder,
+        'working_folder': working_folder,
+        'incremental_mode': actual_incremental,
+        'total_final_records': len(final_rows),
+        'new_record_count': new_record_count,
+        'duplicate_record_count': duplicate_count,
+        'batch_id': batch_id,
+    }
+    manifest_json_path, manifest_csv_path = generate_processing_manifest(
+        file_records, script_dir, output_dir=manifest_output_dir,
+        dry_run=dry_run, extra_metadata=manifest_extra_meta,
+    )
+
     checkpoint.clear()
     if resumed_from_checkpoint:
         logger.info('断点续跑完成，已清除状态文件')
@@ -5326,6 +5452,9 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         bank_counts=dict(bank_counts),
         account_counts=dict(account_counts),
         subject_counts=dict(subject_counts),
+        file_records=file_records,
+        manifest_json_path=manifest_json_path,
+        manifest_csv_path=manifest_csv_path,
     )
 
 
@@ -5459,6 +5588,34 @@ def format_result_message(result):
     elif result.dry_run and (result.unprocessed_files or result.error_files or result.skipped_duplicate_files):
         msg += '\n\n待处理清单：(试运行未生成)'
 
+    if result.file_records:
+        _status_counts = defaultdict(int)
+        for r in result.file_records:
+            _status_counts[r.status] += 1
+        _status_labels = {
+            'success': '成功',
+            'error': '出错',
+            'unrecognized': '未识别',
+            'no_records': '无记录',
+            'duplicate_skipped': '重复跳过',
+            'checkpoint_skipped': '断点跳过',
+        }
+        _summary_parts = []
+        for _s, _c in sorted(_status_counts.items()):
+            _label = _status_labels.get(_s, _s)
+            _summary_parts.append(f'{_label} {_c}')
+        msg += f'\n\n文件处理统计：{"，".join(_summary_parts)}'
+
+    if result.manifest_json_path or result.manifest_csv_path:
+        msg += '\n\n处理清单（机器可读）：'
+        if result.manifest_json_path:
+            msg += f'\n  JSON：{result.manifest_json_path}'
+        if result.manifest_csv_path:
+            msg += f'\n  CSV：{result.manifest_csv_path}'
+        msg += '\n（包含每个文件的处理状态、提取条数、失败原因，可用于自动化处理与审计）'
+    elif result.dry_run:
+        msg += '\n\n处理清单（机器可读）：(试运行未生成)'
+
     return msg
 
 
@@ -5526,6 +5683,92 @@ def generate_pending_list_xlsx(unprocessed_files, error_files, script_dir,
     except Exception as e:
         logger.error('生成待处理清单失败: %s', e, exc_info=True)
         return None
+
+
+def generate_processing_manifest(file_records, script_dir, output_dir=None,
+                                 dry_run=False, extra_metadata=None):
+    """
+    生成机器可读的处理清单，包含每个文件的处理状态、提取条数与失败原因。
+    同时输出 JSON 和 CSV 两种格式。
+
+    清单字段：
+    - file_path: 文件完整路径
+    - file_name: 文件名
+    - status: 处理状态（success / error / unrecognized / no_records / duplicate_skipped / checkpoint_skipped）
+    - bank_type: 识别出的银行类型
+    - record_count: 成功提取的记录条数
+    - error_message: 失败原因或错误信息
+    - processed_at: 处理时间戳
+
+    Args:
+        file_records: FileProcessingRecord 列表
+        script_dir: 脚本目录，用于默认输出路径
+        output_dir: 可选的输出目录，不指定时使用 script_dir
+        dry_run: 试运行模式，不写盘仅日志
+        extra_metadata: 附加元数据字典，将写入 JSON 的 _metadata 字段
+
+    Returns:
+        Tuple[Optional[str], Optional[str]]: (JSON 清单路径, CSV 清单路径)
+    """
+    logger = get_logger()
+
+    if not file_records:
+        logger.info('没有文件处理记录，无需生成处理清单')
+        return None, None
+
+    base_dir = output_dir or script_dir
+    if dry_run:
+        logger.info('[试运行] 跳过处理清单写盘，共 %d 条记录', len(file_records))
+        return None, None
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    json_path = os.path.join(base_dir, f'处理清单_{timestamp}.json')
+    csv_path = os.path.join(base_dir, f'处理清单_{timestamp}.csv')
+
+    records_dicts = [r.to_dict() for r in file_records]
+
+    status_counts = defaultdict(int)
+    for r in file_records:
+        status_counts[r.status] += 1
+    total_records = sum(r.record_count for r in file_records)
+
+    metadata = {
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'total_files': len(file_records),
+        'total_records_extracted': total_records,
+        'status_summary': dict(status_counts),
+    }
+    if extra_metadata:
+        metadata.update(extra_metadata)
+
+    manifest_payload = {
+        '_metadata': metadata,
+        'files': records_dicts,
+    }
+
+    try:
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(manifest_payload, f, ensure_ascii=False, indent=2)
+        logger.info('处理清单(JSON)已生成: %s', json_path)
+    except Exception as e:
+        logger.error('生成处理清单(JSON)失败: %s', e, exc_info=True)
+        json_path = None
+
+    try:
+        import csv as _csv
+        fieldnames = ['file_path', 'file_name', 'status', 'bank_type',
+                      'record_count', 'error_message', 'processed_at']
+        with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
+            writer = _csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for rd in records_dicts:
+                writer.writerow(rd)
+        logger.info('处理清单(CSV)已生成: %s', csv_path)
+    except Exception as e:
+        logger.error('生成处理清单(CSV)失败: %s', e, exc_info=True)
+        csv_path = None
+
+    return json_path, csv_path
 
 
 def delete_processed_files(excel_files, processed_files, error_files, unprocessed_files,
@@ -5893,6 +6136,26 @@ def commit_pipeline_changes(result: ProcessingResult) -> ProcessingResult:
             skipped_duplicate_files=result.skipped_duplicate_files,
         )
         result.pending_list_path = pending_list_path
+
+    manifest_output_dir = script_dir
+    if output_path:
+        manifest_output_dir = os.path.dirname(output_path) or script_dir
+    manifest_extra_meta = {
+        'input_folder': folder,
+        'working_folder': result.working_folder,
+        'incremental_mode': incremental_mode,
+        'total_final_records': len(final_rows),
+        'new_record_count': result.new_record_count,
+        'duplicate_record_count': result.duplicate_record_count,
+        'batch_id': result.pending_batch_id,
+        'committed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    manifest_json_path, manifest_csv_path = generate_processing_manifest(
+        result.file_records, script_dir, output_dir=manifest_output_dir,
+        dry_run=False, extra_metadata=manifest_extra_meta,
+    )
+    result.manifest_json_path = manifest_json_path
+    result.manifest_csv_path = manifest_csv_path
 
     result.dry_run = False
     result.changes_committed = True
@@ -14101,6 +14364,10 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     excel_files, skipped_duplicate_files = deduplicate_excel_files_by_content(excel_files)
     if not excel_files:
         logger.warning('工作文件夹中未发现任何 Excel 文件')
+        _manifest_json, _manifest_csv = generate_processing_manifest(
+            [], script_dir, output_dir=output_dir or working_folder or script_dir,
+            dry_run=dry_run, extra_metadata={'input_folder': folder, 'folder_empty': True},
+        )
         return ProcessingResult(
             lookup_missing=lookup_missing,
             folder_empty=True,
@@ -14113,6 +14380,9 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
             pending_input_folder=folder if dry_run else None,
             working_folder=working_folder,
             working_folder_is_copy=working_folder_is_copy,
+            file_records=[],
+            manifest_json_path=_manifest_json,
+            manifest_csv_path=_manifest_csv,
         )
 
     def _parse_date(value):
@@ -14152,6 +14422,8 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     unprocessed_files = []
     error_files = []
     filtered_out_count = 0
+    file_records: List[FileProcessingRecord] = []
+    _now_str = lambda: datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     checkpoint = PipelineState.load(script_dir)
     resumed_from_checkpoint = checkpoint.has_state() and len(checkpoint.processed_files) > 0
@@ -14167,6 +14439,15 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     for filepath in excel_files:
         if filepath in checkpoint.processed_files:
             checkpoint_skipped_files.append(filepath)
+            file_records.append(FileProcessingRecord(
+                file_path=filepath,
+                file_name=os.path.basename(filepath),
+                status='checkpoint_skipped',
+                bank_type=None,
+                record_count=0,
+                error_message='断点续跑跳过已处理文件',
+                processed_at=_now_str(),
+            ))
             logger.info('断点续跑跳过已处理文件: %s', filepath)
             continue
 
@@ -14183,17 +14464,57 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
 
                 all_rows.extend(rows)
                 processed_files.append(filepath)
+                file_records.append(FileProcessingRecord(
+                    file_path=filepath,
+                    file_name=os.path.basename(filepath),
+                    status='success',
+                    bank_type=bank,
+                    record_count=len(rows),
+                    error_message=None,
+                    processed_at=_now_str(),
+                ))
                 logger.info('成功处理文件: %s（%d 条记录）', filepath, len(rows))
                 checkpoint.processed_files = list(processed_files)
                 checkpoint.all_rows = list(all_rows)
                 checkpoint.save()
             except Exception as e:
                 error_files.append((filepath, str(e)))
+                file_records.append(FileProcessingRecord(
+                    file_path=filepath,
+                    file_name=os.path.basename(filepath),
+                    status='error',
+                    bank_type=bank,
+                    record_count=0,
+                    error_message=str(e),
+                    processed_at=_now_str(),
+                ))
                 logger.error('处理文件「%s」时发生错误: %s', filepath, e, exc_info=True)
         else:
             unprocessed_files.append(filepath)
+            _reason = '无法识别银行类型'
             if bank and bank not in enabled_banks:
+                _reason = f'银行「{bank}」不在启用列表中'
                 logger.info('文件「%s」所属银行「%s」不在启用列表中，跳过', filepath, bank)
+            file_records.append(FileProcessingRecord(
+                file_path=filepath,
+                file_name=os.path.basename(filepath),
+                status='unrecognized',
+                bank_type=bank,
+                record_count=0,
+                error_message=_reason,
+                processed_at=_now_str(),
+            ))
+
+    for filepath, skip_reason in skipped_duplicate_files:
+        file_records.append(FileProcessingRecord(
+            file_path=filepath,
+            file_name=os.path.basename(filepath),
+            status='duplicate_skipped',
+            bank_type=None,
+            record_count=0,
+            error_message=skip_reason,
+            processed_at=_now_str(),
+        ))
 
     if filtered_out_count > 0:
         logger.info('日期过滤共排除 %d 条记录', filtered_out_count)
@@ -14570,6 +14891,29 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
     elif (unprocessed_files or error_files or skipped_duplicate_files) and dry_run:
         logger.info('[试运行] 跳过待处理清单生成')
 
+    manifest_output_dir = output_dir or script_dir
+    if output_path:
+        manifest_output_dir = os.path.dirname(output_path) or manifest_output_dir
+    manifest_extra_meta = {
+        'input_folder': folder,
+        'working_folder': working_folder,
+        'incremental_mode': actual_incremental,
+        'total_final_records': len(final_rows),
+        'new_record_count': new_record_count,
+        'duplicate_record_count': duplicate_count,
+        'batch_id': batch_id,
+        'enabled_banks': list(enabled_banks) if enabled_banks else [],
+        'date_range': {
+            'start': start_date or None,
+            'end': end_date or None,
+        },
+        'filtered_out_by_date': filtered_out_count,
+    }
+    manifest_json_path, manifest_csv_path = generate_processing_manifest(
+        file_records, script_dir, output_dir=manifest_output_dir,
+        dry_run=dry_run, extra_metadata=manifest_extra_meta,
+    )
+
     checkpoint.clear()
     if resumed_from_checkpoint:
         logger.info('断点续跑完成，已清除状态文件')
@@ -14638,6 +14982,9 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         bank_counts=dict(bank_counts),
         account_counts=dict(account_counts),
         subject_counts=dict(subject_counts),
+        file_records=file_records,
+        manifest_json_path=manifest_json_path,
+        manifest_csv_path=manifest_csv_path,
     )
 
 

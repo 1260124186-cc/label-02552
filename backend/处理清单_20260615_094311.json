@@ -1,0 +1,38 @@
+{
+  "_metadata": {
+    "generated_at": "2026-06-15 09:43:11",
+    "total_files": 2,
+    "total_records_extracted": 2,
+    "status_summary": {
+      "success": 1,
+      "unrecognized": 1
+    },
+    "input_folder": "/var/folders/8t/8rw7_pg16cx2c2mkh_cvpz8m0000gn/T/pipeline_manifest_test_9dab7uey/input",
+    "working_folder": "/var/folders/8t/8rw7_pg16cx2c2mkh_cvpz8m0000gn/T/pipeline_manifest_test_9dab7uey/input",
+    "incremental_mode": false,
+    "total_final_records": 2,
+    "new_record_count": 2,
+    "duplicate_record_count": 0,
+    "batch_id": "BATCH20260615094310"
+  },
+  "files": [
+    {
+      "file_path": "/var/folders/8t/8rw7_pg16cx2c2mkh_cvpz8m0000gn/T/pipeline_manifest_test_9dab7uey/input/北京银行_流水.xlsx",
+      "file_name": "北京银行_流水.xlsx",
+      "status": "success",
+      "bank_type": "北京银行",
+      "record_count": 2,
+      "error_message": null,
+      "processed_at": "2026-06-15 09:43:10"
+    },
+    {
+      "file_path": "/var/folders/8t/8rw7_pg16cx2c2mkh_cvpz8m0000gn/T/pipeline_manifest_test_9dab7uey/input/未知银行_文件.xlsx",
+      "file_name": "未知银行_文件.xlsx",
+      "status": "unrecognized",
+      "bank_type": null,
+      "record_count": 0,
+      "error_message": "无法识别银行类型",
+      "processed_at": "2026-06-15 09:43:10"
+    }
+  ]
+}
