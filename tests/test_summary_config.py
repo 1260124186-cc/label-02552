@@ -43,6 +43,9 @@ def sample_records():
             '票据号': 'PJ001',
             '异常标记': '正常',
             '异常详情': '',
+            '来源文件名': '北京银行_2024年1月.xlsx',
+            '来源相对路径': os.path.join('2024年1月', '北京银行_2024年1月.xlsx'),
+            '处理时间': '2024-06-15 10:30:00',
         },
         {
             '唯一id': 'TEST002',
@@ -60,6 +63,9 @@ def sample_records():
             '结算号': 'JS002',
             '异常标记': '正常',
             '异常详情': '',
+            '来源文件名': '东亚银行_2024年1月.xlsx',
+            '来源相对路径': os.path.join('2024年1月', '东亚银行_2024年1月.xlsx'),
+            '处理时间': '2024-06-15 10:30:01',
         },
     ]
 
@@ -102,6 +108,14 @@ class TestDefaultConfig:
         cfg1['excel_style']['freeze_header'] = False
         assert '测试列' not in cfg2['columns']['order']
         assert cfg2['excel_style']['freeze_header'] is True
+
+    def test_traceability_in_default_config(self):
+        """默认配置应包含溯源字段的 order 和 enabled 配置"""
+        cols_cfg = bankcheck.DEFAULT_SUMMARY_CONFIG['columns']
+        for col in ('来源文件名', '来源相对路径', '处理时间'):
+            assert col in cols_cfg['order']
+            assert col in cols_cfg['enabled']
+            assert cols_cfg['enabled'][col] is True
 
 
 class TestConfigMerge:
@@ -451,6 +465,7 @@ class TestExportWithConfig:
                     '余额': False, '交易流水号': False,
                     '票据号': False, '结算号': False, '凭证号': False,
                     '异常标记': False, '异常详情': False,
+                    '来源文件名': False, '来源相对路径': False, '处理时间': False,
                 },
             },
             'excel_style': {
@@ -529,6 +544,7 @@ class TestExportWithConfig:
                     '对方账号': False, '余额': False, '交易流水号': False,
                     '票据号': False, '结算号': False, '凭证号': False,
                     '异常标记': False, '异常详情': False,
+                    '来源文件名': False, '来源相对路径': False, '处理时间': False,
                 },
             },
             'excel_style': {
@@ -588,4 +604,67 @@ class TestExportWithConfig:
         wb = openpyxl.load_workbook(output_path)
         ws = wb.active
         assert ws.freeze_panes is None
+        wb.close()
+
+    def test_traceability_fields_in_export(self, tmp_dir, sample_records):
+        """总表导出应包含溯源字段列"""
+        output_path = bankcheck.merge_and_export_summary(
+            existing_records=[],
+            incremental_rows=sample_records,
+            script_dir=tmp_dir,
+            output_dir=tmp_dir,
+        )
+        assert output_path is not None
+        assert os.path.exists(output_path)
+
+        wb = openpyxl.load_workbook(output_path)
+        ws = wb.active
+        headers = [cell.value for cell in ws[1]]
+
+        for col in ('来源文件名', '来源相对路径', '处理时间'):
+            assert col in headers
+
+        col_idx = {col: idx + 1 for idx, col in enumerate(headers)}
+
+        assert ws.cell(row=2, column=col_idx['来源文件名']).value == '北京银行_2024年1月.xlsx'
+        assert ws.cell(row=2, column=col_idx['来源相对路径']).value == os.path.join('2024年1月', '北京银行_2024年1月.xlsx')
+        assert ws.cell(row=2, column=col_idx['处理时间']).value == '2024-06-15 10:30:00'
+
+        assert ws.cell(row=3, column=col_idx['来源文件名']).value == '东亚银行_2024年1月.xlsx'
+        assert ws.cell(row=3, column=col_idx['来源相对路径']).value == os.path.join('2024年1月', '东亚银行_2024年1月.xlsx')
+        assert ws.cell(row=3, column=col_idx['处理时间']).value == '2024-06-15 10:30:01'
+
+        wb.close()
+
+    def test_traceability_fields_can_be_disabled(self, tmp_dir, sample_records):
+        """可通过配置禁用溯源字段导出"""
+        custom_config = {
+            'columns': {
+                'order': ['交易日期', '摘要'],
+                'enabled': {
+                    '交易日期': True,
+                    '摘要': True,
+                    '唯一id': False, '银行': False, '银行账号': False,
+                    '主体': False, '付款': False, '收款': False,
+                    '对方户名': False, '对方账号': False, '余额': False,
+                    '交易流水号': False, '票据号': False, '结算号': False,
+                    '凭证号': False, '异常标记': False, '异常详情': False,
+                    '来源文件名': False, '来源相对路径': False, '处理时间': False,
+                },
+            },
+        }
+        output_path = bankcheck.merge_and_export_summary(
+            existing_records=[],
+            incremental_rows=sample_records,
+            script_dir=tmp_dir,
+            output_dir=tmp_dir,
+            config=custom_config,
+        )
+        assert output_path is not None
+
+        wb = openpyxl.load_workbook(output_path)
+        ws = wb.active
+        headers = [cell.value for cell in ws[1]]
+        for col in ('来源文件名', '来源相对路径', '处理时间'):
+            assert col not in headers
         wb.close()

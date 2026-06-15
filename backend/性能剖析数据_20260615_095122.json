@@ -1,0 +1,92 @@
+{
+  "total_duration_ms": 453.33,
+  "file_open": {
+    "count": 4,
+    "total_ms": 35.55,
+    "avg_ms": 8.89,
+    "max_ms": 21.69,
+    "min_ms": 2.98,
+    "slowest": [
+      {
+        "filepath": "未知银行_文件.xlsx",
+        "duration_ms": 21.69,
+        "size_kb": 4.71,
+        "bank": "",
+        "xls_convert": false
+      },
+      {
+        "filepath": "北京银行_流水.xlsx",
+        "duration_ms": 7.76,
+        "size_kb": 5.22,
+        "bank": "",
+        "xls_convert": false
+      },
+      {
+        "filepath": "主体查找表.xlsx",
+        "duration_ms": 3.13,
+        "size_kb": 4.85,
+        "bank": "",
+        "xls_convert": false
+      },
+      {
+        "filepath": "未知银行_文件.xlsx",
+        "duration_ms": 2.98,
+        "size_kb": 4.71,
+        "bank": "",
+        "xls_convert": false
+      }
+    ]
+  },
+  "row_traversal": {
+    "count": 1,
+    "total_ms": 0.51,
+    "avg_ms": 0.51,
+    "max_ms": 0.51,
+    "min_ms": 0.51,
+    "total_rows": 2,
+    "total_extracted": 2,
+    "slowest": [
+      {
+        "filepath": "北京银行_流水.xlsx",
+        "sheet": "交易明细",
+        "duration_ms": 0.51,
+        "row_count": 2,
+        "bank": "北京银行"
+      }
+    ]
+  },
+  "lookup_hit": {
+    "count": 1,
+    "total_ms": 1.22,
+    "avg_ms": 1.22,
+    "hit_count": 1,
+    "miss_count": 0,
+    "fuzzy_count": 0,
+    "hit_rate": 1.0
+  },
+  "phases": [
+    {
+      "name": "lookup_preload",
+      "duration_ms": 8.22,
+      "detail": "查找表预加载"
+    },
+    {
+      "name": "folder_copy",
+      "duration_ms": 0.97,
+      "detail": "复制文件夹"
+    },
+    {
+      "name": "file_processing",
+      "duration_ms": 178.55,
+      "detail": "处理 2 个文件"
+    }
+  ],
+  "bottlenecks": [
+    {
+      "phase": "file_open",
+      "severity": "high",
+      "pct": 95.4,
+      "suggestion": "文件打开耗时占比 95.4%，建议：1) 减少单次打开文件数量 2) 使用 read_only 模式 3) 检查网络磁盘 IO 延迟"
+    }
+  ]
+}

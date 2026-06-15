@@ -175,6 +175,7 @@ class ParseTaskPayload(TaskPayload):
     lookup_file: Optional[str] = None
     lookup_data: Dict[str, Any] = field(default_factory=dict)
     bank_type: str = ''
+    base_dir: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ParseTaskPayload':

@@ -2358,6 +2358,53 @@ def preview_extraction(filepath: str, rule_data: Dict[str, Any],
         }
 
 
+def build_traceability_fields(filepath, base_dir=None):
+    """
+    构建溯源字段字典：来源文件名、来源相对路径、处理时间。
+
+    Args:
+        filepath: 文件绝对路径
+        base_dir: 基础目录，用于计算相对路径，None 时使用绝对路径作为相对路径回退
+
+    Returns:
+        dict: 包含三个溯源字段的字典
+    """
+    source_filename = os.path.basename(filepath)
+    if base_dir:
+        try:
+            source_rel_path = os.path.relpath(filepath, base_dir)
+        except ValueError:
+            source_rel_path = filepath
+    else:
+        source_rel_path = filepath
+    processed_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return {
+        '来源文件名': source_filename,
+        '来源相对路径': source_rel_path,
+        '处理时间': processed_at,
+    }
+
+
+def add_traceability_to_records(records, filepath, base_dir=None):
+    """
+    为一组记录批量添加溯源字段。
+
+    Args:
+        records: 记录列表
+        filepath: 源文件路径
+        base_dir: 基础目录，用于计算相对路径
+
+    Returns:
+        list: 添加了溯源字段的记录列表（原地修改并返回）
+    """
+    if not records:
+        return records
+    trace_fields = build_traceability_fields(filepath, base_dir)
+    for r in records:
+        r.update(trace_fields)
+    return records
+
+
 class GenericBankParser:
     """通用银行流水解析器 - 根据配置规则动态解析 Excel"""
 
@@ -2530,9 +2577,14 @@ class GenericBankParser:
 
         return mismatches
 
+    @staticmethod
+    def _build_traceability_fields(filepath, base_dir=None):
+        """构建溯源字段字典 - 委托给模块级 build_traceability_fields"""
+        return build_traceability_fields(filepath, base_dir)
+
     def _parse_segment(self, ws, filepath, sheet_name, lookup_source,
                        account_value, data_start_row, data_end_row,
-                       merged_map=None):
+                       merged_map=None, base_dir=None):
         """
         解析工作表中指定行范围的数据段，用于多账号场景。
 
@@ -2601,6 +2653,7 @@ class GenericBankParser:
                 '余额': balance,
                 '交易流水号': transaction_id,
             }
+            record.update(self._build_traceability_fields(filepath, base_dir))
             for key, val in extra_fields.items():
                 record[key] = val
 
@@ -2621,7 +2674,7 @@ class GenericBankParser:
         return rows
 
     def _parse_sheet_multi_account(self, ws, filepath, sheet_name, lookup_source,
-                                    merged_map=None):
+                                    merged_map=None, base_dir=None):
         """
         多账号单文件拆分解析：自动检测同一工作表中的多个账号区块，
         按账号切段并分别匹配主体后返回记录列表。
@@ -2661,7 +2714,7 @@ class GenericBankParser:
             segment_rows = self._parse_segment(
                 ws, filepath, sheet_name, lookup_source,
                 account_value, data_start_row, data_end_row,
-                merged_map=merged_map)
+                merged_map=merged_map, base_dir=base_dir)
             all_rows.extend(segment_rows)
 
         self.logger.info(
@@ -2671,12 +2724,12 @@ class GenericBankParser:
         return all_rows
 
     def _parse_sheet(self, ws, filepath: str, sheet_name: str,
-                     lookup_source) -> List[Dict[str, Any]]:
+                     lookup_source, base_dir=None) -> List[Dict[str, Any]]:
         merged_map = build_merged_cell_map(ws)
 
         if self.rule.multi_account:
             return self._parse_sheet_multi_account(ws, filepath, sheet_name, lookup_source,
-                                                    merged_map=merged_map)
+                                                    merged_map=merged_map, base_dir=base_dir)
 
         mismatches = self.validate_headers(ws, filepath, sheet_name, merged_map)
 
@@ -2756,6 +2809,7 @@ class GenericBankParser:
                 '余额': balance,
                 '交易流水号': transaction_id,
             }
+            record.update(self._build_traceability_fields(filepath, base_dir))
             for key, val in extra_fields.items():
                 record[key] = val
 
@@ -2781,7 +2835,7 @@ class GenericBankParser:
 
         return rows
 
-    def parse(self, filepath: str, lookup_source) -> List[Dict[str, Any]]:
+    def parse(self, filepath: str, lookup_source, base_dir=None) -> List[Dict[str, Any]]:
         """
         根据配置规则解析银行流水 Excel 文件，支持多工作表遍历。
 
@@ -2790,6 +2844,7 @@ class GenericBankParser:
         Args:
             filepath: Excel 文件路径
             lookup_source: 查找表文件路径(str) 或 load_lookup_table() 返回的预加载 dict
+            base_dir: 基础目录，用于计算相对路径，None 时使用绝对路径作为回退
 
         Returns:
             解析后的记录列表（所有工作表合并结果）
@@ -2808,7 +2863,7 @@ class GenericBankParser:
                         self.rule.bank_name, ws.title)
                     continue
 
-                sheet_rows = self._parse_sheet(ws, filepath, ws.title, lookup_source)
+                sheet_rows = self._parse_sheet(ws, filepath, ws.title, lookup_source, base_dir=base_dir)
                 all_rows.extend(sheet_rows)
 
             wb.close()
@@ -2821,7 +2876,7 @@ class GenericBankParser:
 
 def _create_bank_processor(bank_name: str):
     """创建基于配置的银行处理器函数"""
-    def processor(filepath, lookup_source):
+    def processor(filepath, lookup_source, base_dir=None):
         config = BankRuleConfig()
         rule = config.get_rule(bank_name)
         if rule is None:
@@ -2829,7 +2884,7 @@ def _create_bank_processor(bank_name: str):
             logger.error('未找到银行「%s」的解析规则', bank_name)
             return []
         parser = GenericBankParser(rule)
-        return parser.parse(filepath, lookup_source)
+        return parser.parse(filepath, lookup_source, base_dir=base_dir)
     return processor
 
 
@@ -3974,6 +4029,7 @@ STANDARD_COLUMNS = [
     '唯一id', '银行', '银行账号', '主体', '交易日期',
     '付款', '收款', '摘要', '对方户名', '余额', '交易流水号',
     ANOMALY_FLAG_COLUMN, ANOMALY_DETAIL_COLUMN,
+    '来源文件名', '来源相对路径', '处理时间',
 ]
 
 LONG_DIGIT_TEXT_FIELDS = [
@@ -3995,6 +4051,7 @@ DEFAULT_SUMMARY_CONFIG = {
             '付款', '收款', '摘要', '对方户名', '对方账号',
             '余额', '交易流水号', '票据号', '结算号', '凭证号',
             ANOMALY_FLAG_COLUMN, ANOMALY_DETAIL_COLUMN,
+            '来源文件名', '来源相对路径', '处理时间',
         ],
         'enabled': {
             '唯一id': True, '银行': True, '银行账号': True,
@@ -4003,6 +4060,7 @@ DEFAULT_SUMMARY_CONFIG = {
             '对方账号': True, '余额': True, '交易流水号': True,
             '票据号': True, '结算号': True, '凭证号': True,
             ANOMALY_FLAG_COLUMN: True, ANOMALY_DETAIL_COLUMN: True,
+            '来源文件名': True, '来源相对路径': True, '处理时间': True,
         },
     },
     'derived_columns': [
@@ -4795,6 +4853,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
             try:
                 rows = process_pdf_file(filepath, lookup_data)
                 if rows:
+                    add_traceability_to_records(rows, filepath, working_folder)
                     all_rows.extend(rows)
                     processed_files.append(filepath)
                     file_records.append(FileProcessingRecord(
@@ -4840,7 +4899,7 @@ def run_pipeline(folder, script_dir, incremental=True, batch_id=None,
         if bank and bank in BANK_PROCESSORS:
             try:
                 processor = BANK_PROCESSORS[bank]
-                rows = processor(filepath, lookup_data)
+                rows = processor(filepath, lookup_data, base_dir=working_folder)
                 all_rows.extend(rows)
                 processed_files.append(filepath)
                 file_records.append(FileProcessingRecord(
@@ -14455,7 +14514,7 @@ def run_pipeline_with_options(folder, script_dir, incremental=True,
         if bank and bank in BANK_PROCESSORS and bank in enabled_banks:
             try:
                 processor = BANK_PROCESSORS[bank]
-                rows = processor(filepath, lookup_data)
+                rows = processor(filepath, lookup_data, base_dir=working_folder)
 
                 if start_dt or end_dt:
                     original_len = len(rows)

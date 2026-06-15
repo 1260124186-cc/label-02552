@@ -160,7 +160,7 @@ def task_parse_file(payload: ParseTaskPayload) -> TaskResult:
             )
 
         processor = bankcheck.BANK_PROCESSORS[bank]
-        rows = processor(payload.file_path, lookup_data)
+        rows = processor(payload.file_path, lookup_data, base_dir=payload.base_dir)
 
         logger.info('文件解析完成: %s, 银行=%s, 记录数=%d',
                     payload.file_path, bank, len(rows))
