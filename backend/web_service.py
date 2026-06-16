@@ -2797,6 +2797,55 @@ def api_knowledge_base_bank_detail(bank_name):
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+@app.route('/api/knowledge-base/banks/<bank_name>', methods=['PATCH'])
+def api_knowledge_base_bank_update(bank_name):
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        kb = get_knowledge_base()
+        entry = kb.get_entry(bank_name)
+        if entry is None:
+            return jsonify({'success': False, 'message': f'未找到银行「{bank_name}」的知识库条目'}), 404
+
+        data = request.get_json(force=True)
+
+        allowed_fields = {
+            'display_name', 'description', 'config_version',
+            'last_verified_date', 'verified_by', 'notes', 'tags',
+        }
+        update_data = {}
+        for field in allowed_fields:
+            if field in data:
+                update_data[field] = data[field]
+
+        if not update_data:
+            return jsonify({
+                'success': False,
+                'message': f'没有提供有效的更新字段，允许的字段: {", ".join(sorted(allowed_fields))}'
+            }), 400
+
+        ok = kb.update_bank_basic_info(bank_name, **update_data)
+        if ok:
+            entry = kb.get_entry(bank_name)
+            return jsonify({
+                'success': True,
+                'message': f'银行「{bank_name}」基础信息已更新',
+                'updated_fields': list(update_data.keys()),
+                'preserved_data': {
+                    'template_screenshots_count': len(entry.template_screenshots) if entry else 0,
+                    'column_descriptions_count': len(entry.column_descriptions) if entry else 0,
+                    'known_issues_count': len(entry.known_issues) if entry else 0,
+                    'general_pitfalls_count': len(entry.general_pitfalls) if entry else 0,
+                },
+                'data': entry.to_dict() if entry else None,
+            })
+        return jsonify({'success': False, 'message': '更新失败'}), 500
+    except Exception as e:
+        logger.error('更新知识库银行基础信息失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 @app.route('/api/knowledge-base/search', methods=['GET'])
 def api_knowledge_base_search():
     if not HAS_KNOWLEDGE_BASE:

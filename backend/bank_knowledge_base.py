@@ -304,8 +304,38 @@ class BankKnowledgeBase:
         self.load()
         return list(self._entries.keys())
 
-    def add_or_update_entry(self, entry: BankWikiEntry) -> bool:
-        self._entries[entry.bank_name] = entry
+    def add_or_update_entry(self, entry: BankWikiEntry, preserve_nested: bool = True) -> bool:
+        self.load()
+        bank_name = entry.bank_name
+        existing = self._entries.get(bank_name)
+
+        if existing is not None and preserve_nested:
+            if not entry.template_screenshots:
+                entry.template_screenshots = list(existing.template_screenshots)
+            if not entry.column_descriptions:
+                entry.column_descriptions = list(existing.column_descriptions)
+            if not entry.known_issues:
+                entry.known_issues = list(existing.known_issues)
+            if not entry.general_pitfalls:
+                entry.general_pitfalls = list(existing.general_pitfalls)
+
+        self._entries[bank_name] = entry
+        return self.save()
+
+    def update_bank_basic_info(self, bank_name: str, **kwargs) -> bool:
+        self.load()
+        entry = self._entries.get(bank_name)
+        if entry is None:
+            return False
+
+        allowed_fields = {
+            'display_name', 'description', 'config_version',
+            'last_verified_date', 'verified_by', 'notes', 'tags',
+        }
+        for key, value in kwargs.items():
+            if key in allowed_fields and hasattr(entry, key):
+                setattr(entry, key, value)
+
         return self.save()
 
     def remove_entry(self, bank_name: str) -> bool:

@@ -581,3 +581,368 @@ class TestLoadRealKnowledgeBase:
                 assert entry.bank_name == name
         finally:
             BankKnowledgeBase._instance = None
+
+
+class TestPreserveNestedOnUpdate:
+    def test_add_or_update_preserves_screenshots(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+        assert len(kb_instance.get_template_screenshots('测试银行')) == 1
+
+        new_entry = BankWikiEntry(
+            bank_name='测试银行',
+            display_name='测试银行-更新',
+            description='新的描述',
+        )
+        assert len(new_entry.template_screenshots) == 0
+
+        ok = kb_instance.add_or_update_entry(new_entry, preserve_nested=True)
+        assert ok is True
+
+        entry = kb_instance.get_entry('测试银行')
+        assert entry.display_name == '测试银行-更新'
+        assert entry.description == '新的描述'
+        assert len(entry.template_screenshots) == 1
+        assert entry.template_screenshots[0].name == '标准模板'
+
+    def test_add_or_update_preserves_column_descriptions(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+        assert len(kb_instance.get_column_descriptions('测试银行')) == 2
+
+        new_entry = BankWikiEntry(bank_name='测试银行')
+        assert len(new_entry.column_descriptions) == 0
+
+        kb_instance.add_or_update_entry(new_entry, preserve_nested=True)
+
+        entry = kb_instance.get_entry('测试银行')
+        assert len(entry.column_descriptions) == 2
+        field_keys = [c.field_key for c in entry.column_descriptions]
+        assert 'trade_date' in field_keys
+        assert 'payment' in field_keys
+
+    def test_add_or_update_preserves_known_issues(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+        assert len(kb_instance.get_issues_for_bank('测试银行')) == 1
+
+        new_entry = BankWikiEntry(
+            bank_name='测试银行',
+            config_version='2.0',
+        )
+        assert len(new_entry.known_issues) == 0
+
+        kb_instance.add_or_update_entry(new_entry, preserve_nested=True)
+
+        entry = kb_instance.get_entry('测试银行')
+        assert entry.config_version == '2.0'
+        assert len(entry.known_issues) == 1
+        assert entry.known_issues[0].issue_id == 'test_header_shift'
+
+    def test_add_or_update_preserves_general_pitfalls(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+        assert len(kb_instance.get_general_pitfalls('测试银行')) == 1
+
+        new_entry = BankWikiEntry(bank_name='测试银行')
+        assert len(new_entry.general_pitfalls) == 0
+
+        kb_instance.add_or_update_entry(new_entry, preserve_nested=True)
+
+        entry = kb_instance.get_entry('测试银行')
+        assert len(entry.general_pitfalls) == 1
+        assert '测试银行需要注意的事项' in entry.general_pitfalls
+
+    def test_add_or_update_preserves_all_nested(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+        original_issues = list(sample_entry.known_issues)
+        original_cols = list(sample_entry.column_descriptions)
+        original_ss = list(sample_entry.template_screenshots)
+        original_pitfalls = list(sample_entry.general_pitfalls)
+
+        new_entry = BankWikiEntry(
+            bank_name='测试银行',
+            display_name='更新后的名称',
+            description='更新后的描述',
+            config_version='2.0',
+            last_verified_date='2026-06-16',
+            verified_by='admin',
+            notes='更新备注',
+            tags=['更新后'],
+        )
+
+        kb_instance.add_or_update_entry(new_entry, preserve_nested=True)
+
+        entry = kb_instance.get_entry('测试银行')
+        assert entry.display_name == '更新后的名称'
+        assert entry.description == '更新后的描述'
+        assert entry.config_version == '2.0'
+        assert entry.last_verified_date == '2026-06-16'
+        assert entry.verified_by == 'admin'
+        assert entry.notes == '更新备注'
+        assert entry.tags == ['更新后']
+
+        assert len(entry.template_screenshots) == len(original_ss)
+        assert len(entry.column_descriptions) == len(original_cols)
+        assert len(entry.known_issues) == len(original_issues)
+        assert len(entry.general_pitfalls) == len(original_pitfalls)
+
+        assert entry.known_issues[0].issue_id == original_issues[0].issue_id
+        assert entry.column_descriptions[0].field_key == original_cols[0].field_key
+        assert entry.template_screenshots[0].name == original_ss[0].name
+        assert entry.general_pitfalls[0] == original_pitfalls[0]
+
+    def test_add_or_update_with_explicit_nested_overrides(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        new_issue = KnownIssue(issue_id='new_issue', title='新问题')
+        new_entry = BankWikiEntry(
+            bank_name='测试银行',
+            known_issues=[new_issue],
+        )
+        assert len(new_entry.known_issues) == 1
+
+        kb_instance.add_or_update_entry(new_entry, preserve_nested=True)
+
+        entry = kb_instance.get_entry('测试银行')
+        assert len(entry.known_issues) == 1
+        assert entry.known_issues[0].issue_id == 'new_issue'
+        assert len(entry.template_screenshots) == 1
+        assert len(entry.column_descriptions) == 2
+
+    def test_add_or_update_force_override(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        new_entry = BankWikiEntry(bank_name='测试银行')
+        kb_instance.add_or_update_entry(new_entry, preserve_nested=False)
+
+        entry = kb_instance.get_entry('测试银行')
+        assert len(entry.known_issues) == 0
+        assert len(entry.template_screenshots) == 0
+        assert len(entry.column_descriptions) == 0
+        assert len(entry.general_pitfalls) == 0
+
+    def test_add_or_update_default_preserves(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        new_entry = BankWikiEntry(bank_name='测试银行')
+        kb_instance.add_or_update_entry(new_entry)
+
+        entry = kb_instance.get_entry('测试银行')
+        assert len(entry.known_issues) == 1
+        assert len(entry.template_screenshots) == 1
+        assert len(entry.column_descriptions) == 2
+
+    def test_add_new_entry_no_preserve(self, kb_instance):
+        entry = BankWikiEntry(bank_name='全新银行')
+        ok = kb_instance.add_or_update_entry(entry, preserve_nested=True)
+        assert ok is True
+        assert kb_instance.get_entry('全新银行') is not None
+
+
+class TestUpdateBankBasicInfo:
+    def test_update_basic_info(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        ok = kb_instance.update_bank_basic_info(
+            '测试银行',
+            display_name='新显示名',
+            config_version='2.0',
+            description='新描述',
+        )
+        assert ok is True
+
+        entry = kb_instance.get_entry('测试银行')
+        assert entry.display_name == '新显示名'
+        assert entry.config_version == '2.0'
+        assert entry.description == '新描述'
+        assert len(entry.known_issues) == 1
+        assert len(entry.template_screenshots) == 1
+        assert len(entry.column_descriptions) == 2
+
+    def test_update_tags(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        ok = kb_instance.update_bank_basic_info(
+            '测试银行',
+            tags=['生产', '已验证'],
+        )
+        assert ok is True
+
+        entry = kb_instance.get_entry('测试银行')
+        assert entry.tags == ['生产', '已验证']
+        assert len(entry.known_issues) == 1
+
+    def test_update_last_verified_date(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        ok = kb_instance.update_bank_basic_info(
+            '测试银行',
+            last_verified_date='2026-06-16',
+            verified_by='operator',
+        )
+        assert ok is True
+
+        entry = kb_instance.get_entry('测试银行')
+        assert entry.last_verified_date == '2026-06-16'
+        assert entry.verified_by == 'operator'
+        assert len(entry.known_issues) == 1
+
+    def test_update_notes(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        ok = kb_instance.update_bank_basic_info(
+            '测试银行',
+            notes='新增备注信息',
+        )
+        assert ok is True
+
+        entry = kb_instance.get_entry('测试银行')
+        assert entry.notes == '新增备注信息'
+        assert len(entry.column_descriptions) == 2
+
+    def test_update_nonexistent_bank(self, kb_instance):
+        ok = kb_instance.update_bank_basic_info(
+            '不存在的银行',
+            display_name='测试',
+        )
+        assert ok is False
+
+    def test_update_ignores_unknown_fields(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        ok = kb_instance.update_bank_basic_info(
+            '测试银行',
+            display_name='合法更新',
+            known_issues=[],
+            template_screenshots=[],
+        )
+        assert ok is True
+
+        entry = kb_instance.get_entry('测试银行')
+        assert entry.display_name == '合法更新'
+        assert len(entry.known_issues) == 1
+        assert len(entry.template_screenshots) == 1
+
+    def test_update_only_selected_fields(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+        original_desc = sample_entry.description
+        original_version = sample_entry.config_version
+
+        ok = kb_instance.update_bank_basic_info(
+            '测试银行',
+            verified_by='new_operator',
+        )
+        assert ok is True
+
+        entry = kb_instance.get_entry('测试银行')
+        assert entry.verified_by == 'new_operator'
+        assert entry.description == original_desc
+        assert entry.config_version == original_version
+        assert len(entry.known_issues) == 1
+
+    def test_update_preserves_searchability(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        kb_instance.update_bank_basic_info(
+            '测试银行',
+            config_version='2.0',
+        )
+
+        results = kb_instance.search_issues_by_error(
+            '表头不匹配 测试银行',
+            bank_name='测试银行',
+        )
+        assert len(results) >= 1
+        assert results[0].issue.config_version == '1.0'
+        assert kb_instance.get_config_version('测试银行') == '2.0'
+
+
+class TestSafeUpdatePersistence:
+    def test_update_persists_to_disk(self, kb_instance, sample_entry, temp_dir):
+        kb_instance.add_or_update_entry(sample_entry)
+        original_ss_count = len(sample_entry.template_screenshots)
+        original_issues_count = len(sample_entry.known_issues)
+
+        kb_instance.update_bank_basic_info(
+            '测试银行',
+            description='更新后的描述',
+            config_version='2.0',
+        )
+
+        BankKnowledgeBase._instance = None
+        knowledge_path = os.path.join(temp_dir, 'bank_knowledge.yaml')
+        kb2 = BankKnowledgeBase(knowledge_path=knowledge_path)
+
+        entry = kb2.get_entry('测试银行')
+        assert entry.description == '更新后的描述'
+        assert entry.config_version == '2.0'
+        assert len(entry.template_screenshots) == original_ss_count
+        assert len(entry.known_issues) == original_issues_count
+        BankKnowledgeBase._instance = None
+
+    def test_add_or_update_preserve_persists(self, kb_instance, sample_entry, temp_dir):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        new_entry = BankWikiEntry(
+            bank_name='测试银行',
+            display_name='更新显示名',
+        )
+        kb_instance.add_or_update_entry(new_entry, preserve_nested=True)
+
+        BankKnowledgeBase._instance = None
+        knowledge_path = os.path.join(temp_dir, 'bank_knowledge.yaml')
+        kb2 = BankKnowledgeBase(knowledge_path=knowledge_path)
+
+        entry = kb2.get_entry('测试银行')
+        assert entry.display_name == '更新显示名'
+        assert len(entry.known_issues) == 1
+        assert len(entry.template_screenshots) == 1
+        assert len(entry.column_descriptions) == 2
+        BankKnowledgeBase._instance = None
+
+
+class TestKnownIssueUpdateNoSideEffects:
+    def test_add_known_issue_preserves_other_issues(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        new_issue = KnownIssue(
+            issue_id='issue_2',
+            title='第二个问题',
+            error_patterns=[r'error.*2'],
+        )
+        ok = kb_instance.add_known_issue('测试银行', new_issue)
+        assert ok is True
+
+        entry = kb_instance.get_entry('测试银行')
+        assert len(entry.known_issues) == 2
+        issue_ids = [i.issue_id for i in entry.known_issues]
+        assert 'test_header_shift' in issue_ids
+        assert 'issue_2' in issue_ids
+        assert len(entry.template_screenshots) == 1
+        assert len(entry.column_descriptions) == 2
+
+    def test_add_known_issue_update_existing(self, kb_instance, sample_entry):
+        kb_instance.add_or_update_entry(sample_entry)
+
+        updated_issue = KnownIssue(
+            issue_id='test_header_shift',
+            title='更新后的标题',
+            description='更新后的描述',
+            symptoms=['新症状'],
+            root_cause='新根因',
+            fix_steps=['新步骤'],
+            error_patterns=[r'new.*pattern'],
+            severity='error',
+            config_version='2.0',
+            last_seen_date='2026-06-16',
+            tags=['更新后'],
+        )
+        ok = kb_instance.add_known_issue('测试银行', updated_issue)
+        assert ok is True
+
+        entry = kb_instance.get_entry('测试银行')
+        assert len(entry.known_issues) == 1
+        issue = entry.known_issues[0]
+        assert issue.title == '更新后的标题'
+        assert issue.severity == 'error'
+        assert len(issue.error_patterns) == 1
+        assert '新根因' in issue.root_cause
+        assert len(entry.template_screenshots) == 1
+        assert len(entry.column_descriptions) == 2
