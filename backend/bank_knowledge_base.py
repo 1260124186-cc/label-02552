@@ -716,9 +716,10 @@ def diagnose_from_knowledge_base(log_lines: List[str],
     if results:
         logger.info('知识库匹配到 %d 个已知问题', len(results))
         for r in results[:5]:
+            score_pct = int(r.match_score * 100)
             logger.info(
-                '  [%.0f%%] %s - %s (%s)',
-                r.match_score * 100, r.bank_name, r.issue.title,
+                '  [%d%%] %s - %s (%s)',
+                score_pct, r.bank_name, r.issue.title,
                 ', '.join(r.matched_patterns[:3]),
             )
 

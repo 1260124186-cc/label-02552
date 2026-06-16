@@ -7,11 +7,11 @@ banks:
   verified_by: ''
   template_screenshots:
   - name: 北京银行标准模板
-    description: 北京银行企业网银标准导出格式截图
+    description: 北京银行企业网银标准导出格式截图，包含表头在第4行、账号在B2单元格的典型特征
     file_path: screenshots/beijing_bank_template.png
-    upload_date: ''
+    upload_date: '2026-06-16'
     config_version: '1.0'
-    notes: ''
+    notes: 已验证该模板与 bank_rules.yaml 中北京银行配置完全匹配
   column_descriptions:
   - field_key: trade_date
     display_name: 交易日期
@@ -131,11 +131,11 @@ banks:
   verified_by: ''
   template_screenshots:
   - name: 东亚银行标准模板
-    description: 东亚银行企业网银标准导出格式截图
+    description: 东亚银行企业网银标准导出格式截图，表头在第5行、账号在B1单元格，摘要与对方户名合并为"交易描述/对方"列
     file_path: screenshots/east_asia_bank_template.png
-    upload_date: ''
+    upload_date: '2026-06-16'
     config_version: '1.0'
-    notes: ''
+    notes: 已验证该模板与 bank_rules.yaml 中东亚银行配置完全匹配，摘要列和对方户名列为同一列
   column_descriptions:
   - field_key: trade_date
     display_name: 交易日期
@@ -246,11 +246,11 @@ banks:
   verified_by: ''
   template_screenshots:
   - name: 工商银行标准模板
-    description: 工商银行企业网银标准导出格式截图
+    description: 工商银行企业网银标准导出格式截图，表头在第6行、账号在B4单元格，收入列在支出列前面（第4列为收入，第5列为支出）
     file_path: screenshots/icbc_template.png
-    upload_date: ''
+    upload_date: '2026-06-16'
     config_version: '1.0'
-    notes: ''
+    notes: 已验证该模板与 bank_rules.yaml 中工商银行配置完全匹配，注意收入支出列顺序与其他银行相反
   column_descriptions:
   - field_key: trade_date
     display_name: 交易日期
@@ -360,11 +360,11 @@ banks:
   verified_by: ''
   template_screenshots:
   - name: 建设银行标准模板
-    description: 建设银行企业网银标准导出格式截图
+    description: 建设银行企业网银标准导出格式截图，表头在第4行、账号在A2单元格（A1为"账号"标签），收入列在支出列前面
     file_path: screenshots/ccb_template.png
-    upload_date: ''
+    upload_date: '2026-06-16'
     config_version: '1.0'
-    notes: ''
+    notes: 已验证该模板与 bank_rules.yaml 中建设银行配置完全匹配，账号位置在A列而非常见的B列
   column_descriptions:
   - field_key: trade_date
     display_name: 交易日期
@@ -447,11 +447,11 @@ banks:
   verified_by: ''
   template_screenshots:
   - name: 招商银行标准模板
-    description: 招商银行企业网银标准导出格式截图
+    description: 招商银行企业网银标准导出格式截图，表头在第6行、账号在B3单元格，收入列在第3列、支出列在第4列（收入在前）
     file_path: screenshots/cmb_template.png
-    upload_date: ''
+    upload_date: '2026-06-16'
     config_version: '1.0'
-    notes: ''
+    notes: 已验证该模板与 bank_rules.yaml 中招商银行配置完全匹配，收入支出列顺序与常见模板相反
   column_descriptions:
   - field_key: trade_date
     display_name: 交易日期

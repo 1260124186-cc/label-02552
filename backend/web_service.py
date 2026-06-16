@@ -2925,6 +2925,101 @@ def api_knowledge_base_screenshots(bank_name):
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+@app.route('/api/knowledge-base/screenshots/<path:filename>', methods=['GET'])
+def api_knowledge_base_screenshot_preview(filename):
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        kb = get_knowledge_base()
+        base_dir = os.path.dirname(kb.get_knowledge_path())
+        safe_filename = os.path.basename(filename)
+        file_path = os.path.join(base_dir, 'screenshots', safe_filename)
+
+        if not os.path.exists(file_path):
+            return jsonify({'success': False, 'message': f'截图文件不存在: {safe_filename}'}), 404
+
+        ext = os.path.splitext(safe_filename)[1].lower()
+        mimetypes = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.bmp': 'image/bmp',
+        }
+        mimetype = mimetypes.get(ext, 'application/octet-stream')
+
+        import flask
+        return flask.send_file(file_path, mimetype=mimetype)
+
+    except Exception as e:
+        logger.error('预览截图失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/banks/<bank_name>/screenshots', methods=['POST'])
+def api_knowledge_base_upload_screenshot(bank_name):
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        kb = get_knowledge_base()
+        entry = kb.get_entry(bank_name)
+        if entry is None:
+            return jsonify({'success': False, 'message': f'未找到银行「{bank_name}」的知识库条目'}), 404
+
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'message': '未找到上传的文件'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'message': '未选择文件'}), 400
+
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
+        ext = os.path.splitext(file.filename)[1].lower().lstrip('.')
+        if ext not in allowed_extensions:
+            return jsonify({
+                'success': False,
+                'message': f'不支持的文件格式，允许的格式: {", ".join(sorted(allowed_extensions))}'
+            }), 400
+
+        kb_dir = os.path.dirname(kb.get_knowledge_path())
+        screenshots_dir = os.path.join(kb_dir, 'screenshots')
+        os.makedirs(screenshots_dir, exist_ok=True)
+
+        name = request.form.get('name', '').strip() or os.path.splitext(file.filename)[0]
+        description = request.form.get('description', '').strip()
+        config_version = request.form.get('config_version', entry.config_version).strip()
+        notes = request.form.get('notes', '').strip()
+
+        safe_name = re.sub(r'[^\w\u4e00-\u9fff\-]', '_', name)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        new_filename = f'{safe_name}_{timestamp}.{ext}'
+        file_path = os.path.join(screenshots_dir, new_filename)
+        file.save(file_path)
+
+        screenshot = TemplateScreenshot(
+            name=name,
+            description=description,
+            file_path=f'screenshots/{new_filename}',
+            upload_date=datetime.now().strftime('%Y-%m-%d'),
+            config_version=config_version,
+            notes=notes,
+        )
+
+        ok = kb.add_template_screenshot(bank_name, screenshot)
+        if ok:
+            return jsonify({
+                'success': True,
+                'message': f'截图「{name}」已上传',
+                'data': screenshot.to_dict(),
+            })
+        return jsonify({'success': False, 'message': '保存失败'}), 500
+    except Exception as e:
+        logger.error('上传截图失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 @app.route('/api/knowledge-base/banks/<bank_name>/pitfalls', methods=['GET'])
 def api_knowledge_base_pitfalls(bank_name):
     if not HAS_KNOWLEDGE_BASE:

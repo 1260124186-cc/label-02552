@@ -946,3 +946,380 @@ class TestKnownIssueUpdateNoSideEffects:
         assert '新根因' in issue.root_cause
         assert len(entry.template_screenshots) == 1
         assert len(entry.column_descriptions) == 2
+
+
+class TestTemplateScreenshotFiles:
+    def test_screenshots_directory_exists(self):
+        script_dir = os.path.join(
+            os.path.dirname(__file__), '..', 'backend'
+        )
+        screenshots_dir = os.path.join(script_dir, 'screenshots')
+        assert os.path.isdir(screenshots_dir)
+
+    def test_all_bank_screenshots_exist(self):
+        script_dir = os.path.join(
+            os.path.dirname(__file__), '..', 'backend'
+        )
+        expected_files = [
+            'beijing_bank_template.png',
+            'east_asia_bank_template.png',
+            'icbc_template.png',
+            'ccb_template.png',
+            'cmb_template.png',
+        ]
+        for filename in expected_files:
+            filepath = os.path.join(script_dir, 'screenshots', filename)
+            assert os.path.exists(filepath), f'截图文件不存在: {filename}'
+            assert os.path.getsize(filepath) > 0, f'截图文件为空: {filename}'
+
+    def test_knowledge_base_screenshot_paths_valid(self):
+        knowledge_path = os.path.join(
+            os.path.dirname(__file__), '..', 'backend', 'bank_knowledge.yaml'
+        )
+        if not os.path.exists(knowledge_path):
+            pytest.skip('bank_knowledge.yaml 不存在')
+
+        BankKnowledgeBase._instance = None
+        try:
+            kb = BankKnowledgeBase(knowledge_path=knowledge_path)
+            names = kb.get_all_bank_names()
+            assert len(names) >= 5
+
+            script_dir = os.path.dirname(knowledge_path)
+            for name in names:
+                screenshots = kb.get_template_screenshots(name)
+                for ss in screenshots:
+                    assert ss.file_path, f'{name} 的截图路径为空'
+                    full_path = os.path.join(script_dir, ss.file_path)
+                    assert os.path.exists(full_path), f'截图文件不存在: {ss.file_path}'
+                    assert ss.upload_date, f'{name} 的截图缺少 upload_date'
+                    assert ss.name, f'{name} 的截图缺少 name'
+        finally:
+            BankKnowledgeBase._instance = None
+
+    def test_screenshot_metadata_complete(self):
+        knowledge_path = os.path.join(
+            os.path.dirname(__file__), '..', 'backend', 'bank_knowledge.yaml'
+        )
+        if not os.path.exists(knowledge_path):
+            pytest.skip('bank_knowledge.yaml 不存在')
+
+        BankKnowledgeBase._instance = None
+        try:
+            kb = BankKnowledgeBase(knowledge_path=knowledge_path)
+            for name in kb.get_all_bank_names():
+                screenshots = kb.get_template_screenshots(name)
+                for ss in screenshots:
+                    assert ss.upload_date, f'{name} - {ss.name} 缺少 upload_date'
+                    assert ss.config_version, f'{name} - {ss.name} 缺少 config_version'
+                    assert ss.description, f'{name} - {ss.name} 缺少 description'
+        finally:
+            BankKnowledgeBase._instance = None
+
+
+class TestFailureLogToKnowledgeBaseResolution:
+    def test_beijing_bank_header_mismatch_resolution(self, kb_instance):
+        kb_instance.add_or_update_entry(sample_entry_with_issues())
+
+        log_lines = [
+            '[INFO] 开始处理北京银行流水文件',
+            '[INFO] 识别银行: 北京银行',
+            '[ERROR] 表头不匹配 北京银行，预期第4行为表头',
+            '[WARNING] 数据解析异常，列映射错位',
+            '[ERROR] 处理失败: header mismatch for beijing bank',
+            '[ERROR] 退出码: 1',
+        ]
+
+        results = diagnose_from_knowledge_base(log_lines, bank_name='北京银行')
+
+        assert len(results) >= 1, '应匹配到至少一个已知问题'
+        assert results[0].match_score >= 0.4, f'匹配分数过低: {results[0].match_score}'
+
+        issue = results[0].issue
+        assert issue.title == '北京银行表头行偏移'
+        assert issue.issue_id == 'bj_header_shift'
+        assert len(issue.fix_steps) >= 2
+        assert any('start_row' in step for step in issue.fix_steps)
+        assert any('修改 bank_rules.yaml' in step for step in issue.fix_steps)
+
+        matched_patterns = results[0].matched_patterns
+        assert len(matched_patterns) >= 2
+        assert any('error_pattern' in p for p in matched_patterns)
+
+    def test_icbc_column_order_mismatch_resolution(self):
+        knowledge_path = os.path.join(
+            os.path.dirname(__file__), '..', 'backend', 'bank_knowledge.yaml'
+        )
+        if not os.path.exists(knowledge_path):
+            pytest.skip('bank_knowledge.yaml 不存在')
+
+        BankKnowledgeBase._instance = None
+        try:
+            kb = BankKnowledgeBase(knowledge_path=knowledge_path)
+
+            log_lines = [
+                '[INFO] 处理工商银行流水',
+                '[ERROR] 收入金额显示为负数 工商银行',
+                '[WARNING] 支出金额全部为0，可能列顺序错误',
+                '[ERROR] 余额计算异常',
+            ]
+
+            results = kb.search_all('收入 支出 反 工商', bank_name='工商银行')
+            assert len(results) >= 1
+
+            issue = results[0].issue
+            assert '收入' in issue.title or '支出' in issue.title or '顺序' in issue.title
+            assert len(issue.fix_steps) >= 2
+            assert any('receipt' in step.lower() or 'payment' in step.lower()
+                       for step in issue.fix_steps)
+
+        finally:
+            BankKnowledgeBase._instance = None
+
+    def test_east_asia_merged_column_resolution(self):
+        knowledge_path = os.path.join(
+            os.path.dirname(__file__), '..', 'backend', 'bank_knowledge.yaml'
+        )
+        if not os.path.exists(knowledge_path):
+            pytest.skip('bank_knowledge.yaml 不存在')
+
+        BankKnowledgeBase._instance = None
+        try:
+            kb = BankKnowledgeBase(knowledge_path=knowledge_path)
+
+            log_lines = [
+                '[INFO] 处理东亚银行流水',
+                '[WARNING] 摘要列和对方户名列内容相同 东亚银行',
+                '[ERROR] 无法单独提取对方户名',
+            ]
+
+            results = diagnose_from_knowledge_base(log_lines, bank_name='东亚银行')
+            assert len(results) >= 1
+
+            issue = results[0].issue
+            assert ('合并' in issue.title or '对方户名' in issue.title)
+            assert issue.severity == 'info' or issue.severity == 'warning'
+
+        finally:
+            BankKnowledgeBase._instance = None
+
+    def test_search_returns_complete_solution(self):
+        knowledge_path = os.path.join(
+            os.path.dirname(__file__), '..', 'backend', 'bank_knowledge.yaml'
+        )
+        if not os.path.exists(knowledge_path):
+            pytest.skip('bank_knowledge.yaml 不存在')
+
+        BankKnowledgeBase._instance = None
+        try:
+            kb = BankKnowledgeBase(knowledge_path=knowledge_path)
+
+            error_msg = '表头不匹配 北京银行 start_row 配置错误'
+            results = kb.search_all(error_msg, bank_name='北京银行')
+
+            assert len(results) >= 1
+            best_match = results[0]
+
+            assert best_match.issue.root_cause, '应包含根因分析'
+            assert len(best_match.issue.fix_steps) >= 2, '应包含修复步骤'
+            assert best_match.issue.config_version, '应关联配置版本'
+            assert best_match.issue.error_patterns, '应包含错误模式'
+
+            assert best_match.match_score >= 0.3
+            assert len(best_match.matched_patterns) >= 1
+
+        finally:
+            BankKnowledgeBase._instance = None
+
+    def test_cross_bank_error_search(self):
+        knowledge_path = os.path.join(
+            os.path.dirname(__file__), '..', 'backend', 'bank_knowledge.yaml'
+        )
+        if not os.path.exists(knowledge_path):
+            pytest.skip('bank_knowledge.yaml 不存在')
+
+        BankKnowledgeBase._instance = None
+        try:
+            kb = BankKnowledgeBase(knowledge_path=knowledge_path)
+
+            error_msg = '工商银行 收入支出列顺序 金额负数 招商银行 收入 支出 反'
+            results = kb.search_all(error_msg, min_score=0.1)
+
+            assert len(results) >= 2, f'应匹配到多家银行的列顺序问题，实际: {len(results)}'
+
+            bank_names = [r.bank_name for r in results]
+            assert '工商银行' in bank_names or '招商银行' in bank_names or '建设银行' in bank_names
+
+            results.sort(key=lambda r: r.match_score, reverse=True)
+            assert results[0].match_score >= results[-1].match_score
+
+        finally:
+            BankKnowledgeBase._instance = None
+
+    def test_troubleshooter_integration_with_knowledge_base(self):
+        try:
+            from troubleshooter import run_troubleshooting, TroubleshootingReport
+        except ImportError:
+            pytest.skip('troubleshooter 模块未安装')
+
+        knowledge_path = os.path.join(
+            os.path.dirname(__file__), '..', 'backend', 'bank_knowledge.yaml'
+        )
+        if not os.path.exists(knowledge_path):
+            pytest.skip('bank_knowledge.yaml 不存在')
+
+        BankKnowledgeBase._instance = None
+
+        log_content = """[INFO] 2026-06-16 10:00:00 启动银行流水处理
+[INFO] 2026-06-16 10:00:01 加载银行规则配置
+[INFO] 2026-06-16 10:00:02 识别到银行: 北京银行
+[ERROR] 2026-06-16 10:00:03 表头不匹配 北京银行，预期第4行为表头
+[WARNING] 2026-06-16 10:00:03 数据解析异常，列映射错位
+[ERROR] 2026-06-16 10:00:04 处理失败: header mismatch for beijing bank
+[INFO] 2026-06-16 10:00:04 正在尝试自救修复
+[ERROR] 2026-06-16 10:00:05 自救修复失败，退出
+"""
+
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False) as f:
+            f.write(log_content)
+            log_path = f.name
+
+        try:
+            class MockResult:
+                bank_name = '北京银行'
+                success = False
+                last_bank_name = '北京银行'
+
+            report = run_troubleshooting(
+                log_path=log_path,
+                processing_result=MockResult(),
+            )
+
+            assert isinstance(report, TroubleshootingReport)
+            assert report.total_issues >= 1
+
+            assert hasattr(report, 'knowledge_base_matches')
+            assert len(report.knowledge_base_matches) >= 1
+
+            kb_match = report.knowledge_base_matches[0]
+            assert 'bank_name' in kb_match
+            assert 'issue' in kb_match
+            assert 'match_score' in kb_match
+            assert kb_match['bank_name'] == '北京银行'
+            assert kb_match['match_score'] >= 0.3
+
+            issue_data = kb_match['issue']
+            assert 'fix_steps' in issue_data
+            assert len(issue_data['fix_steps']) >= 2
+            assert 'root_cause' in issue_data
+            assert 'title' in issue_data
+
+            found_kb_issue = False
+            for issue in report.issues:
+                if issue.issue_id == 'knowledge_base_match':
+                    found_kb_issue = True
+                    assert '知识库匹配到' in issue.title
+                    assert len(issue.fix_steps) >= 2
+                    assert len(issue.evidence) >= 1
+                    assert any('北京银行' in ev for ev in issue.evidence)
+                    assert any('匹配度' in ev for ev in issue.evidence)
+                    assert any('表头行偏移' in ev or '乱码' in ev for ev in issue.evidence)
+                    break
+            assert found_kb_issue, '应包含知识库匹配的问题条目'
+
+        finally:
+            os.unlink(log_path)
+            BankKnowledgeBase._instance = None
+
+    def test_encoding_error_diagnosis(self):
+        knowledge_path = os.path.join(
+            os.path.dirname(__file__), '..', 'backend', 'bank_knowledge.yaml'
+        )
+        if not os.path.exists(knowledge_path):
+            pytest.skip('bank_knowledge.yaml 不存在')
+
+        BankKnowledgeBase._instance = None
+        try:
+            kb = BankKnowledgeBase(knowledge_path=knowledge_path)
+
+            log_lines = [
+                '[ERROR] UnicodeDecodeError 北京银行 CSV文件',
+                '[WARNING] 摘要列显示乱码',
+                '[ERROR] 表头识别失败 编码错误',
+            ]
+
+            results = diagnose_from_knowledge_base(log_lines, bank_name='北京银行')
+            assert len(results) >= 1
+
+            encoding_issue = None
+            for r in results:
+                if '乱码' in r.issue.title or '编码' in r.issue.title:
+                    encoding_issue = r
+                    break
+
+            assert encoding_issue is not None, '应匹配到编码相关问题'
+            assert 'UTF-8' in ' '.join(encoding_issue.issue.fix_steps) or \
+                   'GBK' in ' '.join(encoding_issue.issue.fix_steps)
+            assert encoding_issue.issue.severity == 'warning'
+
+        finally:
+            BankKnowledgeBase._instance = None
+
+
+def sample_entry_with_issues():
+    return BankWikiEntry(
+        bank_name='北京银行',
+        display_name='北京银行',
+        known_issues=[
+            KnownIssue(
+                issue_id='bj_header_shift',
+                title='北京银行表头行偏移',
+                description='表头不在预期行',
+                symptoms=['数据解析异常', '列映射错位'],
+                root_cause='网银系统升级后导出模板变化',
+                fix_steps=[
+                    '打开流水文件确认实际表头行位置',
+                    '修改 bank_rules.yaml 中北京银行的 start_row 配置',
+                    '重新运行流水处理',
+                ],
+                error_patterns=[
+                    r'表头.*不匹配.*北京银行',
+                    r'header.*mismatch.*beijing',
+                ],
+                severity='warning',
+                config_version='1.0',
+            ),
+            KnownIssue(
+                issue_id='bj_encoding_garbled',
+                title='北京银行导出文件中文乱码',
+                description='编码问题导致乱码',
+                symptoms=['摘要列显示乱码', '表头识别失败'],
+                root_cause='CSV文件使用GBK编码',
+                fix_steps=[
+                    '将文件另存为 UTF-8 编码',
+                    '或另存为 xlsx 格式',
+                ],
+                error_patterns=[
+                    r'乱码',
+                    r'UnicodeDecodeError.*北京银行',
+                    r'gbk.*utf',
+                ],
+                severity='warning',
+                config_version='1.0',
+            ),
+        ],
+        template_screenshots=[
+            TemplateScreenshot(
+                name='北京银行标准模板',
+                description='标准导出格式',
+                file_path='screenshots/beijing_bank_template.png',
+                upload_date='2026-06-16',
+                config_version='1.0',
+            ),
+        ],
+        column_descriptions=[
+            ColumnDescription(field_key='trade_date', display_name='交易日期'),
+            ColumnDescription(field_key='payment', display_name='支出金额'),
+        ],
+    )
