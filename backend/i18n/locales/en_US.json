@@ -50,7 +50,8 @@
     "option_duplicate_check": "  12)Duplicate Check: Cross-file dedup and duplicate marking",
     "option_interest_fee_check": "  13)Interest&Fee Check: Filter interest/fee transactions, rate comparison and anomaly detection",
     "option_balance_reconciliation": "  14)Balance Reconciliation: Import bank statement balances, compare with summary and generate variance notes",
-    "enter_choice": "Enter option (1-14, default 1): ",
+    "option_diagnostic_export": "  17)Diagnostic Export: Generate sanitized diagnostic package for technical support",
+    "enter_choice": "Enter option (1-17, default 1): ",
     "select_incremental_mode": "Please select run mode:",
     "option_incremental": "  1) Incremental (Recommended): Detect history, append new data only",
     "option_full": "  2) Full Overwrite: Regenerate summary, overwrite history",
@@ -441,7 +442,10 @@
     "preset_desc": "Manage task presets",
     "balance_reconciliation_name": "Balance Reconciliation",
     "balance_reconciliation": "Balance Reconciliation",
-    "balance_reconciliation_desc": "Import bank statements, reconcile balances with summary"
+    "balance_reconciliation_desc": "Import bank statements, reconcile balances with summary",
+    "diagnostic_export_name": "Diagnostic Export",
+    "diagnostic_export": "Diagnostic Export",
+    "diagnostic_export_desc": "Generate sanitized diagnostic package for support"
   },
   "diff": {
     "summary": "Diff Summary: {added} added, {removed} removed, {modified} modified",
@@ -506,6 +510,24 @@
     "task_cancelled_pipeline_msg": "Task cancelled (pipeline already completed)",
     "processing_failed": "Processing failed: {error}",
     "task_status_pending": "Uploaded, waiting to process..."
+  },
+  "diagnostic": {
+    "title": "Diagnostic Package Export",
+    "description": "This feature collects runtime environment info, log files, config summaries, file structure, and other diagnostic data, packages them into a ZIP file for technical support offline troubleshooting.",
+    "privacy_note": "Privacy: The diagnostic package is automatically sanitized and does NOT contain sensitive information such as bank account numbers, amounts, or transaction details.",
+    "module_not_found": "Diagnostic export module not available",
+    "generating": "Generating diagnostic package, please wait...",
+    "success_msg": "Diagnostic package generated successfully!\n\nSaved to: {path}",
+    "failed_msg": "Failed to generate diagnostic package",
+    "choose_output_dir": "Choose Save Location",
+    "choose_output_dir_hint": "Choose save directory for diagnostic package?\n\nClick \"Yes\" to select manually, click \"No\" to save to program directory.",
+    "select_output_dir": "Please select diagnostic package save directory",
+    "offer_on_error_title": "An Error Occurred",
+    "offer_on_error_desc": "An error was detected during program execution. Would you like to generate a diagnostic package for technical support troubleshooting?\n\nThe package is automatically sanitized and does NOT contain any sensitive information (bank accounts, amounts, transaction details, etc.).",
+    "ask_export_yesno": "Generate diagnostic package? ([y]Yes / [n]No, default Yes): ",
+    "ask_export_yesno_gui": "Click \"Yes\" to generate diagnostic package, click \"No\" to skip.",
+    "crash_title": "Program Crashed",
+    "crash_message": "Program crash detected, error: {error}\n\nWould you like to generate a diagnostic package for technical support troubleshooting?"
   },
   "onboarding": {
     "welcome_title": "🎉 Welcome to Bank Statement Inspection Tool",

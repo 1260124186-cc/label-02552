@@ -50,7 +50,8 @@
     "option_duplicate_check": "  12)重复交易检测：跨文件去重与疑似重复标记",
     "option_interest_fee_check": "  13)利息手续费核对：筛选利息手续费交易，费率对比与异常检测",
     "option_balance_reconciliation": "  14)余额对账：导入银行对账单余额，与总表按账号比对并生成差异说明",
-    "enter_choice": "请输入选项（1-14，直接回车默认为 1）: ",
+    "option_diagnostic_export": "  17)诊断包导出：一键生成不含敏感信息的诊断包，便于技术支持排查",
+    "enter_choice": "请输入选项（1-17，直接回车默认为 1）: ",
     "select_incremental_mode": "请选择运行模式：",
     "option_incremental": "  1) 增量合并（推荐）：检测历史记录，仅追加新增数据",
     "option_full": "  2) 全量覆盖：重新生成总表，覆盖历史数据",
@@ -441,7 +442,10 @@
     "preset_desc": "管理任务配置预设",
     "balance_reconciliation_name": "余额对账",
     "balance_reconciliation": "余额对账",
-    "balance_reconciliation_desc": "导入银行对账单，与总表比对余额差异"
+    "balance_reconciliation_desc": "导入银行对账单，与总表比对余额差异",
+    "diagnostic_export_name": "诊断导出",
+    "diagnostic_export": "诊断导出",
+    "diagnostic_export_desc": "一键生成脱敏诊断包，技术支持专用"
   },
   "diff": {
     "summary": "变更汇总：新增 {added} 条，删除 {removed} 条，变更 {modified} 条",
@@ -506,6 +510,24 @@
     "task_cancelled_pipeline_msg": "任务已取消（流水线已完成执行）",
     "processing_failed": "处理失败: {error}",
     "task_status_pending": "已上传，等待处理..."
+  },
+  "diagnostic": {
+    "title": "远程诊断包一键导出",
+    "description": "本功能将收集运行环境信息、日志文件、配置摘要、文件结构等诊断数据，打包为 ZIP 压缩包，便于技术支持离线排查问题。",
+    "privacy_note": "🔒 隐私保护：诊断包已自动脱敏处理，不包含银行账号、金额、交易明细等敏感信息。",
+    "module_not_found": "诊断包导出模块不可用",
+    "generating": "正在生成诊断包，请稍候...",
+    "success_msg": "诊断包生成成功！\n\n保存路径：{path}",
+    "failed_msg": "诊断包生成失败",
+    "choose_output_dir": "选择保存位置",
+    "choose_output_dir_hint": "是否选择诊断包保存目录？\n\n点击「是」手动选择目录，点击「否」保存到程序目录。",
+    "select_output_dir": "请选择诊断包保存目录",
+    "offer_on_error_title": "遇到了问题",
+    "offer_on_error_desc": "检测到程序运行出错，是否生成诊断包以便技术支持排查？\n\n诊断包已自动脱敏，不包含任何敏感信息（银行账号、金额、交易明细等）。",
+    "ask_export_yesno": "是否生成诊断包？([y]是 / [n]否，默认是)：",
+    "ask_export_yesno_gui": "点击「是」生成诊断包，点击「否」不生成。",
+    "crash_title": "程序异常退出",
+    "crash_message": "检测到程序异常崩溃，错误信息：{error}\n\n是否生成诊断包以便技术支持排查问题？"
   },
   "onboarding": {
     "welcome_title": "🎉 欢迎使用银行流水检验工具",

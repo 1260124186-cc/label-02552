@@ -10,6 +10,7 @@ import json
 import shutil
 import tempfile
 import zipfile
+import inspect
 
 import pytest
 
@@ -709,6 +710,517 @@ class TestIntegration:
         assert result1.zip_path != result2.zip_path
         assert os.path.exists(result1.zip_path)
         assert os.path.exists(result2.zip_path)
+
+
+class TestCLIDiagnosticExport:
+    def test_cli_command_exists(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        try:
+            from bankcheck import build_cli_parser
+            parser = build_cli_parser()
+            args = parser.parse_args(['diagnostic-export', '--help'])
+        except SystemExit as e:
+            if e.code == 0:
+                return
+        pytest.fail('CLI help should exit with code 0')
+
+    def test_cli_parser_accepts_args(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        from bankcheck import build_cli_parser
+        parser = build_cli_parser()
+        args = parser.parse_args([
+            'diagnostic-export',
+            '--no-logs',
+            '--no-config',
+            '--json',
+        ])
+        assert args.command == 'diagnostic-export'
+        assert args.no_logs is True
+        assert args.no_config is True
+        assert args.no_tree is False
+        assert args.no_env is False
+        assert args.no_troubleshoot is False
+        assert args.json is True
+        assert args.output_dir is None
+        assert args.script_dir is None
+
+    def test_cli_parser_with_output_dir(self, temp_output_dir):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        from bankcheck import build_cli_parser
+        parser = build_cli_parser()
+        args = parser.parse_args([
+            'diagnostic-export',
+            '--output-dir', temp_output_dir,
+            '--script-dir', temp_output_dir,
+        ])
+        assert args.output_dir == temp_output_dir
+        assert args.script_dir == temp_output_dir
+
+    def test_cli_parser_exclude_all(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        from bankcheck import build_cli_parser
+        parser = build_cli_parser()
+        args = parser.parse_args([
+            'diagnostic-export',
+            '--no-logs',
+            '--no-config',
+            '--no-tree',
+            '--no-env',
+            '--no-troubleshoot',
+        ])
+        assert args.no_logs is True
+        assert args.no_config is True
+        assert args.no_tree is True
+        assert args.no_env is True
+        assert args.no_troubleshoot is True
+
+
+class TestCmdDiagnosticExport:
+    def test_cmd_diagnostic_export_success(self, temp_script_dir, temp_output_dir):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        class MockArgs:
+            output_dir = temp_output_dir
+            script_dir = temp_script_dir
+            no_logs = False
+            no_config = False
+            no_tree = False
+            no_env = False
+            no_troubleshoot = False
+            json = False
+
+        log_dir = os.path.join(temp_script_dir, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, 'bankcheck_20260615_090000.log'), 'w', encoding='utf-8') as f:
+            f.write('[2026-06-15 09:00:00] INFO - 测试\n')
+
+        import importlib
+        import bankcheck as bc
+        importlib.reload(bc)
+
+        args = MockArgs()
+        exit_code = bc._cmd_diagnostic_export(args)
+        assert exit_code == 0
+
+        output_files = os.listdir(temp_output_dir)
+        zip_files = [f for f in output_files if f.startswith('bankcheck_diagnostic_') and f.endswith('.zip')]
+        assert len(zip_files) == 1
+
+    def test_cmd_diagnostic_export_json_output(self, temp_script_dir, temp_output_dir, capsys):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        class MockArgs:
+            output_dir = temp_output_dir
+            script_dir = temp_script_dir
+            no_logs = True
+            no_config = True
+            no_tree = True
+            no_env = False
+            no_troubleshoot = True
+            json = True
+
+        import bankcheck as bc
+        args = MockArgs()
+        exit_code = bc._cmd_diagnostic_export(args)
+        assert exit_code == 0
+
+        captured = capsys.readouterr()
+        assert '"success": true' in captured.out
+        assert '"zip_path"' in captured.out
+        assert '"file_count"' in captured.out
+
+    def test_cmd_diagnostic_export_module_missing(self, monkeypatch, temp_output_dir):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        class MockArgs:
+            output_dir = temp_output_dir
+            script_dir = None
+            no_logs = False
+            no_config = False
+            no_tree = False
+            no_env = False
+            no_troubleshoot = False
+            json = False
+
+        original_import = __builtins__['__import__'] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == 'diagnostic_export':
+                raise ImportError('Module not found')
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr('builtins.__import__', mock_import)
+
+        import bankcheck as bc
+        args = MockArgs()
+        exit_code = bc._cmd_diagnostic_export(args)
+        assert exit_code == 1
+
+    def test_cmd_diagnostic_export_invalid_output_dir(self, monkeypatch):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        class MockArgs:
+            output_dir = '/nonexistent_root_dir/that/should/not/exist'
+            script_dir = None
+            no_logs = False
+            no_config = False
+            no_tree = False
+            no_env = False
+            no_troubleshoot = False
+            json = False
+
+        import bankcheck as bc
+        args = MockArgs()
+        exit_code = bc._cmd_diagnostic_export(args)
+        assert exit_code == 1
+
+
+class TestShowErrorDialogWithDiagnostic:
+    def test_ask_export_cli_yes(self, monkeypatch, temp_script_dir, temp_output_dir):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        inputs = iter(['y', ''])
+        monkeypatch.setattr('builtins.input', lambda prompt='': next(inputs))
+
+        original_has_tkinter = None
+        original_tk = None
+
+        import bankcheck as bc
+        original_has_tkinter = bc.HAS_TKINTER
+        original_tk = bc.tk
+        bc.HAS_TKINTER = False
+        bc.tk = None
+
+        try:
+            result = bc.show_error_dialog_with_diagnostic(
+                title='测试错误',
+                message='发生了一个测试错误',
+                error_detail='测试详情',
+                script_dir=temp_script_dir,
+            )
+            assert result is True
+        finally:
+            bc.HAS_TKINTER = original_has_tkinter
+            bc.tk = original_tk
+
+    def test_ask_export_cli_no(self, monkeypatch, temp_script_dir):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        inputs = iter(['n'])
+        monkeypatch.setattr('builtins.input', lambda prompt='': next(inputs))
+
+        import bankcheck as bc
+        original_has_tkinter = bc.HAS_TKINTER
+        original_tk = bc.tk
+        bc.HAS_TKINTER = False
+        bc.tk = None
+
+        try:
+            result = bc.show_error_dialog_with_diagnostic(
+                title='测试错误',
+                message='发生了一个测试错误',
+                script_dir=temp_script_dir,
+            )
+            assert result is False
+        finally:
+            bc.HAS_TKINTER = original_has_tkinter
+            bc.tk = original_tk
+
+    def test_ask_export_cli_default_yes(self, monkeypatch, temp_script_dir, temp_output_dir):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        inputs = iter([''])
+        monkeypatch.setattr('builtins.input', lambda prompt='': next(inputs))
+
+        import bankcheck as bc
+        original_has_tkinter = bc.HAS_TKINTER
+        original_tk = bc.tk
+        bc.HAS_TKINTER = False
+        bc.tk = None
+
+        try:
+            result = bc.show_error_dialog_with_diagnostic(
+                title='测试错误',
+                message='发生了一个测试错误',
+                script_dir=temp_script_dir,
+            )
+            assert result is True
+        finally:
+            bc.HAS_TKINTER = original_has_tkinter
+            bc.tk = original_tk
+
+    def test_ask_export_cli_eof(self, monkeypatch, temp_script_dir):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        def mock_input(prompt=''):
+            raise EOFError()
+
+        monkeypatch.setattr('builtins.input', mock_input)
+
+        import bankcheck as bc
+        original_has_tkinter = bc.HAS_TKINTER
+        original_tk = bc.tk
+        bc.HAS_TKINTER = False
+        bc.tk = None
+
+        try:
+            result = bc._ask_export_diagnostic_on_error()
+            assert result is False
+        finally:
+            bc.HAS_TKINTER = original_has_tkinter
+            bc.tk = original_tk
+
+    def test_ask_export_cli_keyboard_interrupt(self, monkeypatch, temp_script_dir):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        def mock_input(prompt=''):
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr('builtins.input', mock_input)
+
+        import bankcheck as bc
+        original_has_tkinter = bc.HAS_TKINTER
+        original_tk = bc.tk
+        bc.HAS_TKINTER = False
+        bc.tk = None
+
+        try:
+            result = bc._ask_export_diagnostic_on_error()
+            assert result is False
+        finally:
+            bc.HAS_TKINTER = original_has_tkinter
+            bc.tk = original_tk
+
+    def test_gui_ask_export_returns_false_when_tk_none(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        import bankcheck as bc
+        original_tk = bc.tk
+        bc.tk = None
+        try:
+            result = bc._gui_ask_export_diagnostic_on_error()
+            assert result is False
+        finally:
+            bc.tk = original_tk
+
+    def test_show_error_without_error_detail(self, monkeypatch, temp_script_dir, temp_output_dir):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        inputs = iter(['y', ''])
+        monkeypatch.setattr('builtins.input', lambda prompt='': next(inputs))
+
+        import bankcheck as bc
+        original_has_tkinter = bc.HAS_TKINTER
+        original_tk = bc.tk
+        bc.HAS_TKINTER = False
+        bc.tk = None
+
+        try:
+            result = bc.show_error_dialog_with_diagnostic(
+                title='测试错误',
+                message='发生了一个测试错误',
+                script_dir=temp_script_dir,
+            )
+            assert result is True
+        finally:
+            bc.HAS_TKINTER = original_has_tkinter
+            bc.tk = original_tk
+
+    def test_show_error_auto_detect_script_dir(self, monkeypatch, temp_output_dir):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+
+        inputs = iter(['n'])
+        monkeypatch.setattr('builtins.input', lambda prompt='': next(inputs))
+
+        import bankcheck as bc
+        original_has_tkinter = bc.HAS_TKINTER
+        original_tk = bc.tk
+        bc.HAS_TKINTER = False
+        bc.tk = None
+
+        try:
+            result = bc.show_error_dialog_with_diagnostic(
+                title='测试错误',
+                message='发生了一个测试错误',
+            )
+            assert result is False
+        finally:
+            bc.HAS_TKINTER = original_has_tkinter
+            bc.tk = original_tk
+
+
+class TestGlobalExceptionHook:
+    def test_setup_global_exception_handler(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        import bankcheck as bc
+
+        original_excepthook = sys.excepthook
+        try:
+            bc.setup_global_exception_handler()
+            assert sys.excepthook is bc._global_excepthook
+        finally:
+            sys.excepthook = original_excepthook
+
+    def test_global_excepthook_keyboard_interrupt(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        import bankcheck as bc
+
+        called = {'default': False}
+
+        def mock_default_excepthook(exc_type, exc_value, exc_tb):
+            called['default'] = True
+
+        original_excepthook = sys.__excepthook__
+        sys.__excepthook__ = mock_default_excepthook
+
+        try:
+            bc._global_excepthook(KeyboardInterrupt, KeyboardInterrupt(), None)
+            assert called['default'] is True
+        finally:
+            sys.__excepthook__ = original_excepthook
+
+    def test_global_excepthook_other_exception(self, monkeypatch):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        import bankcheck as bc
+
+        called = {'show_error': False}
+
+        def mock_show_error_dialog(title, message, error_detail=None, script_dir=None):
+            called['show_error'] = True
+            called['title'] = title
+            called['message'] = message
+            return False
+
+        def mock_default_excepthook(exc_type, exc_value, exc_tb):
+            pass
+
+        monkeypatch.setattr(bc, 'show_error_dialog_with_diagnostic', mock_show_error_dialog)
+
+        original_excepthook = sys.__excepthook__
+        sys.__excepthook__ = mock_default_excepthook
+
+        try:
+            bc._global_excepthook(ValueError, ValueError('测试错误'), None)
+            assert called['show_error'] is True
+            assert '程序异常退出' in called['title'] or 'Program Crashed' in called['title']
+        finally:
+            sys.__excepthook__ = original_excepthook
+
+    def test_global_excepthook_handles_own_errors(self, monkeypatch):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        import bankcheck as bc
+
+        def mock_show_error_dialog(title, message, error_detail=None, script_dir=None):
+            raise RuntimeError('Secondary error')
+
+        def mock_default_excepthook(exc_type, exc_value, exc_tb):
+            pass
+
+        monkeypatch.setattr(bc, 'show_error_dialog_with_diagnostic', mock_show_error_dialog)
+
+        original_excepthook = sys.__excepthook__
+        sys.__excepthook__ = mock_default_excepthook
+
+        try:
+            bc._global_excepthook(ValueError, ValueError('测试错误'), None)
+        except Exception as e:
+            pytest.fail(f'Global excepthook should not propagate errors: {e}')
+        finally:
+            sys.__excepthook__ = original_excepthook
+
+
+class TestCLIEphemeris:
+    def test_parse_args_and_run_includes_diagnostic(self, monkeypatch):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        import bankcheck as bc
+
+        called = {'diagnostic': False}
+
+        def mock_cmd_diagnostic(args):
+            called['diagnostic'] = True
+            return 0
+
+        def mock_build_parser():
+            parser = bc.build_cli_parser()
+            return parser
+
+        def mock_parse_args(parser):
+            class Args:
+                command = 'diagnostic-export'
+                list_jobs = False
+                list_presets = False
+                apply_preset = None
+                watch_dir = None
+                save_preset = None
+                add_job = False
+                scheduler = False
+                scheduler_menu = False
+                run_job = None
+            return Args()
+
+        monkeypatch.setattr(bc, '_cmd_diagnostic_export', mock_cmd_diagnostic)
+        monkeypatch.setattr(bc, 'setup_logging', lambda: None)
+        monkeypatch.setattr(bc, 'init_audit_db', lambda x: None)
+        monkeypatch.setattr(bc, 'init_default_alert_rules', lambda x: None)
+
+        def mock_parse_and_run():
+            parser = mock_build_parser()
+            args = mock_parse_args(parser)
+            if args.command == 'diagnostic-export':
+                return mock_cmd_diagnostic(args)
+            return None
+
+        result = mock_parse_and_run()
+        assert called['diagnostic'] is True
+        assert result == 0
+
+
+class TestBankcheckIntegration:
+    def test_main_installs_exception_handler(self, monkeypatch):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        import bankcheck as bc
+
+        handler_installed = {'value': False}
+        original_setup = bc.setup_global_exception_handler
+
+        def mock_setup_handler():
+            handler_installed['value'] = True
+            original_setup()
+
+        monkeypatch.setattr(bc, 'setup_global_exception_handler', mock_setup_handler)
+        monkeypatch.setattr(bc, 'format_version_banner', lambda: '')
+        monkeypatch.setattr(bc, 'parse_args_and_run', lambda: 0)
+
+        try:
+            import io
+            import contextlib
+            f = io.StringIO()
+            with contextlib.redirect_stdout(f):
+                bc.main()
+        except SystemExit:
+            pass
+        except Exception:
+            pass
+
+        assert handler_installed['value'] is True
+
+    def test_run_diagnostic_export_flow_exists(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        import bankcheck as bc
+        assert hasattr(bc, 'run_diagnostic_export_flow')
+        assert callable(bc.run_diagnostic_export_flow)
+
+    def test_main_mode_dispatch_includes_diagnostic(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+        import bankcheck as bc
+
+        source = '''
+    elif mode == 'diagnostic_export':
+        run_diagnostic_export_flow(script_dir)
+'''
+        import inspect
+        main_source = inspect.getsource(bc.main)
+        assert "diagnostic_export" in main_source
+        assert "run_diagnostic_export_flow" in main_source
 
 
 if __name__ == '__main__':

@@ -275,6 +275,157 @@ def cli_showwarning(title, message):
     print(f'\n[{t("gui.warning")} - {title}] {message}')
 
 
+def _ask_export_diagnostic_on_error():
+    """在错误发生后询问用户是否导出诊断包（CLI）"""
+    print()
+    print('=' * 60)
+    print(t('diagnostic.offer_on_error_title'))
+    print('=' * 60)
+    print(t('diagnostic.offer_on_error_desc'))
+    print()
+    try:
+        choice = input(t('diagnostic.ask_export_yesno')).strip().lower()
+        return choice in ['y', 'yes', '是', '1', '']
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def _gui_ask_export_diagnostic_on_error():
+    """在错误发生后询问用户是否导出诊断包（GUI）"""
+    try:
+        if tk is None:
+            return False
+        root = tk.Tk()
+        root.withdraw()
+        choice = messagebox.askyesno(
+            t('diagnostic.offer_on_error_title'),
+            t('diagnostic.offer_on_error_desc') + '\n\n' + t('diagnostic.ask_export_yesno_gui'),
+        )
+        root.destroy()
+        return choice
+    except Exception:
+        return False
+
+
+def show_error_dialog_with_diagnostic(title, message, error_detail=None, script_dir=None):
+    """
+    显示错误对话框，并询问用户是否导出诊断包。
+
+    适用于所有错误处理场景，遇错时一键触发诊断包导出。
+
+    Args:
+        title: 错误标题
+        message: 错误信息（用户友好）
+        error_detail: 技术错误详情（用于日志）
+        script_dir: 程序目录（默认自动检测）
+
+    Returns:
+        bool: 用户是否选择了导出诊断包（无论导出是否成功）
+    """
+    logger = get_logger()
+    if error_detail:
+        logger.error('[%s] %s - 详情: %s', title, message, error_detail, exc_info=True)
+    else:
+        logger.error('[%s] %s', title, message, exc_info=True)
+
+    show_warning(title, message)
+
+    if script_dir is None:
+        script_dir = get_script_dir()
+
+    if HAS_TKINTER and tk is not None:
+        user_wants_export = _gui_ask_export_diagnostic_on_error()
+    else:
+        user_wants_export = _ask_export_diagnostic_on_error()
+
+    if user_wants_export:
+        try:
+            from diagnostic_export import export_diagnostic_package, print_export_result
+            logger.info('用户选择导出诊断包，开始生成...')
+
+            output_dir = script_dir
+            if HAS_TKINTER and tk is not None:
+                try:
+                    root = tk.Tk()
+                    root.withdraw()
+                    choice = messagebox.askyesno(
+                        t('diagnostic.choose_output_dir'),
+                        t('diagnostic.choose_output_dir_hint'),
+                    )
+                    root.destroy()
+                    if choice:
+                        selected = filedialog.askdirectory(
+                            title=t('diagnostic.select_output_dir'),
+                        )
+                        if selected:
+                            output_dir = selected
+                except Exception:
+                    pass
+
+            result = export_diagnostic_package(
+                output_dir=output_dir,
+                script_dir=script_dir,
+            )
+            print_export_result(result)
+
+            if result.success and HAS_TKINTER and tk is not None:
+                show_info(
+                    t('common.success'),
+                    t('diagnostic.success_msg', path=result.zip_path),
+                )
+            elif not result.success:
+                show_warning(
+                    t('common.failed'),
+                    f'{t("diagnostic.failed_msg")}\n{result.error_message}',
+                )
+            return True
+        except Exception as e:
+            logger.error('诊断包导出失败: %s', e, exc_info=True)
+            show_warning(
+                t('common.failed'),
+                f'{t("diagnostic.failed_msg")}\n{e}',
+            )
+            return True
+    return False
+
+
+def _global_excepthook(exc_type, exc_value, exc_traceback):
+    """
+    全局未捕获异常处理器。
+    程序崩溃时自动记录崩溃信息，并询问用户是否导出诊断包。
+    """
+    logger = get_logger()
+
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    error_msg = f'{exc_type.__name__}: {exc_value}'
+    logger.critical(
+        '程序发生未捕获异常: %s', error_msg,
+        exc_info=(exc_type, exc_value, exc_traceback),
+    )
+
+    script_dir = get_script_dir()
+
+    try:
+        show_error_dialog_with_diagnostic(
+            title=t('diagnostic.crash_title'),
+            message=t('diagnostic.crash_message', error=error_msg),
+            error_detail=error_msg,
+            script_dir=script_dir,
+        )
+    except Exception:
+        pass
+
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+
+def setup_global_exception_handler():
+    """安装全局异常处理器"""
+    sys.excepthook = _global_excepthook
+
+
 def cli_askfile(title=None):
     """命令行模式下让用户输入文件路径"""
     if title is None:
@@ -461,6 +612,7 @@ def cli_askmode():
     print(t('cli.option_balance_reconciliation'))
     print('  15) 非工作日交易标记')
     print('  16) 批量文件夹处理')
+    print(t('cli.option_diagnostic_export'))
     choice = input(t('cli.enter_choice')).strip()
     if choice == '2':
         return 'diff'
@@ -492,6 +644,8 @@ def cli_askmode():
         return 'holiday_check'
     elif choice == '16':
         return 'batch_pipeline'
+    elif choice == '17':
+        return 'diagnostic_export'
     return 'pipeline'
 
 
@@ -533,7 +687,7 @@ def _gui_askmode_full():
         raise RuntimeError('Mock Tk detected')
 
     root.title(t('gui.mode_window_title'))
-    root.geometry('480x730')
+    root.geometry('480x780')
     root.resizable(False, False)
 
     result = {'mode': None}
@@ -563,6 +717,7 @@ def _gui_askmode_full():
         (t('modes.db_stats_name'), 'db_stats', t('modes.db_stats_desc'), '#795548'),
         (t('modes.batch_history_name'), 'batch_history', t('modes.batch_history_desc'), '#E91E63'),
         (t('modes.preset_name'), 'preset', t('modes.preset_desc'), '#FF5722'),
+        (t('modes.diagnostic_export_name'), 'diagnostic_export', t('modes.diagnostic_export_desc'), '#795548'),
     ]
 
     for i, (name, mode, desc, color) in enumerate(modes):
@@ -12245,7 +12400,8 @@ def build_cli_parser():
                '  python bankcheck.py process /path/to/folder --no-incremental\n'
                '  python bankcheck.py validate-lookup\n'
                '  python bankcheck.py validate-lookup --lookup-file /path/to/主体查找表.xlsx\n'
-               '  python bankcheck.py version\n',
+               '  python bankcheck.py version\n'
+               '  python bankcheck.py diagnostic-export --output-dir /path/to/output\n',
     )
 
     subparsers = parser.add_subparsers(dest='command', help='可用子命令')
@@ -12421,6 +12577,66 @@ def build_cli_parser():
     version_parser = subparsers.add_parser(
         'version',
         help='显示版本信息',
+    )
+
+    diagnostic_parser = subparsers.add_parser(
+        'diagnostic-export',
+        help='一键导出远程诊断包（不含敏感信息）',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='示例:\n'
+               '  python bankcheck.py diagnostic-export\n'
+               '  python bankcheck.py diagnostic-export --output-dir /path/to/output\n'
+               '  python bankcheck.py diagnostic-export --no-logs --no-config\n',
+    )
+    diagnostic_parser.add_argument(
+        '--output-dir', '-o',
+        type=str,
+        metavar='DIR',
+        default=None,
+        help='指定诊断包输出目录（默认: 程序所在目录）',
+    )
+    diagnostic_parser.add_argument(
+        '--script-dir', '-s',
+        type=str,
+        metavar='DIR',
+        default=None,
+        help='指定程序目录（默认: 自动检测）',
+    )
+    diagnostic_parser.add_argument(
+        '--no-logs',
+        action='store_true',
+        default=False,
+        help='不包含日志文件',
+    )
+    diagnostic_parser.add_argument(
+        '--no-config',
+        action='store_true',
+        default=False,
+        help='不包含配置摘要',
+    )
+    diagnostic_parser.add_argument(
+        '--no-tree',
+        action='store_true',
+        default=False,
+        help='不包含文件结构摘要',
+    )
+    diagnostic_parser.add_argument(
+        '--no-env',
+        action='store_true',
+        default=False,
+        help='不包含环境信息',
+    )
+    diagnostic_parser.add_argument(
+        '--no-troubleshoot',
+        action='store_true',
+        default=False,
+        help='不包含排障报告',
+    )
+    diagnostic_parser.add_argument(
+        '--json',
+        action='store_true',
+        default=False,
+        help='以 JSON 格式输出执行结果',
     )
 
     parser.add_argument('--scheduler', action='store_true', help='启动定时调度器')
@@ -12773,6 +12989,56 @@ def _cmd_version(args):
     return 0
 
 
+def _cmd_diagnostic_export(args):
+    """CLI 子命令处理：一键导出诊断包"""
+    script_dir = args.script_dir or get_script_dir()
+    output_dir = args.output_dir or script_dir
+    logger = get_logger()
+
+    logger.info('========== 远程诊断包导出（CLI） ==========')
+
+    try:
+        from diagnostic_export import export_diagnostic_package, print_export_result
+    except ImportError as e:
+        msg = f'诊断包导出模块加载失败: {e}'
+        logger.error(msg)
+        print(f'错误: {msg}')
+        return 1
+
+    print()
+    print('=' * 60)
+    print('  远程诊断包一键导出')
+    print('=' * 60)
+    print('  本诊断包已脱敏处理，不包含银行账号、金额、交易明细等敏感信息。')
+    print(f'  输出目录: {output_dir}')
+    print()
+    print('  正在生成诊断包...')
+    print()
+
+    result = export_diagnostic_package(
+        output_dir=output_dir,
+        script_dir=script_dir,
+        include_logs=not args.no_logs,
+        include_config=not args.no_config,
+        include_file_tree=not args.no_tree,
+        include_env_info=not args.no_env,
+        include_troubleshooting=not args.no_troubleshoot,
+    )
+
+    if args.json:
+        import json as _json
+        print(_json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print_export_result(result)
+
+    if result.success:
+        logger.info('诊断包导出成功: %s', result.zip_path)
+        return 0
+    else:
+        logger.error('诊断包导出失败: %s', result.error_message)
+        return 1
+
+
 def parse_args_and_run():
     parser = build_cli_parser()
     args = parser.parse_args()
@@ -12792,6 +13058,9 @@ def parse_args_and_run():
 
     if args.command == 'version':
         sys.exit(_cmd_version(args))
+
+    if args.command == 'diagnostic-export':
+        sys.exit(_cmd_diagnostic_export(args))
 
     if args.list_jobs:
         jobs = list_schedule_jobs(script_dir)
@@ -13555,6 +13824,8 @@ def open_voucher_attachments_for_transaction(transaction_id: str, script_dir=Non
 def main():
     script_dir = get_script_dir()
 
+    setup_global_exception_handler()
+
     print()
     print(format_version_banner())
     print()
@@ -13628,6 +13899,8 @@ def main():
         run_balance_reconciliation_flow(script_dir)
     elif mode == 'holiday_check':
         run_holiday_check_flow(script_dir)
+    elif mode == 'diagnostic_export':
+        run_diagnostic_export_flow(script_dir)
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
@@ -21727,6 +22000,80 @@ def run_holiday_check_flow(script_dir):
         logger.error('非工作日交易标记报告导出失败: %s', e, exc_info=True)
 
     logger.info('========== 非工作日交易标记结束 ==========')
+
+
+# ──────────────────────────────────────────────
+# 远程诊断包导出流程
+# ──────────────────────────────────────────────
+
+def run_diagnostic_export_flow(script_dir):
+    """远程诊断包一键导出流程"""
+    logger = get_logger()
+    logger.info('========== 远程诊断包导出开始 ==========')
+
+    print('\n' + '=' * 60)
+    print(t('diagnostic.title'))
+    print('=' * 60)
+    print()
+    print(t('diagnostic.description'))
+    print(t('diagnostic.privacy_note'))
+    print()
+
+    try:
+        from diagnostic_export import export_diagnostic_package, print_export_result
+    except ImportError as e:
+        msg = f'{t("diagnostic.module_not_found")}: {e}'
+        show_warning(t('common.error'), msg)
+        logger.error('诊断包导出模块导入失败: %s', e)
+        return
+
+    output_dir = None
+    if tk is not None:
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            choice = messagebox.askyesno(
+                t('diagnostic.choose_output_dir'),
+                t('diagnostic.choose_output_dir_hint'),
+            )
+            root.destroy()
+            if choice:
+                output_dir = filedialog.askdirectory(
+                    title=t('diagnostic.select_output_dir'),
+                )
+                if not output_dir:
+                    show_info(t('common.info'), t('gui.no_folder_selected'))
+                    return
+        except Exception:
+            pass
+
+    if not output_dir:
+        output_dir = script_dir
+
+    print(t('diagnostic.generating'))
+    print()
+
+    result = export_diagnostic_package(
+        output_dir=output_dir,
+        script_dir=script_dir,
+    )
+
+    print_export_result(result)
+
+    if result.success:
+        show_info(
+            t('common.success'),
+            t('diagnostic.success_msg', path=result.zip_path),
+        )
+        logger.info('诊断包导出成功: %s', result.zip_path)
+    else:
+        show_warning(
+            t('common.failed'),
+            f'{t("diagnostic.failed_msg")}\n{result.error_message}',
+        )
+        logger.error('诊断包导出失败: %s', result.error_message)
+
+    logger.info('========== 远程诊断包导出结束 ==========')
 
 
 # ──────────────────────────────────────────────
