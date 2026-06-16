@@ -12699,143 +12699,170 @@ def _cmd_process(args):
     logger = get_logger()
     script_dir = get_script_dir()
 
-    folder = os.path.abspath(args.folder)
-    if not os.path.isdir(folder):
-        logger.error('目录不存在: %s', folder)
-        print(f'错误: 目录不存在 {folder}')
-        return 1
-
-    incremental = not args.no_incremental
-    keep_strategy = args.keep_strategy
-    archive_dir_name = args.archive_dir_name
-    output_dir = args.output_dir
-    enabled_banks = args.enabled_banks
-    start_date = args.start_date
-    end_date = args.end_date
-    batch_id = args.batch_id
-    dry_run = args.dry_run
-    auto_commit = args.auto_commit
-
-    if dry_run:
-        print('\n🔬 试运行模式：仅生成统计与异常报告，不执行删除与写盘操作')
-        if auto_commit:
-            print('⚡ 自动提交模式：试运行完成后将自动执行写盘操作')
-
-    if args.preset:
-        preset = load_preset(args.preset, script_dir)
-        if not preset:
-            logger.error('未找到预设ID: %s', args.preset)
-            print(f'错误: 未找到预设ID {args.preset}')
+    try:
+        folder = os.path.abspath(args.folder)
+        if not os.path.isdir(folder):
+            logger.error('目录不存在: %s', folder)
+            error_msg = f'目录不存在 {folder}'
+            print(f'错误: {error_msg}')
+            show_error_dialog_with_diagnostic(
+                title=t('gui.error'),
+                message=error_msg,
+                error_detail=error_msg,
+                script_dir=script_dir,
+            )
             return 1
-        print(f'应用预设: {preset.get("name", "")} ({args.preset})')
-        print(f'处理目录: {folder}')
-        with AuditLogger('preset_pipeline', script_dir) as audit:
-            audit.record_input(folder)
-            audit.set_extra_info({'preset_id': args.preset, 'preset_name': preset.get('name', ''),
-                                  'dry_run': dry_run, 'auto_commit': auto_commit})
-            result = apply_preset_to_pipeline(preset, folder, script_dir, dry_run=dry_run)
-            audit.record_result(result)
-    else:
-        logger.info('CLI process: 目录=%s, 增量=%s, 保留策略=%s, dry_run=%s',
-                    folder, incremental, keep_strategy, dry_run)
 
-        result = run_pipeline_with_options(
-            folder=folder,
-            script_dir=script_dir,
-            incremental=incremental,
-            enabled_banks=enabled_banks,
-            keep_strategy=keep_strategy,
-            start_date=start_date,
-            end_date=end_date,
-            batch_id=batch_id,
-            output_dir=output_dir,
-            enable_encryption=args.enable_encryption,
-            encryption_password=args.encryption_password,
-            encryption_mode=args.encryption_mode,
-            dry_run=dry_run,
-            archive_dir_name=archive_dir_name,
-            folder_strategy=args.folder_strategy,
-            folder_output_dir=args.folder_output_dir,
-            folder_suffix=args.folder_suffix,
-        )
+        incremental = not args.no_incremental
+        keep_strategy = args.keep_strategy
+        archive_dir_name = args.archive_dir_name
+        output_dir = args.output_dir
+        enabled_banks = args.enabled_banks
+        start_date = args.start_date
+        end_date = args.end_date
+        batch_id = args.batch_id
+        dry_run = args.dry_run
+        auto_commit = args.auto_commit
 
-    if result.folder_empty:
-        print(f'\n⚠️  文件夹中未发现任何 Excel 文件')
-        return 0
+        if dry_run:
+            print('\n🔬 试运行模式：仅生成统计与异常报告，不执行删除与写盘操作')
+            if auto_commit:
+                print('⚡ 自动提交模式：试运行完成后将自动执行写盘操作')
 
-    committed = False
-    if result.dry_run and result.all_rows:
-        msg = format_result_message(result)
-        print('\n' + msg)
-        if auto_commit:
-            print('\n⚡ 自动提交试运行变更...')
-            result = commit_pipeline_changes(result)
-            committed = True
+        if args.preset:
+            preset = load_preset(args.preset, script_dir)
+            if not preset:
+                logger.error('未找到预设ID: %s', args.preset)
+                error_msg = f'未找到预设ID {args.preset}'
+                print(f'错误: {error_msg}')
+                show_error_dialog_with_diagnostic(
+                    title=t('gui.error'),
+                    message=error_msg,
+                    error_detail=error_msg,
+                    script_dir=script_dir,
+                )
+                return 1
+            print(f'应用预设: {preset.get("name", "")} ({args.preset})')
+            print(f'处理目录: {folder}')
+            with AuditLogger('preset_pipeline', script_dir) as audit:
+                audit.record_input(folder)
+                audit.set_extra_info({'preset_id': args.preset, 'preset_name': preset.get('name', ''),
+                                      'dry_run': dry_run, 'auto_commit': auto_commit})
+                result = apply_preset_to_pipeline(preset, folder, script_dir, dry_run=dry_run)
+                audit.record_result(result)
         else:
-            print('\n是否确认提交并执行正式写盘操作？')
-            print('  - 删除已处理成功的源文件（按保留策略）')
-            print('  - 写入/覆盖银行流水总表与脱敏版总表')
-            print('  - 执行数据库持久化（如已配置）')
-            print('  - 执行文件加密（如已启用）')
-            choice = input('\n请确认提交 (y/N): ').strip().lower()
-            if choice in ('y', 'yes'):
-                print('\n📝 正在提交试运行变更...')
+            logger.info('CLI process: 目录=%s, 增量=%s, 保留策略=%s, dry_run=%s',
+                        folder, incremental, keep_strategy, dry_run)
+
+            result = run_pipeline_with_options(
+                folder=folder,
+                script_dir=script_dir,
+                incremental=incremental,
+                enabled_banks=enabled_banks,
+                keep_strategy=keep_strategy,
+                start_date=start_date,
+                end_date=end_date,
+                batch_id=batch_id,
+                output_dir=output_dir,
+                enable_encryption=args.enable_encryption,
+                encryption_password=args.encryption_password,
+                encryption_mode=args.encryption_mode,
+                dry_run=dry_run,
+                archive_dir_name=archive_dir_name,
+                folder_strategy=args.folder_strategy,
+                folder_output_dir=args.folder_output_dir,
+                folder_suffix=args.folder_suffix,
+            )
+
+        if result.folder_empty:
+            print(f'\n⚠️  文件夹中未发现任何 Excel 文件')
+            return 0
+
+        committed = False
+        if result.dry_run and result.all_rows:
+            msg = format_result_message(result)
+            print('\n' + msg)
+            if auto_commit:
+                print('\n⚡ 自动提交试运行变更...')
                 result = commit_pipeline_changes(result)
                 committed = True
             else:
-                print('\n⏭️  已取消提交，未执行任何删除与写盘操作。')
-                result.changes_committed = False
+                print('\n是否确认提交并执行正式写盘操作？')
+                print('  - 删除已处理成功的源文件（按保留策略）')
+                print('  - 写入/覆盖银行流水总表与脱敏版总表')
+                print('  - 执行数据库持久化（如已配置）')
+                print('  - 执行文件加密（如已启用）')
+                choice = input('\n请确认提交 (y/N): ').strip().lower()
+                if choice in ('y', 'yes'):
+                    print('\n📝 正在提交试运行变更...')
+                    result = commit_pipeline_changes(result)
+                    committed = True
+                else:
+                    print('\n⏭️  已取消提交，未执行任何删除与写盘操作。')
+                    result.changes_committed = False
 
-    if result.all_rows:
-        if committed:
-            print(f'\n✅ 提交完成！')
-        elif result.dry_run and not result.changes_committed:
-            print(f'\n⏭️  试运行完成（未提交）')
+        if result.all_rows:
+            if committed:
+                print(f'\n✅ 提交完成！')
+            elif result.dry_run and not result.changes_committed:
+                print(f'\n⏭️  试运行完成（未提交）')
+            else:
+                print(f'\n✅ 处理完成！')
+            print(f'   总记录数: {len(result.all_rows)}')
+            print(f'   新增记录: {result.new_record_count}')
+            print(f'   已处理文件: {len(result.processed_files)}')
+            if result.output_path:
+                print(f'   输出文件: {result.output_path}')
+            elif result.dry_run and not committed:
+                print(f'   输出文件: (试运行未写盘)')
+            if result.masked_output_path:
+                print(f'   脱敏版总表: {result.masked_output_path}')
+            elif result.dry_run and not committed:
+                print(f'   脱敏版总表: (试运行未生成)')
+            if result.lookup_missing:
+                print(f'   ⚠️  未找到主体查找表，"主体"列为空')
+            if result.unprocessed_files:
+                print(f'   无法识别的文件: {len(result.unprocessed_files)} 个')
+            if result.error_files:
+                print(f'   处理出错的文件: {len(result.error_files)} 个')
+                for fpath, err in result.error_files:
+                    print(f'     - {os.path.basename(fpath)}: {err}')
+            if result.balance_check_path:
+                print(f'   余额校验报告: {result.balance_check_path}')
+            if result.duplicate_check_path:
+                print(f'   重复交易报告: {result.duplicate_check_path}')
+            if result.interest_fee_check_path:
+                print(f'   利息手续费报告: {result.interest_fee_check_path}')
+            if result.holiday_check_path:
+                print(f'   非工作日交易报告: {result.holiday_check_path}')
+            if result.subject_summary_path:
+                print(f'   主体汇总分析: {result.subject_summary_path}')
+            if HAS_DATABASE and (result.db_inserted_count > 0 or result.db_duplicate_count > 0):
+                print(f'   数据库入库: {result.db_inserted_count} 条新增, {result.db_duplicate_count} 条重复跳过')
+            elif HAS_DATABASE and result.dry_run and not committed:
+                print(f'   数据库入库: (试运行未执行)')
+            return 0
         else:
-            print(f'\n✅ 处理完成！')
-        print(f'   总记录数: {len(result.all_rows)}')
-        print(f'   新增记录: {result.new_record_count}')
-        print(f'   已处理文件: {len(result.processed_files)}')
-        if result.output_path:
-            print(f'   输出文件: {result.output_path}')
-        elif result.dry_run and not committed:
-            print(f'   输出文件: (试运行未写盘)')
-        if result.masked_output_path:
-            print(f'   脱敏版总表: {result.masked_output_path}')
-        elif result.dry_run and not committed:
-            print(f'   脱敏版总表: (试运行未生成)')
-        if result.lookup_missing:
-            print(f'   ⚠️  未找到主体查找表，"主体"列为空')
-        if result.unprocessed_files:
-            print(f'   无法识别的文件: {len(result.unprocessed_files)} 个')
-        if result.error_files:
-            print(f'   处理出错的文件: {len(result.error_files)} 个')
-            for fpath, err in result.error_files:
-                print(f'     - {os.path.basename(fpath)}: {err}')
-        if result.balance_check_path:
-            print(f'   余额校验报告: {result.balance_check_path}')
-        if result.duplicate_check_path:
-            print(f'   重复交易报告: {result.duplicate_check_path}')
-        if result.interest_fee_check_path:
-            print(f'   利息手续费报告: {result.interest_fee_check_path}')
-        if result.holiday_check_path:
-            print(f'   非工作日交易报告: {result.holiday_check_path}')
-        if result.subject_summary_path:
-            print(f'   主体汇总分析: {result.subject_summary_path}')
-        if HAS_DATABASE and (result.db_inserted_count > 0 or result.db_duplicate_count > 0):
-            print(f'   数据库入库: {result.db_inserted_count} 条新增, {result.db_duplicate_count} 条重复跳过')
-        elif HAS_DATABASE and result.dry_run and not committed:
-            print(f'   数据库入库: (试运行未执行)')
-        return 0
-    else:
-        print(f'\n⚠️  未提取到任何银行流水记录')
-        if result.unprocessed_files:
-            print(f'   无法识别的文件: {len(result.unprocessed_files)} 个')
-        if result.error_files:
-            print(f'   处理出错的文件: {len(result.error_files)} 个')
-            for fpath, err in result.error_files:
-                print(f'     - {os.path.basename(fpath)}: {err}')
-        return 0
+            print(f'\n⚠️  未提取到任何银行流水记录')
+            if result.unprocessed_files:
+                print(f'   无法识别的文件: {len(result.unprocessed_files)} 个')
+            if result.error_files:
+                print(f'   处理出错的文件: {len(result.error_files)} 个')
+                for fpath, err in result.error_files:
+                    print(f'     - {os.path.basename(fpath)}: {err}')
+            return 0
+
+    except Exception as e:
+        error_msg = f'{type(e).__name__}: {e}'
+        logger.error('处理流程发生异常: %s', error_msg, exc_info=True)
+        print(f'\n❌ 处理失败: {error_msg}')
+        show_error_dialog_with_diagnostic(
+            title=t('gui.error'),
+            message=t('diagnostic.crash_message', error=error_msg),
+            error_detail=error_msg,
+            script_dir=script_dir,
+        )
+        return 1
 
 
 def _cmd_validate_lookup(args):
@@ -12844,141 +12871,174 @@ def _cmd_validate_lookup(args):
     script_dir = get_script_dir()
     logger = get_logger()
 
-    lookup_file = args.lookup_file
-    if lookup_file is None:
-        lookup_file = find_lookup_file(script_dir)
-
-    issues = []
-    warnings = []
-
-    if lookup_file is None or not os.path.isfile(lookup_file):
-        msg = '未找到主体查找表文件'
-        issues.append(msg)
-        if args.json:
-            print(_json.dumps({'valid': False, 'issues': issues, 'warnings': warnings},
-                              ensure_ascii=False, indent=2))
-        else:
-            print(f'❌ {msg}')
-        return 1 if args.strict else 0
-
-    if not args.json:
-        print(f'正在校验查找表: {lookup_file}')
-
     try:
-        lookup_data = load_lookup_table(lookup_file)
+        lookup_file = args.lookup_file
+        if lookup_file is None:
+            lookup_file = find_lookup_file(script_dir)
+
+        issues = []
+        warnings = []
+
+        if lookup_file is None or not os.path.isfile(lookup_file):
+            msg = '未找到主体查找表文件'
+            issues.append(msg)
+            if args.json:
+                print(_json.dumps({'valid': False, 'issues': issues, 'warnings': warnings},
+                                  ensure_ascii=False, indent=2))
+            else:
+                print(f'❌ {msg}')
+                show_error_dialog_with_diagnostic(
+                    title=t('gui.error'),
+                    message=msg,
+                    error_detail=msg,
+                    script_dir=script_dir,
+                )
+            return 1 if args.strict else 0
+
+        if not args.json:
+            print(f'正在校验查找表: {lookup_file}')
+
+        try:
+            lookup_data = load_lookup_table(lookup_file)
+        except Exception as e:
+            msg = f'查找表加载失败: {e}'
+            issues.append(msg)
+            if args.json:
+                print(_json.dumps({'valid': False, 'issues': issues, 'warnings': warnings, 'file': lookup_file},
+                                  ensure_ascii=False, indent=2))
+            else:
+                print(f'❌ {msg}')
+                show_error_dialog_with_diagnostic(
+                    title=t('gui.error'),
+                    message=msg,
+                    error_detail=msg,
+                    script_dir=script_dir,
+                )
+            return 1 if args.strict else 0
+
+        by_account = lookup_data.get('by_account', {})
+        all_entries = lookup_data.get('all_entries', [])
+
+        if not all_entries:
+            msg = '查找表为空，没有任何条目'
+            issues.append(msg)
+
+        empty_subject_count = 0
+        empty_account_count = 0
+        duplicate_account_entries = []
+
+        seen_account_keys = {}
+        for entry in all_entries:
+            subject = entry.get('subject', '').strip()
+            account_raw = str(entry.get('account_raw', '')).strip()
+            account_key = entry.get('account_key', '').strip()
+
+            if not subject:
+                empty_subject_count += 1
+            if not account_raw:
+                empty_account_count += 1
+
+            if account_key:
+                if account_key not in seen_account_keys:
+                    seen_account_keys[account_key] = []
+                seen_account_keys[account_key].append(subject)
+
+        if empty_subject_count > 0:
+            msg = f'存在 {empty_subject_count} 条主体为空的记录'
+            issues.append(msg)
+
+        if empty_account_count > 0:
+            msg = f'存在 {empty_account_count} 条账号为空的记录'
+            issues.append(msg)
+
+        for account_key, subjects in seen_account_keys.items():
+            unique_subjects = list(set(s for s in subjects if s))
+            if len(unique_subjects) > 1:
+                duplicate_account_entries.append({
+                    'account': account_key,
+                    'subjects': unique_subjects,
+                    'count': len(subjects),
+                })
+
+        if duplicate_account_entries:
+            msg = f'存在 {len(duplicate_account_entries)} 个账号映射到多个不同主体'
+            issues.append(msg)
+            for dup in duplicate_account_entries:
+                detail = f'  账号 {dup["account"]} -> {", ".join(dup["subjects"])}'
+                issues.append(detail)
+
+        try:
+            from lookup_manager import get_duplicate_entries as _get_dup_entries
+            dup_entries = _get_dup_entries(lookup_file)
+            if dup_entries and not duplicate_account_entries:
+                msg = f'查找表存在 {len(dup_entries)} 组重复账号条目'
+                warnings.append(msg)
+        except Exception:
+            pass
+
+        file_size = os.path.getsize(lookup_file)
+        if file_size == 0:
+            msg = '查找表文件大小为 0 字节'
+            issues.append(msg)
+
+        is_valid = len([i for i in issues if not i.startswith('  ')]) == 0
+
+        result = {
+            'valid': is_valid,
+            'file': lookup_file,
+            'total_entries': len(all_entries),
+            'unique_accounts': len(by_account),
+            'issues': [i for i in issues if not i.startswith('  ')],
+            'warnings': warnings,
+            'duplicate_accounts': duplicate_account_entries,
+        }
+
+        if args.json:
+            print(_json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            if is_valid:
+                print(f'✅ 查找表校验通过')
+            else:
+                print(f'❌ 查找表校验未通过')
+            print(f'   文件: {lookup_file}')
+            print(f'   总条目数: {len(all_entries)}')
+            print(f'   唯一账号数: {len(by_account)}')
+            if issues:
+                problem_issues = [i for i in issues if not i.startswith('  ')]
+                detail_issues = [i for i in issues if i.startswith('  ')]
+                if problem_issues:
+                    print(f'   问题 ({len(problem_issues)} 个):')
+                    for issue in problem_issues:
+                        print(f'     - {issue}')
+                if detail_issues:
+                    for issue in detail_issues:
+                        print(f'     {issue}')
+            if warnings:
+                print(f'   警告 ({len(warnings)} 个):')
+                for w in warnings:
+                    print(f'     - {w}')
+
+        return 0 if is_valid or not args.strict else 1
+
     except Exception as e:
-        msg = f'查找表加载失败: {e}'
-        issues.append(msg)
-        if args.json:
-            print(_json.dumps({'valid': False, 'issues': issues, 'warnings': warnings, 'file': lookup_file},
-                              ensure_ascii=False, indent=2))
+        error_msg = f'{type(e).__name__}: {e}'
+        logger.error('查找表校验发生异常: %s', error_msg, exc_info=True)
+        if not args.json:
+            print(f'\n❌ 查找表校验失败: {error_msg}')
+            show_error_dialog_with_diagnostic(
+                title=t('gui.error'),
+                message=t('diagnostic.crash_message', error=error_msg),
+                error_detail=error_msg,
+                script_dir=script_dir,
+            )
         else:
-            print(f'❌ {msg}')
-        return 1 if args.strict else 0
-
-    by_account = lookup_data.get('by_account', {})
-    all_entries = lookup_data.get('all_entries', [])
-
-    if not all_entries:
-        msg = '查找表为空，没有任何条目'
-        issues.append(msg)
-
-    empty_subject_count = 0
-    empty_account_count = 0
-    duplicate_account_entries = []
-
-    seen_account_keys = {}
-    for entry in all_entries:
-        subject = entry.get('subject', '').strip()
-        account_raw = str(entry.get('account_raw', '')).strip()
-        account_key = entry.get('account_key', '').strip()
-
-        if not subject:
-            empty_subject_count += 1
-        if not account_raw:
-            empty_account_count += 1
-
-        if account_key:
-            if account_key not in seen_account_keys:
-                seen_account_keys[account_key] = []
-            seen_account_keys[account_key].append(subject)
-
-    if empty_subject_count > 0:
-        msg = f'存在 {empty_subject_count} 条主体为空的记录'
-        issues.append(msg)
-
-    if empty_account_count > 0:
-        msg = f'存在 {empty_account_count} 条账号为空的记录'
-        issues.append(msg)
-
-    for account_key, subjects in seen_account_keys.items():
-        unique_subjects = list(set(s for s in subjects if s))
-        if len(unique_subjects) > 1:
-            duplicate_account_entries.append({
-                'account': account_key,
-                'subjects': unique_subjects,
-                'count': len(subjects),
-            })
-
-    if duplicate_account_entries:
-        msg = f'存在 {len(duplicate_account_entries)} 个账号映射到多个不同主体'
-        issues.append(msg)
-        for dup in duplicate_account_entries:
-            detail = f'  账号 {dup["account"]} -> {", ".join(dup["subjects"])}'
-            issues.append(detail)
-
-    try:
-        from lookup_manager import get_duplicate_entries as _get_dup_entries
-        dup_entries = _get_dup_entries(lookup_file)
-        if dup_entries and not duplicate_account_entries:
-            msg = f'查找表存在 {len(dup_entries)} 组重复账号条目'
-            warnings.append(msg)
-    except Exception:
-        pass
-
-    file_size = os.path.getsize(lookup_file)
-    if file_size == 0:
-        msg = '查找表文件大小为 0 字节'
-        issues.append(msg)
-
-    is_valid = len([i for i in issues if not i.startswith('  ')]) == 0
-
-    result = {
-        'valid': is_valid,
-        'file': lookup_file,
-        'total_entries': len(all_entries),
-        'unique_accounts': len(by_account),
-        'issues': [i for i in issues if not i.startswith('  ')],
-        'warnings': warnings,
-        'duplicate_accounts': duplicate_account_entries,
-    }
-
-    if args.json:
-        print(_json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        if is_valid:
-            print(f'✅ 查找表校验通过')
-        else:
-            print(f'❌ 查找表校验未通过')
-        print(f'   文件: {lookup_file}')
-        print(f'   总条目数: {len(all_entries)}')
-        print(f'   唯一账号数: {len(by_account)}')
-        if issues:
-            problem_issues = [i for i in issues if not i.startswith('  ')]
-            detail_issues = [i for i in issues if i.startswith('  ')]
-            if problem_issues:
-                print(f'   问题 ({len(problem_issues)} 个):')
-                for issue in problem_issues:
-                    print(f'     - {issue}')
-            if detail_issues:
-                for issue in detail_issues:
-                    print(f'     {issue}')
-        if warnings:
-            print(f'   警告 ({len(warnings)} 个):')
-            for w in warnings:
-                print(f'     - {w}')
-
-    return 0 if is_valid or not args.strict else 1
+            print(_json.dumps({
+                'valid': False,
+                'error': error_msg,
+                'issues': [error_msg],
+                'warnings': [],
+            }, ensure_ascii=False, indent=2))
+        return 1
 
 
 def _cmd_version(args):
@@ -13095,13 +13155,27 @@ def parse_args_and_run():
         preset = load_preset(args.apply_preset, script_dir)
         if not preset:
             logger.error('未找到预设ID: %s', args.apply_preset)
-            print(f'错误: 未找到预设ID {args.apply_preset}')
+            error_msg = f'未找到预设ID {args.apply_preset}'
+            print(f'错误: {error_msg}')
+            show_error_dialog_with_diagnostic(
+                title=t('gui.error'),
+                message=error_msg,
+                error_detail=error_msg,
+                script_dir=script_dir,
+            )
             return True
 
         watch_dir = os.path.abspath(args.watch_dir)
         if not os.path.isdir(watch_dir):
             logger.error('目录不存在: %s', watch_dir)
-            print(f'错误: 目录不存在 {watch_dir}')
+            error_msg = f'目录不存在 {watch_dir}'
+            print(f'错误: {error_msg}')
+            show_error_dialog_with_diagnostic(
+                title=t('gui.error'),
+                message=error_msg,
+                error_detail=error_msg,
+                script_dir=script_dir,
+            )
             return True
 
         print(f'应用预设: {preset.get("name", "")} ({args.apply_preset})')
@@ -13142,7 +13216,15 @@ def parse_args_and_run():
         jobs = list_schedule_jobs(script_dir)
         job = next((j for j in jobs if j['job_id'] == args.run_job), None)
         if not job:
-            logger.error('未找到任务ID: %s', args.run_job)
+            error_msg = f'未找到任务ID: {args.run_job}'
+            logger.error('%s', error_msg)
+            print(f'错误: {error_msg}')
+            show_error_dialog_with_diagnostic(
+                title=t('gui.error'),
+                message=error_msg,
+                error_detail=error_msg,
+                script_dir=script_dir,
+            )
             return True
         run_scheduled_pipeline(job, script_dir)
         return True
@@ -13150,7 +13232,15 @@ def parse_args_and_run():
     if args.watch_dir:
         watch_dir = os.path.abspath(args.watch_dir)
         if not os.path.isdir(watch_dir):
-            logger.error('目录不存在: %s', watch_dir)
+            error_msg = f'目录不存在: {watch_dir}'
+            logger.error('%s', error_msg)
+            print(f'错误: {error_msg}')
+            show_error_dialog_with_diagnostic(
+                title=t('gui.error'),
+                message=error_msg,
+                error_detail=error_msg,
+                script_dir=script_dir,
+            )
             return True
 
         job_config = {
@@ -13867,40 +13957,51 @@ def main():
         return
     logger.info('用户选择模式: %s', mode)
 
-    if mode == 'pipeline':
-        run_pipeline_flow(script_dir)
-    elif mode == 'batch_pipeline':
-        run_batch_pipeline_flow(script_dir)
-    elif mode == 'diff':
-        run_diff_flow(script_dir)
-    elif mode == 'monitor':
-        run_monitor_flow(script_dir)
-    elif mode == 'scheduler':
-        run_scheduler_flow(script_dir)
-    elif mode == 'export':
-        run_export_flow(script_dir)
-    elif mode == 'db_query':
-        run_db_query_flow(script_dir)
-    elif mode == 'db_stats':
-        run_db_stats_flow(script_dir)
-    elif mode == 'batch_history':
-        run_batch_history_flow(script_dir)
-    elif mode == 'preset':
-        run_preset_flow(script_dir)
-    elif mode == 'subject_summary':
-        run_subject_summary_flow(script_dir)
-    elif mode == 'balance_check':
-        run_balance_check_flow(script_dir)
-    elif mode == 'duplicate_check':
-        run_duplicate_check_flow(script_dir)
-    elif mode == 'interest_fee_check':
-        run_interest_fee_check_flow(script_dir)
-    elif mode == 'balance_reconciliation':
-        run_balance_reconciliation_flow(script_dir)
-    elif mode == 'holiday_check':
-        run_holiday_check_flow(script_dir)
-    elif mode == 'diagnostic_export':
-        run_diagnostic_export_flow(script_dir)
+    try:
+        if mode == 'pipeline':
+            run_pipeline_flow(script_dir)
+        elif mode == 'batch_pipeline':
+            run_batch_pipeline_flow(script_dir)
+        elif mode == 'diff':
+            run_diff_flow(script_dir)
+        elif mode == 'monitor':
+            run_monitor_flow(script_dir)
+        elif mode == 'scheduler':
+            run_scheduler_flow(script_dir)
+        elif mode == 'export':
+            run_export_flow(script_dir)
+        elif mode == 'db_query':
+            run_db_query_flow(script_dir)
+        elif mode == 'db_stats':
+            run_db_stats_flow(script_dir)
+        elif mode == 'batch_history':
+            run_batch_history_flow(script_dir)
+        elif mode == 'preset':
+            run_preset_flow(script_dir)
+        elif mode == 'subject_summary':
+            run_subject_summary_flow(script_dir)
+        elif mode == 'balance_check':
+            run_balance_check_flow(script_dir)
+        elif mode == 'duplicate_check':
+            run_duplicate_check_flow(script_dir)
+        elif mode == 'interest_fee_check':
+            run_interest_fee_check_flow(script_dir)
+        elif mode == 'balance_reconciliation':
+            run_balance_reconciliation_flow(script_dir)
+        elif mode == 'holiday_check':
+            run_holiday_check_flow(script_dir)
+        elif mode == 'diagnostic_export':
+            run_diagnostic_export_flow(script_dir)
+    except Exception as e:
+        error_msg = f'{type(e).__name__}: {e}'
+        logger.error('主流程发生异常: %s', error_msg, exc_info=True)
+        print(f'\n❌ 程序运行出错: {error_msg}')
+        show_error_dialog_with_diagnostic(
+            title=t('gui.error'),
+            message=t('diagnostic.crash_message', error=error_msg),
+            error_detail=error_msg,
+            script_dir=script_dir,
+        )
 
     logger.info('========== 银行流水检验工具运行结束 ==========')
 
@@ -13914,7 +14015,13 @@ def run_db_query_flow(script_dir):
     logger = get_logger()
 
     if not HAS_DATABASE:
-        show_warning('错误', '数据库模块不可用，请检查 database.py 文件是否存在。')
+        error_msg = '数据库模块不可用，请检查 database.py 文件是否存在。'
+        show_error_dialog_with_diagnostic(
+            title='错误',
+            message=error_msg,
+            error_detail=error_msg,
+            script_dir=script_dir,
+        )
         logger.error('数据库模块不可用')
         return
 
@@ -14013,11 +14120,23 @@ def run_db_query_flow(script_dir):
                 show_info('导出成功', f'查询结果已导出到：\n{output_path}')
                 logger.info('查询结果已导出: %s', output_path)
             except Exception as e:
-                show_warning('导出失败', f'导出 Excel 失败：{e}')
+                error_msg = f'导出 Excel 失败：{e}'
+                show_error_dialog_with_diagnostic(
+                    title='导出失败',
+                    message=error_msg,
+                    error_detail=error_msg,
+                    script_dir=script_dir,
+                )
                 logger.error('导出查询结果失败: %s', e)
 
     except Exception as e:
-        show_warning('查询失败', f'数据库查询失败：{e}')
+        error_msg = f'数据库查询失败：{e}'
+        show_error_dialog_with_diagnostic(
+            title='查询失败',
+            message=error_msg,
+            error_detail=error_msg,
+            script_dir=script_dir,
+        )
         logger.error('数据库查询失败: %s', e, exc_info=True)
 
 
@@ -14026,7 +14145,13 @@ def run_db_stats_flow(script_dir):
     logger = get_logger()
 
     if not HAS_DATABASE:
-        show_warning('错误', '数据库模块不可用，请检查 database.py 文件是否存在。')
+        error_msg = '数据库模块不可用，请检查 database.py 文件是否存在。'
+        show_error_dialog_with_diagnostic(
+            title='错误',
+            message=error_msg,
+            error_detail=error_msg,
+            script_dir=script_dir,
+        )
         logger.error('数据库模块不可用')
         return
 
@@ -14125,11 +14250,23 @@ def run_db_stats_flow(script_dir):
                 show_info('导出成功', f'统计信息已导出到：\n{output_path}')
                 logger.info('数据库统计已导出: %s', output_path)
             except Exception as e:
-                show_warning('导出失败', f'导出 Excel 失败：{e}')
+                error_msg = f'导出 Excel 失败：{e}'
+                show_error_dialog_with_diagnostic(
+                    title='导出失败',
+                    message=error_msg,
+                    error_detail=error_msg,
+                    script_dir=script_dir,
+                )
                 logger.error('导出统计信息失败: %s', e)
 
     except Exception as e:
-        show_warning('统计失败', f'获取统计信息失败：{e}')
+        error_msg = f'获取统计信息失败：{e}'
+        show_error_dialog_with_diagnostic(
+            title='统计失败',
+            message=error_msg,
+            error_detail=error_msg,
+            script_dir=script_dir,
+        )
         logger.error('获取数据库统计失败: %s', e, exc_info=True)
 
 
@@ -14142,14 +14279,26 @@ def run_batch_history_flow(script_dir):
     logger = get_logger()
 
     if not HAS_BATCH_MANAGER:
-        show_warning('错误', '批次管理模块不可用，请检查 batch_manager.py 文件是否存在。')
+        error_msg = '批次管理模块不可用，请检查 batch_manager.py 文件是否存在。'
+        show_error_dialog_with_diagnostic(
+            title='错误',
+            message=error_msg,
+            error_detail=error_msg,
+            script_dir=script_dir,
+        )
         logger.error('批次管理模块不可用')
         return
 
     try:
         batch_manager = batch_module.get_batch_manager(script_dir)
     except Exception as e:
-        show_warning('错误', f'批次管理器初始化失败：{e}')
+        error_msg = f'批次管理器初始化失败：{e}'
+        show_error_dialog_with_diagnostic(
+            title='错误',
+            message=error_msg,
+            error_detail=error_msg,
+            script_dir=script_dir,
+        )
         logger.error('批次管理器初始化失败: %s', e, exc_info=True)
         return
 
