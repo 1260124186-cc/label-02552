@@ -1,0 +1,259 @@
+# 个人理财 - 银行卡/信用卡账单解析规则
+# 与对公版 bank_rules.yaml 完全隔离，仅用于个人理财专版
+
+# ──────────────────────────────────────────────
+# 通用配置
+# ──────────────────────────────────────────────
+general:
+  # 支持的文件格式
+  supported_formats:
+    - .xlsx
+    - .xls
+    - .csv
+  # 默认分类（未匹配时使用）
+  default_category: 其他支出
+  # 默认收入分类
+  default_income_category: 其他收入
+
+# ──────────────────────────────────────────────
+# 个人借记卡规则
+# ──────────────────────────────────────────────
+debit_cards:
+  - bank_name: 招商银行借记卡
+    card_type: debit
+    enabled: true
+    # 文件名匹配关键词
+    filename_keywords:
+      - 招商
+      - 招行
+      - cmb
+    # 表头行号（1-based）
+    header_row: 1
+    # 数据起始行
+    start_row: 2
+    # 列映射（列名 -> 内部字段）
+    column_mapping:
+      trade_date: 交易日期
+      transaction_time: 交易时间
+      amount: 交易金额
+      balance: 余额
+      summary: 交易摘要
+      merchant: 商户名称
+      transaction_type: 交易类型
+      transaction_id: 交易流水号
+    # 金额方向判断
+    amount_sign:
+      # positive: 正数为收入，负数为支出
+      # negative: 正数为支出，负数为收入
+      direction: negative
+      # 可选：通过交易类型列判断收支
+      use_type_column: false
+      income_types: []
+      expense_types: []
+    # 日期格式
+    date_format: "%Y-%m-%d"
+
+  - bank_name: 工商银行借记卡
+    card_type: debit
+    enabled: true
+    filename_keywords:
+      - 工商
+      - 工行
+      - icbc
+    header_row: 1
+    start_row: 2
+    column_mapping:
+      trade_date: 交易日期
+      amount: 交易金额
+      balance: 余额
+      summary: 摘要
+      merchant: 对方户名
+      transaction_type: 交易类型
+      transaction_id: 流水号
+    amount_sign:
+      direction: negative
+      use_type_column: false
+      income_types: []
+      expense_types: []
+    date_format: "%Y-%m-%d"
+
+  - bank_name: 建设银行借记卡
+    card_type: debit
+    enabled: true
+    filename_keywords:
+      - 建设
+      - 建行
+      - ccb
+    header_row: 1
+    start_row: 2
+    column_mapping:
+      trade_date: 交易日期
+      amount: 交易金额
+      balance: 账户余额
+      summary: 摘要
+      merchant: 对方账户名
+      transaction_type: 交易类型
+      transaction_id: 交易流水号
+    amount_sign:
+      direction: negative
+      use_type_column: false
+      income_types: []
+      expense_types: []
+    date_format: "%Y-%m-%d"
+
+  - bank_name: 支付宝账单
+    card_type: debit
+    enabled: true
+    filename_keywords:
+      - 支付宝
+      - alipay
+    header_row: 1
+    start_row: 2
+    column_mapping:
+      trade_date: 交易创建时间
+      amount: 金额
+      balance: 余额
+      summary: 商品说明
+      merchant: 交易对方
+      transaction_type: 交易类型
+      transaction_id: 交易号
+      status: 交易状态
+    amount_sign:
+      direction: negative
+      use_type_column: true
+      income_types:
+        - 收入
+        - 退款
+        - 转账收入
+      expense_types:
+        - 支出
+        - 消费
+        - 转账支出
+        - 还款
+    date_format: "%Y-%m-%d %H:%M:%S"
+
+  - bank_name: 微信支付账单
+    card_type: debit
+    enabled: true
+    filename_keywords:
+      - 微信
+      - wechat
+      - weixin
+    header_row: 1
+    start_row: 2
+    column_mapping:
+      trade_date: 交易时间
+      amount: 金额(元)
+      balance: 余额
+      summary: 商品
+      merchant: 交易对方
+      transaction_type: 交易类型
+      transaction_id: 交易单号
+      status: 当前状态
+    amount_sign:
+      direction: negative
+      use_type_column: true
+      income_types:
+        - 收入
+        - 退款
+      expense_types:
+        - 支出
+        - 消费
+        - 转账
+    date_format: "%Y-%m-%d %H:%M:%S"
+
+# ──────────────────────────────────────────────
+# 信用卡规则
+# ──────────────────────────────────────────────
+credit_cards:
+  - bank_name: 招商银行信用卡
+    card_type: credit
+    enabled: true
+    filename_keywords:
+      - 招商信用卡
+      - 招行信用卡
+      - cmb credit
+    # 账单信息行
+    statement_info:
+      statement_date_row: 1
+      due_date_row: 2
+      credit_limit_row: 3
+      min_payment_row: 4
+      statement_balance_row: 5
+    header_row: 6
+    start_row: 7
+    column_mapping:
+      trade_date: 交易日
+      post_date: 记账日
+      amount: 交易金额
+      summary: 交易摘要
+      merchant: 商户名称
+      transaction_type: 交易类型
+      transaction_id: 交易流水号
+      installments: 分期期数
+    amount_sign:
+      direction: negative
+      use_type_column: false
+      income_types: []
+      expense_types: []
+    date_format: "%Y/%m/%d"
+
+  - bank_name: 工商银行信用卡
+    card_type: credit
+    enabled: true
+    filename_keywords:
+      - 工商信用卡
+      - 工行信用卡
+      - icbc credit
+    statement_info:
+      statement_date_row: 1
+      due_date_row: 2
+      credit_limit_row: 3
+      min_payment_row: 4
+      statement_balance_row: 5
+    header_row: 6
+    start_row: 7
+    column_mapping:
+      trade_date: 交易日期
+      post_date: 记账日期
+      amount: 交易金额
+      summary: 交易摘要
+      merchant: 商户名称
+      transaction_type: 交易类型
+      transaction_id: 交易流水号
+    amount_sign:
+      direction: negative
+      use_type_column: false
+      income_types: []
+      expense_types: []
+    date_format: "%Y-%m-%d"
+
+  - bank_name: 建设银行信用卡
+    card_type: credit
+    enabled: true
+    filename_keywords:
+      - 建设信用卡
+      - 建行信用卡
+      - ccb credit
+    statement_info:
+      statement_date_row: 1
+      due_date_row: 2
+      credit_limit_row: 3
+      min_payment_row: 4
+      statement_balance_row: 5
+    header_row: 6
+    start_row: 7
+    column_mapping:
+      trade_date: 交易日期
+      post_date: 记账日期
+      amount: 交易金额
+      summary: 交易摘要
+      merchant: 商户名称
+      transaction_type: 交易类型
+      transaction_id: 交易流水号
+    amount_sign:
+      direction: negative
+      use_type_column: false
+      income_types: []
+      expense_types: []
+    date_format: "%Y-%m-%d"

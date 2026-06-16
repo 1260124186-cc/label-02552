@@ -3142,6 +3142,363 @@ def api_knowledge_base_diagnose():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+# ──────────────────────────────────────────────
+# 个人理财专版 - 路由与 API
+# ──────────────────────────────────────────────
+
+PERSONAL_UPLOAD_DIR = os.path.join(BACKEND_DIR, 'personal_uploads')
+os.makedirs(PERSONAL_UPLOAD_DIR, exist_ok=True)
+
+_personal_tasks = {}
+_personal_tasks_lock = threading.Lock()
+
+
+def _get_personal_task(task_id: str) -> Optional[Dict[str, Any]]:
+    with _personal_tasks_lock:
+        return _personal_tasks.get(task_id)
+
+
+def _save_personal_task(task_id: str, task_data: Dict[str, Any]):
+    with _personal_tasks_lock:
+        _personal_tasks[task_id] = task_data
+
+
+@app.route('/personal')
+def personal_dashboard():
+    """个人理财专版 - 资金视图看板"""
+    return render_template('personal_dashboard.html')
+
+
+@app.route('/personal/upload')
+def personal_upload_page():
+    """个人理财专版 - 上传页面"""
+    return render_template('personal_upload.html')
+
+
+@app.route('/api/personal/upload', methods=['POST'])
+def api_personal_upload():
+    """个人理财专版 - 上传并解析账单"""
+    try:
+        import personal_finance as pf
+        import personal_database as pdb
+    except ImportError as e:
+        return jsonify({'success': False, 'message': f'个人理财模块加载失败: {e}'}), 500
+
+    try:
+        task_id = str(uuid.uuid4())
+        task_folder = os.path.join(PERSONAL_UPLOAD_DIR, task_id)
+        os.makedirs(task_folder, exist_ok=True)
+
+        files = request.files.getlist('files')
+        if not files:
+            return jsonify({'success': False, 'message': '未选择任何文件'}), 400
+
+        saved_files = []
+        for f in files:
+            if not f.filename:
+                continue
+            safe_name = os.path.basename(f.filename)
+            if safe_name.startswith('~$'):
+                continue
+            file_path = os.path.join(task_folder, safe_name)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            f.save(file_path)
+            saved_files.append(safe_name)
+
+        if not saved_files:
+            return jsonify({'success': False, 'message': '没有有效的文件'}), 400
+
+        task_data = {
+            'task_id': task_id,
+            'status': 'processing',
+            'total_files': len(saved_files),
+            'parsed_files': 0,
+            'failed_files': 0,
+            'total_records': 0,
+            'new_records': 0,
+            'duplicate_records': 0,
+            'files': saved_files,
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'error_message': None,
+        }
+        _save_personal_task(task_id, task_data)
+
+        def process_task():
+            try:
+                pdb.init_personal_db()
+
+                all_transactions = []
+                parsed_count = 0
+                failed_count = 0
+
+                for filename in saved_files:
+                    filepath = os.path.join(task_folder, filename)
+                    try:
+                        txs = pf.parse_personal_bill(filepath)
+                        if txs:
+                            for tx in txs:
+                                tx_dict = tx.to_dict()
+                                tx_dict['source_file'] = filename
+                                all_transactions.append(tx_dict)
+                            parsed_count += 1
+                        else:
+                            failed_count += 1
+                    except Exception as e:
+                        logger.error('解析个人账单失败 %s: %s', filename, e)
+                        failed_count += 1
+
+                inserted, duplicates = pdb.insert_transactions(all_transactions)
+
+                task_data['status'] = 'completed'
+                task_data['parsed_files'] = parsed_count
+                task_data['failed_files'] = failed_count
+                task_data['total_records'] = len(all_transactions)
+                task_data['new_records'] = inserted
+                task_data['duplicate_records'] = duplicates
+                task_data['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                _save_personal_task(task_id, task_data)
+
+            except Exception as e:
+                logger.error('个人账单处理任务失败: %s', e, exc_info=True)
+                task_data['status'] = 'failed'
+                task_data['error_message'] = str(e)
+                task_data['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                _save_personal_task(task_id, task_data)
+
+        thread = threading.Thread(target=process_task, daemon=True)
+        thread.start()
+
+        return jsonify({
+            'success': True,
+            'task_id': task_id,
+            'message': '已开始处理',
+        })
+
+    except Exception as e:
+        logger.error('个人账单上传失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/personal/tasks/<task_id>', methods=['GET'])
+def api_personal_task_status(task_id: str):
+    """个人理财专版 - 查询任务状态"""
+    task = _get_personal_task(task_id)
+    if not task:
+        return jsonify({'success': False, 'message': '任务不存在'}), 404
+    return jsonify({'success': True, 'data': task})
+
+
+@app.route('/api/personal/summary', methods=['GET'])
+def api_personal_summary():
+    """个人理财专版 - 获取汇总数据"""
+    try:
+        import personal_database as pdb
+    except ImportError as e:
+        return jsonify({'success': False, 'message': f'个人理财模块加载失败: {e}'}), 500
+
+    try:
+        start_date = request.args.get('start_date', '').strip() or None
+        end_date = request.args.get('end_date', '').strip() or None
+
+        summary = pdb.get_summary(start_date=start_date, end_date=end_date)
+        return jsonify({'success': True, 'data': summary})
+    except Exception as e:
+        logger.error('获取个人理财汇总失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/personal/category-breakdown', methods=['GET'])
+def api_personal_category_breakdown():
+    """个人理财专版 - 获取分类统计"""
+    try:
+        import personal_database as pdb
+    except ImportError as e:
+        return jsonify({'success': False, 'message': f'个人理财模块加载失败: {e}'}), 500
+
+    try:
+        direction = request.args.get('direction', 'expense').strip()
+        start_date = request.args.get('start_date', '').strip() or None
+        end_date = request.args.get('end_date', '').strip() or None
+
+        data = pdb.get_category_breakdown(
+            direction=direction,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        logger.error('获取个人理财分类统计失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/personal/monthly-trend', methods=['GET'])
+def api_personal_monthly_trend():
+    """个人理财专版 - 获取月度趋势"""
+    try:
+        import personal_database as pdb
+    except ImportError as e:
+        return jsonify({'success': False, 'message': f'个人理财模块加载失败: {e}'}), 500
+
+    try:
+        start_date = request.args.get('start_date', '').strip() or None
+        end_date = request.args.get('end_date', '').strip() or None
+
+        data = pdb.get_monthly_trend(start_date=start_date, end_date=end_date)
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        logger.error('获取个人理财月度趋势失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/personal/top-merchants', methods=['GET'])
+def api_personal_top_merchants():
+    """个人理财专版 - 获取 Top 商户"""
+    try:
+        import personal_database as pdb
+    except ImportError as e:
+        return jsonify({'success': False, 'message': f'个人理财模块加载失败: {e}'}), 500
+
+    try:
+        limit = int(request.args.get('limit', 10))
+        direction = request.args.get('direction', 'expense').strip()
+        start_date = request.args.get('start_date', '').strip() or None
+        end_date = request.args.get('end_date', '').strip() or None
+
+        data = pdb.get_top_merchants(
+            limit=limit,
+            direction=direction,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        logger.error('获取个人理财 Top 商户失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/personal/transactions', methods=['GET'])
+def api_personal_transactions():
+    """个人理财专版 - 查询交易记录"""
+    try:
+        import personal_database as pdb
+    except ImportError as e:
+        return jsonify({'success': False, 'message': f'个人理财模块加载失败: {e}'}), 500
+
+    try:
+        start_date = request.args.get('start_date', '').strip() or None
+        end_date = request.args.get('end_date', '').strip() or None
+        category = request.args.get('category', '').strip() or None
+        direction = request.args.get('direction', '').strip() or None
+        merchant = request.args.get('merchant', '').strip() or None
+        bank_name = request.args.get('bank_name', '').strip() or None
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+        order_by = request.args.get('order_by', 'trade_date').strip()
+        order_dir = request.args.get('order_dir', 'DESC').strip()
+
+        results, total = pdb.query_transactions(
+            start_date=start_date,
+            end_date=end_date,
+            category=category,
+            direction=direction,
+            merchant=merchant,
+            bank_name=bank_name,
+            limit=limit,
+            offset=offset,
+            order_by=order_by,
+            order_dir=order_dir,
+        )
+
+        return jsonify({
+            'success': True,
+            'data': results,
+            'total': total,
+            'limit': limit,
+            'offset': offset,
+        })
+    except Exception as e:
+        logger.error('查询个人交易记录失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/personal/transactions/<tx_id>/category', methods=['PUT'])
+def api_personal_update_category(tx_id: str):
+    """个人理财专版 - 更新交易分类"""
+    try:
+        import personal_database as pdb
+    except ImportError as e:
+        return jsonify({'success': False, 'message': f'个人理财模块加载失败: {e}'}), 500
+
+    try:
+        data = request.get_json(force=True)
+        category = data.get('category', '').strip()
+        category_icon = data.get('category_icon', '').strip()
+        category_color = data.get('category_color', '').strip()
+
+        if not category:
+            return jsonify({'success': False, 'message': '分类名称不能为空'}), 400
+
+        success = pdb.update_transaction_category(
+            tx_id=tx_id,
+            category=category,
+            category_icon=category_icon,
+            category_color=category_color,
+        )
+
+        if success:
+            return jsonify({'success': True, 'message': '更新成功'})
+        else:
+            return jsonify({'success': False, 'message': '更新失败'}), 500
+    except Exception as e:
+        logger.error('更新交易分类失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/personal/categories', methods=['GET'])
+def api_personal_categories():
+    """个人理财专版 - 获取所有分类列表"""
+    try:
+        import personal_finance as pf
+    except ImportError as e:
+        return jsonify({'success': False, 'message': f'个人理财模块加载失败: {e}'}), 500
+
+    try:
+        classifier = pf.CategoryClassifier()
+
+        expense_cats = classifier.get_all_categories('expense')
+        income_cats = classifier.get_all_categories('income')
+
+        return jsonify({
+            'success': True,
+            'data': {
+                'expense': expense_cats,
+                'income': income_cats,
+            }
+        })
+    except Exception as e:
+        logger.error('获取分类列表失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/personal/clear-all', methods=['POST'])
+def api_personal_clear_all():
+    """个人理财专版 - 清空所有数据"""
+    try:
+        import personal_database as pdb
+    except ImportError as e:
+        return jsonify({'success': False, 'message': f'个人理财模块加载失败: {e}'}), 500
+
+    try:
+        success = pdb.clear_all_data()
+        if success:
+            return jsonify({'success': True, 'message': '已清空所有数据'})
+        else:
+            return jsonify({'success': False, 'message': '清空失败'}), 500
+    except Exception as e:
+        logger.error('清空个人理财数据失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 def main():
     try:
         from self_check import self_check_and_exit_if_failed

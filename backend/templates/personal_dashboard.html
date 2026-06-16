@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>个人理财 - 资金视图看板</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='personal_dashboard.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <div>
+                    <h1>💰 个人理财专版</h1>
+                    <p class="subtitle">轻量个人资金视图 · 消费分类一目了然</p>
+                </div>
+                <div class="header-actions">
+                    <button type="button" class="btn btn-secondary btn-refresh" onclick="loadAllData()">
+                        🔄 刷新数据
+                    </button>
+                    <a href="/personal/upload" class="btn btn-primary">📤 上传账单</a>
+                    <a href="/upload" class="btn btn-link">对公版</a>
+                </div>
+            </div>
+        </header>
+
+        <div class="loading-overlay" id="loadingOverlay">
+            <div class="loading-spinner"></div>
+            <p>正在加载数据...</p>
+        </div>
+
+        <div class="stats-bar" id="statsBar">
+            <div class="stat-card stat-primary">
+                <div class="stat-icon">📋</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statRecords">-</span>
+                    <span class="stat-label">总交易笔数</span>
+                </div>
+            </div>
+            <div class="stat-card stat-danger">
+                <div class="stat-icon">💸</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statExpense">-</span>
+                    <span class="stat-label">总支出</span>
+                </div>
+            </div>
+            <div class="stat-card stat-success">
+                <div class="stat-icon">💰</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statIncome">-</span>
+                    <span class="stat-label">总收入</span>
+                </div>
+            </div>
+            <div class="stat-card stat-info">
+                <div class="stat-icon">📈</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statNet">-</span>
+                    <span class="stat-label">收支净额</span>
+                </div>
+            </div>
+            <div class="stat-card stat-warning">
+                <div class="stat-icon">🏷️</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statCategories">-</span>
+                    <span class="stat-label">消费分类</span>
+                </div>
+            </div>
+            <div class="stat-card stat-purple">
+                <div class="stat-icon">🏪</div>
+                <div class="stat-content">
+                    <span class="stat-value" id="statMerchants">-</span>
+                    <span class="stat-label">商户数量</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="date-range-info" id="dateRangeInfo" style="display: none;">
+            <span class="date-label">数据时间范围：</span>
+            <span class="date-value" id="dateRangeText"></span>
+        </div>
+
+        <div class="empty-state" id="emptyState" style="display: none;">
+            <div class="empty-icon">📭</div>
+            <h2>暂无数据</h2>
+            <p>上传您的银行账单、支付宝或微信账单，开始管理个人财务</p>
+            <a href="/personal/upload" class="btn btn-primary btn-lg">立即上传</a>
+        </div>
+
+        <div class="charts-container" id="chartsContainer">
+            <div class="charts-row">
+                <section class="chart-section chart-half">
+                    <div class="section-header">
+                        <h2>📅 收支趋势</h2>
+                        <div class="section-actions">
+                            <select id="trendChartType" class="chart-type-select" onchange="renderMonthlyTrend()">
+                                <option value="line">折线图</option>
+                                <option value="bar" selected>柱状图</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="chart-wrapper">
+                        <div id="monthlyTrendChart" class="chart"></div>
+                    </div>
+                </section>
+
+                <section class="chart-section chart-half">
+                    <div class="section-header">
+                        <h2>🏷️ 消费分类</h2>
+                        <div class="section-actions">
+                            <select id="categoryDirection" class="chart-type-select" onchange="loadCategoryBreakdown()">
+                                <option value="expense" selected>按支出</option>
+                                <option value="income">按收入</option>
+                            </select>
+                            <select id="categoryChartType" class="chart-type-select" onchange="renderCategoryBreakdown()">
+                                <option value="pie">饼图</option>
+                                <option value="donut" selected>环形图</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="chart-wrapper">
+                        <div id="categoryBreakdownChart" class="chart"></div>
+                    </div>
+                </section>
+            </div>
+
+            <div class="charts-row">
+                <section class="chart-section chart-half">
+                    <div class="section-header">
+                        <h2>🏆 Top 商户</h2>
+                        <div class="section-actions">
+                            <select id="topMerchantLimit" class="chart-type-select" onchange="loadTopMerchants()">
+                                <option value="5">Top 5</option>
+                                <option value="10" selected>Top 10</option>
+                                <option value="15">Top 15</option>
+                                <option value="20">Top 20</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="chart-wrapper">
+                        <div id="topMerchantChart" class="chart"></div>
+                    </div>
+                </section>
+
+                <section class="chart-section chart-half">
+                    <div class="section-header">
+                        <h2>📊 分类明细</h2>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="data-table" id="categoryDetailTable">
+                            <thead>
+                                <tr>
+                                    <th style="width: 50px;">序号</th>
+                                    <th>分类</th>
+                                    <th style="text-align: right;">金额</th>
+                                    <th style="text-align: right;">笔数</th>
+                                    <th style="text-align: right;">占比</th>
+                                </tr>
+                            </thead>
+                            <tbody id="categoryDetailBody">
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+
+            <section class="chart-section">
+                <div class="section-header">
+                    <h2>📝 最近交易</h2>
+                    <div class="section-actions">
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="loadTransactions()">
+                            查看更多
+                        </button>
+                    </div>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table transaction-table" id="transactionTable">
+                        <thead>
+                            <tr>
+                                <th style="width: 100px;">日期</th>
+                                <th style="width: 80px;">类型</th>
+                                <th>商户/摘要</th>
+                                <th style="width: 100px;">分类</th>
+                                <th style="text-align: right; width: 120px;">金额</th>
+                                <th style="width: 80px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="transactionBody">
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+        <footer class="footer">
+            <p>个人理财专版 · 数据与对公版完全隔离 · 本地存储更安全</p>
+        </footer>
+    </div>
+
+    <div id="toast" class="toast" style="display: none;"></div>
+
+    <div id="categoryModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>修改分类</h3>
+                <span class="modal-close" onclick="closeCategoryModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p id="modalTxInfo" class="modal-tx-info"></p>
+                <div class="category-list" id="categoryList">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    var monthlyTrendData = [];
+    var categoryBreakdownData = [];
+    var topMerchantData = [];
+    var summaryData = null;
+    var transactionsData = [];
+    var allCategories = { expense: [], income: [] };
+    var currentEditingTxId = null;
+
+    var monthlyTrendChart = null;
+    var categoryBreakdownChart = null;
+    var topMerchantChart = null;
+
+    var chartColors = [
+        '#FF6B6B', '#4ECDC4', '#A855F7', '#3B82F6', '#F59E0B',
+        '#10B981', '#6366F1', '#8B5CF6', '#0EA5E9', '#EC4899',
+        '#F97316', '#84CC16', '#6B7280', '#14B8A6', '#F43F5E'
+    ];
+
+    function formatAmount(amount) {
+        if (amount === null || amount === undefined || isNaN(amount)) {
+            return '-';
+        }
+        var absAmount = Math.abs(amount);
+        if (absAmount >= 100000000) {
+            return (amount / 100000000).toFixed(2) + '亿';
+        } else if (absAmount >= 10000) {
+            return (amount / 10000).toFixed(2) + '万';
+        }
+        return amount.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function showToast(message, type) {
+        var toast = document.getElementById('toast');
+        toast.textContent = message;
+        toast.className = 'toast toast-' + (type || 'info');
+        toast.style.display = 'block';
+        setTimeout(function() {
+            toast.style.display = 'none';
+        }, 3000);
+    }
+
+    function showLoading() {
+        document.getElementById('loadingOverlay').style.display = 'flex';
+    }
+
+    function hideLoading() {
+        document.getElementById('loadingOverlay').style.display = 'none';
+    }
+
+    function initCharts() {
+        monthlyTrendChart = echarts.init(document.getElementById('monthlyTrendChart'));
+        categoryBreakdownChart = echarts.init(document.getElementById('categoryBreakdownChart'));
+        topMerchantChart = echarts.init(document.getElementById('topMerchantChart'));
+
+        window.addEventListener('resize', function() {
+            monthlyTrendChart && monthlyTrendChart.resize();
+            categoryBreakdownChart && categoryBreakdownChart.resize();
+            topMerchantChart && topMerchantChart.resize();
+        });
+    }
+
+    function loadAllData() {
+        showLoading();
+        Promise.all([
+            loadSummary(),
+            loadMonthlyTrend(),
+            loadCategoryBreakdown(),
+            loadTopMerchants(),
+            loadTransactions(),
+            loadCategories()
+        ]).then(function() {
+            hideLoading();
+        }).catch(function() {
+            hideLoading();
+            showToast('数据加载失败，请刷新重试', 'error');
+        });
+    }
+
+    function loadSummary() {
+        return fetch('/api/personal/summary')
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    summaryData = data.data;
+                    renderSummary(data.data);
+                    checkEmptyState(data.data);
+                }
+            });
+    }
+
+    function renderSummary(data) {
+        document.getElementById('statRecords').textContent = data.total_records.toLocaleString();
+        document.getElementById('statExpense').textContent = formatAmount(data.total_expense);
+        document.getElementById('statIncome').textContent = formatAmount(data.total_income);
+        document.getElementById('statNet').textContent = formatAmount(data.net_amount);
+        document.getElementById('statCategories').textContent = data.category_count;
+        document.getElementById('statMerchants').textContent = data.merchant_count;
+
+        if (data.date_range && data.date_range.start && data.date_range.end) {
+            document.getElementById('dateRangeText').textContent =
+                data.date_range.start + ' 至 ' + data.date_range.end;
+            document.getElementById('dateRangeInfo').style.display = 'block';
+        }
+    }
+
+    function checkEmptyState(data) {
+        if (data.total_records === 0) {
+            document.getElementById('emptyState').style.display = 'block';
+            document.getElementById('chartsContainer').style.display = 'none';
+            document.getElementById('dateRangeInfo').style.display = 'none';
+        } else {
+            document.getElementById('emptyState').style.display = 'none';
+            document.getElementById('chartsContainer').style.display = 'block';
+        }
+    }
+
+    function loadMonthlyTrend() {
+        return fetch('/api/personal/monthly-trend')
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    monthlyTrendData = data.data;
+                    renderMonthlyTrend();
+                }
+            });
+    }
+
+    function renderMonthlyTrend() {
+        if (!monthlyTrendChart || monthlyTrendData.length === 0) return;
+
+        var chartType = document.getElementById('trendChartType').value;
+        var months = monthlyTrendData.map(function(item) { return item.month; });
+        var incomes = monthlyTrendData.map(function(item) { return item.income; });
+        var expenses = monthlyTrendData.map(function(item) { return item.expense; });
+        var nets = monthlyTrendData.map(function(item) { return item.net; });
+
+        var option = {
+            tooltip: {
+                trigger: 'axis',
+                axisPointer: { type: 'cross' },
+                formatter: function(params) {
+                    var result = params[0].axisValue + '<br/>';
+                    params.forEach(function(p) {
+                        result += p.marker + p.seriesName + ': ' + formatAmount(p.value) + '<br/>';
+                    });
+                    return result;
+                }
+            },
+            legend: {
+                data: ['收入', '支出', '净额'],
+                top: 0
+            },
+            grid: {
+                left: '3%',
+                right: '4%',
+                bottom: '3%',
+                top: 30,
+                containLabel: true
+            },
+            xAxis: {
+                type: 'category',
+                boundaryGap: chartType === 'bar',
+                data: months,
+                axisLabel: { rotate: 45 }
+            },
+            yAxis: {
+                type: 'value',
+                axisLabel: {
+                    formatter: function(value) {
+                        if (Math.abs(value) >= 10000) {
+                            return (value / 10000).toFixed(1) + '万';
+                        }
+                        return value;
+                    }
+                }
+            },
+            dataZoom: [
+                { type: 'inside', start: 0, end: 100 },
+                { type: 'slider', start: 0, end: 100, height: 20, bottom: 10 }
+            ],
+            series: [
+                {
+                    name: '收入',
+                    type: chartType,
+                    data: incomes,
+                    itemStyle: { color: '#10B981' },
+                    areaStyle: chartType === 'line' ? { color: 'rgba(16, 185, 129, 0.1)' } : undefined,
+                    smooth: chartType === 'line',
+                    barMaxWidth: 30
+                },
+                {
+                    name: '支出',
+                    type: chartType,
+                    data: expenses,
+                    itemStyle: { color: '#EF4444' },
+                    areaStyle: chartType === 'line' ? { color: 'rgba(239, 68, 68, 0.1)' } : undefined,
+                    smooth: chartType === 'line',
+                    barMaxWidth: 30
+                },
+                {
+                    name: '净额',
+                    type: 'line',
+                    data: nets,
+                    itemStyle: { color: '#3B82F6' },
+                    lineStyle: { type: 'dashed', width: 2 },
+                    smooth: true
+                }
+            ]
+        };
+
+        monthlyTrendChart.setOption(option, true);
+    }
+
+    function loadCategoryBreakdown() {
+        var direction = document.getElementById('categoryDirection').value;
+        return fetch('/api/personal/category-breakdown?direction=' + direction)
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    categoryBreakdownData = data.data;
+                    renderCategoryBreakdown();
+                    renderCategoryDetailTable(data.data);
+                }
+            });
+    }
+
+    function renderCategoryBreakdown() {
+        if (!categoryBreakdownChart || categoryBreakdownData.length === 0) return;
+
+        var chartType = document.getElementById('categoryChartType').value;
+
+        var pieData = categoryBreakdownData.map(function(item, index) {
+            return {
+                name: item.name,
+                value: item.amount,
+                itemStyle: { color: item.color || chartColors[index % chartColors.length] }
+            };
+        }).filter(function(item) { return item.value > 0; });
+
+        var total = pieData.reduce(function(sum, item) { return sum + item.value; }, 0);
+
+        var option = {
+            tooltip: {
+                trigger: 'item',
+                formatter: function(params) {
+                    var percent = ((params.value / total) * 100).toFixed(2);
+                    return params.marker + params.name + '<br/>' +
+                           '金额: ' + formatAmount(params.value) + '<br/>' +
+                           '占比: ' + percent + '%';
+                }
+            },
+            legend: {
+                type: 'scroll',
+                orient: 'vertical',
+                right: 10,
+                top: 20,
+                bottom: 20,
+                data: pieData.map(function(item) { return item.name; }),
+                textStyle: { fontSize: 11 }
+            },
+            grid: {
+                left: '3%',
+                right: '20%',
+                bottom: '3%',
+                containLabel: true
+            },
+            series: [
+                {
+                    name: '金额',
+                    type: 'pie',
+                    radius: chartType === 'donut' ? ['35%', '65%'] : '65%',
+                    center: ['35%', '50%'],
+                    data: pieData,
+                    avoidLabelOverlap: true,
+                    itemStyle: {
+                        borderRadius: 6,
+                        borderColor: '#fff',
+                        borderWidth: 2
+                    },
+                    label: {
+                        show: true,
+                        formatter: function(params) {
+                            var percent = ((params.value / total) * 100).toFixed(1);
+                            var name = params.name.length > 6 ? params.name.substr(0, 6) + '...' : params.name;
+                            return name + '\n' + percent + '%';
+                        },
+                        fontSize: 11
+                    },
+                    emphasis: {
+                        itemStyle: {
+                            shadowBlur: 10,
+                            shadowOffsetX: 0,
+                            shadowColor: 'rgba(0, 0, 0, 0.5)'
+                        },
+                        scale: true,
+                        scaleSize: 8
+                    },
+                    labelLine: {
+                        show: true,
+                        length: 15,
+                        length2: 10
+                    }
+                }
+            ]
+        };
+
+        categoryBreakdownChart.setOption(option, true);
+    }
+
+    function renderCategoryDetailTable(data) {
+        var tbody = document.getElementById('categoryDetailBody');
+        if (!data || data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="empty-state">暂无数据</td></tr>';
+            return;
+        }
+
+        var grandTotal = data.reduce(function(sum, item) { return sum + item.amount; }, 0);
+
+        var html = '';
+        data.forEach(function(item, index) {
+            var percent = grandTotal > 0 ? ((item.amount / grandTotal) * 100).toFixed(2) : '0.00';
+            var color = item.color || chartColors[index % chartColors.length];
+
+            html += '<tr>' +
+                '<td>' + (index + 1) + '</td>' +
+                '<td>' +
+                    '<span class="category-icon" style="background: ' + color + ';">' +
+                        (item.icon || '📝') +
+                    '</span>' +
+                    '<strong>' + item.name + '</strong>' +
+                '</td>' +
+                '<td style="text-align: right;" class="amount-negative">' + formatAmount(item.amount) + '</td>' +
+                '<td style="text-align: right;">' + item.count.toLocaleString() + '</td>' +
+                '<td style="text-align: right;">' +
+                    '<div class="progress-bar-cell">' +
+                        '<div class="progress-bar-track">' +
+                            '<div class="progress-bar-fill" style="width: ' + Math.min(parseFloat(percent), 100) + '%; background: ' + color + ';"></div>' +
+                        '</div>' +
+                        '<span class="progress-bar-text">' + percent + '%</span>' +
+                    '</div>' +
+                '</td>' +
+                '</tr>';
+        });
+
+        tbody.innerHTML = html;
+    }
+
+    function loadTopMerchants() {
+        var limit = document.getElementById('topMerchantLimit').value;
+        return fetch('/api/personal/top-merchants?limit=' + limit)
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    topMerchantData = data.data;
+                    renderTopMerchants();
+                }
+            });
+    }
+
+    function renderTopMerchants() {
+        if (!topMerchantChart || topMerchantData.length === 0) return;
+
+        var sortedData = [...topMerchantData].sort(function(a, b) { return a.amount - b.amount; });
+        var names = sortedData.map(function(item) { return item.name; });
+        var amounts = sortedData.map(function(item) { return item.amount; });
+
+        var barColors = amounts.map(function(_, i) {
+            return chartColors[i % chartColors.length];
+        });
+
+        var option = {
+            tooltip: {
+                trigger: 'axis',
+                axisPointer: { type: 'shadow' },
+                formatter: function(params) {
+                    return params[0].axisValue + '<br/>' +
+                           params[0].marker + '支出: ' + formatAmount(params[0].value);
+                }
+            },
+            grid: {
+                left: '3%',
+                right: '10%',
+                bottom: '3%',
+                top: 10,
+                containLabel: true
+            },
+            xAxis: {
+                type: 'value',
+                axisLabel: {
+                    formatter: function(value) {
+                        if (value >= 10000) {
+                            return (value / 10000).toFixed(1) + '万';
+                        }
+                        return value;
+                    }
+                }
+            },
+            yAxis: {
+                type: 'category',
+                data: names,
+                axisLabel: {
+                    formatter: function(value) {
+                        return value.length > 12 ? value.substr(0, 12) + '...' : value;
+                    }
+                }
+            },
+            dataZoom: [
+                { type: 'inside', orient: 'vertical', start: 0, end: 100 }
+            ],
+            series: [
+                {
+                    name: '支出',
+                    type: 'bar',
+                    data: amounts.map(function(value, index) {
+                        return {
+                            value: value,
+                            itemStyle: { color: barColors[index] }
+                        };
+                    }),
+                    barMaxWidth: 20,
+                    label: {
+                        show: true,
+                        position: 'right',
+                        formatter: function(params) {
+                            return formatAmount(params.value);
+                        },
+                        fontSize: 10,
+                        color: '#666'
+                    }
+                }
+            ]
+        };
+
+        topMerchantChart.setOption(option, true);
+    }
+
+    function loadTransactions() {
+        return fetch('/api/personal/transactions?limit=20&order_by=trade_date&order_dir=DESC')
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    transactionsData = data.data;
+                    renderTransactions(data.data);
+                }
+            });
+    }
+
+    function renderTransactions(txs) {
+        var tbody = document.getElementById('transactionBody');
+        if (!txs || txs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="empty-state">暂无交易记录</td></tr>';
+            return;
+        }
+
+        var html = '';
+        txs.forEach(function(tx) {
+            var directionClass = tx.direction === 'income' ? 'amount-positive' : 'amount-negative';
+            var directionLabel = tx.direction === 'income' ? '收入' : tx.direction === 'expense' ? '支出' : '转账';
+            var displayAmount = tx.direction === 'income' ? tx.amount : -tx.amount;
+
+            html += '<tr>' +
+                '<td class="tx-date">' + tx.trade_date + '</td>' +
+                '<td><span class="tx-type-badge tx-type-' + tx.direction + '">' + directionLabel + '</span></td>' +
+                '<td>' +
+                    '<div class="tx-merchant">' + (tx.merchant || '-') + '</div>' +
+                    '<div class="tx-summary">' + (tx.summary || '') + '</div>' +
+                '</td>' +
+                '<td>' +
+                    '<span class="tx-category" style="background: ' + (tx.category_color || '#ccc') + '20; color: ' + (tx.category_color || '#666') + ';">' +
+                        (tx.category_icon || '📝') + ' ' + (tx.category || '未分类') +
+                    '</span>' +
+                '</td>' +
+                '<td class="tx-amount ' + directionClass + '">' + formatAmount(displayAmount) + '</td>' +
+                '<td>' +
+                    '<button class="btn btn-sm btn-link" onclick="editCategory(\'' + tx.id + '\', \'' + (tx.merchant || '').replace(/'/g, "\\'") + '\', ' + tx.amount + ')">' +
+                        '修改分类' +
+                    '</button>' +
+                '</td>' +
+                '</tr>';
+        });
+
+        tbody.innerHTML = html;
+    }
+
+    function loadCategories() {
+        return fetch('/api/personal/categories')
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    allCategories = data.data;
+                }
+            });
+    }
+
+    function editCategory(txId, merchant, amount) {
+        currentEditingTxId = txId;
+        document.getElementById('modalTxInfo').textContent =
+            '商户: ' + (merchant || '-') + '  金额: ' + formatAmount(amount);
+
+        var categoryList = document.getElementById('categoryList');
+        var cats = allCategories.expense || [];
+
+        var html = '';
+        cats.forEach(function(cat, index) {
+            html += '<div class="category-item" onclick="selectCategory(\'' + cat.name.replace(/'/g, "\\'") + '\', \'' + (cat.icon || '').replace(/'/g, "\\'") + '\', \'' + (cat.color || '').replace(/'/g, "\\'") + '\')">' +
+                '<span class="category-icon" style="background: ' + (cat.color || '#ccc') + ';">' + (cat.icon || '📝') + '</span>' +
+                '<span class="category-name">' + cat.name + '</span>' +
+                '</div>';
+        });
+
+        categoryList.innerHTML = html;
+        document.getElementById('categoryModal').style.display = 'flex';
+    }
+
+    function selectCategory(name, icon, color) {
+        if (!currentEditingTxId) return;
+
+        fetch('/api/personal/transactions/' + currentEditingTxId + '/category', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                category: name,
+                category_icon: icon,
+                category_color: color
+            })
+        })
+        .then(function(resp) { return resp.json(); })
+        .then(function(data) {
+            if (data.success) {
+                showToast('分类已更新', 'success');
+                closeCategoryModal();
+                loadAllData();
+            } else {
+                showToast(data.message || '更新失败', 'error');
+            }
+        })
+        .catch(function() {
+            showToast('更新失败，请重试', 'error');
+        });
+    }
+
+    function closeCategoryModal() {
+        document.getElementById('categoryModal').style.display = 'none';
+        currentEditingTxId = null;
+    }
+
+    window.onclick = function(event) {
+        var modal = document.getElementById('categoryModal');
+        if (event.target == modal) {
+            closeCategoryModal();
+        }
+    };
+
+    document.addEventListener('DOMContentLoaded', function() {
+        initCharts();
+        loadAllData();
+    });
+    </script>
+</body>
+</html>

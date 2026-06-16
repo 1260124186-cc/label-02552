@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>个人理财 - 上传账单</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='personal_dashboard.css') }}">
+    <style>
+        .upload-section {
+            padding: 40px;
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #212529;
+            margin-bottom: 20px;
+        }
+
+        .upload-area {
+            border: 2px dashed #d1d5db;
+            border-radius: 16px;
+            padding: 48px 24px;
+            text-align: center;
+            transition: all 0.3s ease;
+            background: #fafafa;
+            cursor: pointer;
+        }
+
+        .upload-area:hover,
+        .upload-area.dragover {
+            border-color: #f5576c;
+            background: #fff5f7;
+        }
+
+        .upload-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .upload-hint {
+            font-size: 16px;
+            color: #4b5563;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .upload-sub-hint {
+            font-size: 13px;
+            color: #9ca3af;
+            margin-bottom: 20px;
+        }
+
+        .upload-buttons {
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            opacity: 0.9;
+        }
+
+        .btn-secondary {
+            background: #f3f4f6;
+            color: #4b5563;
+            border: 1px solid #d1d5db;
+        }
+
+        .btn-secondary:hover {
+            background: #e5e7eb;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .file-list {
+            margin-top: 24px;
+            background: #f9fafb;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .file-list-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background: #f3f4f6;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .file-list-header h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #374151;
+        }
+
+        .file-name-list {
+            list-style: none;
+            max-height: 300px;
+            overflow-y: auto;
+            padding: 8px;
+        }
+
+        .file-name-list li {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #4b5563;
+            border-radius: 6px;
+        }
+
+        .file-name-list li:hover {
+            background: #f3f4f6;
+        }
+
+        .file-icon {
+            font-size: 16px;
+        }
+
+        .progress-section {
+            margin-top: 24px;
+        }
+
+        .progress-card {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .task-id {
+            font-size: 13px;
+            color: #6b7280;
+            font-family: monospace;
+        }
+
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .status-processing {
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+
+        .status-completed {
+            background: #d1fae5;
+            color: #047857;
+        }
+
+        .status-failed {
+            background: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .progress-bar-container {
+            height: 8px;
+            background: #e5e7eb;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 12px;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #f093fb, #f5576c);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-detail {
+            font-size: 13px;
+            color: #6b7280;
+        }
+
+        .result-section {
+            margin-top: 24px;
+            background: #f0fdf4;
+            border: 1px solid #86efac;
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .result-section h3 {
+            color: #166534;
+            font-size: 16px;
+            margin-bottom: 12px;
+        }
+
+        .result-stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .result-stat {
+            background: white;
+            border-radius: 8px;
+            padding: 12px;
+            text-align: center;
+        }
+
+        .result-stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #166534;
+        }
+
+        .result-stat-label {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 4px;
+        }
+
+        .result-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .supported-banks {
+            margin-top: 32px;
+            padding: 20px;
+            background: #f8fafc;
+            border-radius: 12px;
+        }
+
+        .supported-banks h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #475569;
+            margin-bottom: 12px;
+        }
+
+        .bank-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .bank-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 12px;
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 20px;
+            font-size: 12px;
+            color: #64748b;
+        }
+
+        .bank-tag-icon {
+            font-size: 14px;
+        }
+
+        .header-nav {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+        }
+
+        .nav-link {
+            color: rgba(255, 255, 255, 0.8);
+            text-decoration: none;
+            font-size: 14px;
+            padding: 6px 12px;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .nav-link:hover {
+            background: rgba(255, 255, 255, 0.15);
+            color: white;
+        }
+
+        .nav-link.active {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <div>
+                    <h1>💰 个人理财专版</h1>
+                    <p class="subtitle">上传账单，智能分类，轻松管理个人财务</p>
+                </div>
+                <div class="header-nav">
+                    <a href="/personal/upload" class="nav-link active">上传账单</a>
+                    <a href="/personal" class="nav-link">资金视图</a>
+                    <a href="/upload" class="nav-link">对公版</a>
+                </div>
+            </div>
+        </header>
+
+        <div class="loading-overlay" id="loadingOverlay">
+            <div class="loading-spinner"></div>
+            <p>正在处理...</p>
+        </div>
+
+        <div class="upload-section">
+            <h2 class="section-title">📤 上传账单文件</h2>
+
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📁</div>
+                <p class="upload-hint">拖拽文件到此处，或点击选择文件</p>
+                <p class="upload-sub-hint">支持 .xlsx / .xls / .csv 格式的银行账单</p>
+                <input type="file" id="fileInput" name="files" multiple
+                       accept=".xlsx,.xls,.csv" style="display: none;">
+                <div class="upload-buttons">
+                    <button type="button" class="btn btn-primary" id="btnSelectFiles">选择文件</button>
+                </div>
+            </div>
+
+            <div class="file-list" id="fileList" style="display: none;">
+                <div class="file-list-header">
+                    <h3>已选择的文件 (<span id="fileCount">0</span>)</h3>
+                    <button type="button" class="btn btn-sm btn-secondary" id="btnClearFiles">清除</button>
+                </div>
+                <ul class="file-name-list" id="fileNameList"></ul>
+            </div>
+
+            <div style="margin-top: 24px; text-align: center;">
+                <button type="button" class="btn btn-primary btn-lg" id="btnUpload" disabled>
+                    开始解析账单
+                </button>
+            </div>
+
+            <div class="progress-section" id="progressSection" style="display: none;">
+                <div class="progress-card">
+                    <div class="progress-header">
+                        <span class="task-id" id="progressTaskId">-</span>
+                        <span class="status-badge status-processing" id="progressStatus">处理中</span>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+                    </div>
+                    <div class="progress-detail" id="progressDetail">正在解析账单...</div>
+                </div>
+            </div>
+
+            <div class="result-section" id="resultSection" style="display: none;">
+                <h3>🎉 解析完成！</h3>
+                <div class="result-stats">
+                    <div class="result-stat">
+                        <div class="result-stat-value" id="resultFiles">-</div>
+                        <div class="result-stat-label">解析文件</div>
+                    </div>
+                    <div class="result-stat">
+                        <div class="result-stat-value" id="resultRecords">-</div>
+                        <div class="result-stat-label">交易记录</div>
+                    </div>
+                    <div class="result-stat">
+                        <div class="result-stat-value" id="resultNew">-</div>
+                        <div class="result-stat-label">新增记录</div>
+                    </div>
+                    <div class="result-stat">
+                        <div class="result-stat-value" id="resultDup">-</div>
+                        <div class="result-stat-label">重复记录</div>
+                    </div>
+                </div>
+                <div class="result-actions">
+                    <button type="button" class="btn btn-secondary" onclick="resetUpload()">继续上传</button>
+                    <a href="/personal" class="btn btn-primary">查看资金视图</a>
+                </div>
+            </div>
+
+            <div class="supported-banks">
+                <h3>🏦 支持的账单类型</h3>
+                <div class="bank-list">
+                    <span class="bank-tag"><span class="bank-tag-icon">💳</span> 招商银行借记卡</span>
+                    <span class="bank-tag"><span class="bank-tag-icon">💳</span> 工商银行借记卡</span>
+                    <span class="bank-tag"><span class="bank-tag-icon">💳</span> 建设银行借记卡</span>
+                    <span class="bank-tag"><span class="bank-tag-icon">📱</span> 支付宝账单</span>
+                    <span class="bank-tag"><span class="bank-tag-icon">💬</span> 微信支付账单</span>
+                    <span class="bank-tag"><span class="bank-tag-icon">💳</span> 招商银行信用卡</span>
+                    <span class="bank-tag"><span class="bank-tag-icon">💳</span> 工商银行信用卡</span>
+                    <span class="bank-tag"><span class="bank-tag-icon">💳</span> 建设银行信用卡</span>
+                </div>
+                <p style="font-size: 12px; color: #94a3b8; margin-top: 12px;">
+                    提示：系统会自动根据文件名识别账单类型。如果您的账单不在列表中，可以手动配置规则。
+                </p>
+            </div>
+        </div>
+
+        <footer class="footer">
+            <p>个人理财专版 · 数据与对公版完全隔离 · 本地存储更安全</p>
+        </footer>
+    </div>
+
+    <div id="toast" class="toast" style="display: none;"></div>
+
+    <script>
+    var selectedFiles = [];
+    var currentTaskId = null;
+    var pollTimer = null;
+
+    function showToast(message, type) {
+        var toast = document.getElementById('toast');
+        toast.textContent = message;
+        toast.className = 'toast toast-' + (type || 'info');
+        toast.style.display = 'block';
+        setTimeout(function() {
+            toast.style.display = 'none';
+        }, 3000);
+    }
+
+    function showLoading() {
+        document.getElementById('loadingOverlay').style.display = 'flex';
+    }
+
+    function hideLoading() {
+        document.getElementById('loadingOverlay').style.display = 'none';
+    }
+
+    function formatNumber(num) {
+        return num.toLocaleString();
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        var uploadArea = document.getElementById('uploadArea');
+        var fileInput = document.getElementById('fileInput');
+        var btnSelectFiles = document.getElementById('btnSelectFiles');
+        var btnUpload = document.getElementById('btnUpload');
+        var btnClearFiles = document.getElementById('btnClearFiles');
+
+        uploadArea.addEventListener('click', function() {
+            fileInput.click();
+        });
+
+        btnSelectFiles.addEventListener('click', function(e) {
+            e.stopPropagation();
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', function(e) {
+            handleFiles(e.target.files);
+        });
+
+        uploadArea.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', function() {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', function(e) {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            var files = [];
+            if (e.dataTransfer.files) {
+                for (var i = 0; i < e.dataTransfer.files.length; i++) {
+                    files.push(e.dataTransfer.files[i]);
+                }
+            }
+            handleFiles(files);
+        });
+
+        btnUpload.addEventListener('click', function() {
+            startUpload();
+        });
+
+        btnClearFiles.addEventListener('click', function() {
+            clearFiles();
+        });
+    });
+
+    function handleFiles(files) {
+        if (!files || files.length === 0) return;
+
+        var validFiles = [];
+        var validExtensions = ['.xlsx', '.xls', '.csv'];
+
+        for (var i = 0; i < files.length; i++) {
+            var file = files[i];
+            var name = file.name.toLowerCase();
+            var isValid = validExtensions.some(function(ext) {
+                return name.endsWith(ext);
+            });
+            if (isValid && !name.startsWith('~$')) {
+                validFiles.push(file);
+            }
+        }
+
+        if (validFiles.length === 0) {
+            showToast('请选择支持的文件格式（.xlsx / .xls / .csv）', 'warning');
+            return;
+        }
+
+        selectedFiles = selectedFiles.concat(validFiles);
+        updateFileList();
+    }
+
+    function updateFileList() {
+        var fileList = document.getElementById('fileList');
+        var fileNameList = document.getElementById('fileNameList');
+        var fileCount = document.getElementById('fileCount');
+        var btnUpload = document.getElementById('btnUpload');
+
+        if (selectedFiles.length === 0) {
+            fileList.style.display = 'none';
+            btnUpload.disabled = true;
+            return;
+        }
+
+        fileList.style.display = 'block';
+        fileCount.textContent = selectedFiles.length;
+        btnUpload.disabled = false;
+
+        var html = '';
+        selectedFiles.forEach(function(file, index) {
+            var icon = getFileIcon(file.name);
+            html += '<li>' +
+                '<span class="file-icon">' + icon + '</span>' +
+                '<span>' + file.name + '</span>' +
+                '</li>';
+        });
+        fileNameList.innerHTML = html;
+    }
+
+    function getFileIcon(filename) {
+        var ext = filename.split('.').pop().toLowerCase();
+        if (ext === 'xlsx' || ext === 'xls') return '📊';
+        if (ext === 'csv') return '📄';
+        return '📁';
+    }
+
+    function clearFiles() {
+        selectedFiles = [];
+        document.getElementById('fileInput').value = '';
+        updateFileList();
+    }
+
+    function startUpload() {
+        if (selectedFiles.length === 0) {
+            showToast('请先选择文件', 'warning');
+            return;
+        }
+
+        var formData = new FormData();
+        selectedFiles.forEach(function(file) {
+            formData.append('files', file);
+        });
+
+        document.getElementById('progressSection').style.display = 'block';
+        document.getElementById('resultSection').style.display = 'none';
+        document.getElementById('progressBar').style.width = '10%';
+        document.getElementById('progressDetail').textContent = '正在上传文件...';
+        document.getElementById('progressStatus').className = 'status-badge status-processing';
+        document.getElementById('progressStatus').textContent = '处理中';
+
+        fetch('/api/personal/upload', {
+            method: 'POST',
+            body: formData
+        })
+        .then(function(resp) { return resp.json(); })
+        .then(function(data) {
+            if (data.success) {
+                currentTaskId = data.task_id;
+                document.getElementById('progressTaskId').textContent = '任务ID: ' + data.task_id;
+                document.getElementById('progressBar').style.width = '30%';
+                document.getElementById('progressDetail').textContent = '正在解析账单...';
+                startPolling(data.task_id);
+            } else {
+                showToast(data.message || '上传失败', 'error');
+                document.getElementById('progressSection').style.display = 'none';
+            }
+        })
+        .catch(function(err) {
+            showToast('上传失败: ' + err.message, 'error');
+            document.getElementById('progressSection').style.display = 'none';
+        });
+    }
+
+    function startPolling(taskId) {
+        if (pollTimer) {
+            clearInterval(pollTimer);
+        }
+
+        pollTimer = setInterval(function() {
+            fetch('/api/personal/tasks/' + taskId)
+                .then(function(resp) { return resp.json(); })
+                .then(function(data) {
+                    if (data.success) {
+                        updateProgress(data.data);
+                    }
+                })
+                .catch(function() {});
+        }, 1000);
+    }
+
+    function updateProgress(taskData) {
+        var progressBar = document.getElementById('progressBar');
+        var progressDetail = document.getElementById('progressDetail');
+        var progressStatus = document.getElementById('progressStatus');
+
+        if (taskData.status === 'processing') {
+            progressBar.style.width = '60%';
+            progressDetail.textContent =
+                '已解析 ' + taskData.parsed_files + '/' + taskData.total_files + ' 个文件';
+        } else if (taskData.status === 'completed') {
+            progressBar.style.width = '100%';
+            progressDetail.textContent = '解析完成！';
+            progressStatus.className = 'status-badge status-completed';
+            progressStatus.textContent = '已完成';
+
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+
+            showResult(taskData);
+        } else if (taskData.status === 'failed') {
+            progressBar.style.width = '100%';
+            progressBar.style.background = '#ef4444';
+            progressDetail.textContent = taskData.error_message || '解析失败';
+            progressStatus.className = 'status-badge status-failed';
+            progressStatus.textContent = '失败';
+
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+
+            showToast(taskData.error_message || '解析失败', 'error');
+        }
+    }
+
+    function showResult(taskData) {
+        document.getElementById('resultSection').style.display = 'block';
+        document.getElementById('resultFiles').textContent = taskData.parsed_files || 0;
+        document.getElementById('resultRecords').textContent = formatNumber(taskData.total_records || 0);
+        document.getElementById('resultNew').textContent = formatNumber(taskData.new_records || 0);
+        document.getElementById('resultDup').textContent = formatNumber(taskData.duplicate_records || 0);
+    }
+
+    function resetUpload() {
+        clearFiles();
+        document.getElementById('progressSection').style.display = 'none';
+        document.getElementById('resultSection').style.display = 'none';
+        currentTaskId = null;
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    }
+    </script>
+</body>
+</html>
