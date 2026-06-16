@@ -185,7 +185,8 @@ def insert_transactions(transactions: list, batch_id: int = None,
                         db_path: str = None) -> Tuple[int, int]:
     """
     批量插入交易记录
-    Returns: (插入数量, 重复数量)
+    注意：重复记录（ID已存在）会被跳过，不会更新
+    Returns: (新增数量, 重复数量)
     """
     logger = get_logger()
 
@@ -193,6 +194,15 @@ def insert_transactions(transactions: list, batch_id: int = None,
         return 0, 0
 
     ensure_db_initialized(db_path)
+
+    tx_dicts = []
+    for tx in transactions:
+        if isinstance(tx, dict):
+            tx_dicts.append(tx)
+        else:
+            tx_dicts.append(tx.to_dict())
+
+    tx_ids = [tx.get('id', '') for tx in tx_dicts]
 
     inserted = 0
     duplicates = 0
@@ -202,12 +212,29 @@ def insert_transactions(transactions: list, batch_id: int = None,
         with get_db_connection(db_path) as conn:
             cursor = conn.cursor()
 
-            for tx in transactions:
-                try:
-                    tx_dict = tx if isinstance(tx, dict) else tx.to_dict()
+            if tx_ids:
+                placeholders = ','.join('?' * len(tx_ids))
+                cursor.execute(
+                    f'SELECT id FROM transactions WHERE id IN ({placeholders})',
+                    tx_ids
+                )
+                existing_ids = set(row['id'] for row in cursor.fetchall())
+            else:
+                existing_ids = set()
 
+            for tx_dict in tx_dicts:
+                tx_id = tx_dict.get('id', '')
+                if not tx_id:
+                    logger.warning('交易记录缺少 ID，跳过')
+                    continue
+
+                if tx_id in existing_ids:
+                    duplicates += 1
+                    continue
+
+                try:
                     cursor.execute('''
-                        INSERT OR REPLACE INTO transactions (
+                        INSERT INTO transactions (
                             id, bank_name, card_type, account_number,
                             trade_date, transaction_time, post_date,
                             amount, direction, balance,
@@ -217,7 +244,7 @@ def insert_transactions(transactions: list, batch_id: int = None,
                             created_at, updated_at
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
-                        tx_dict.get('id', ''),
+                        tx_id,
                         tx_dict.get('bank_name', ''),
                         tx_dict.get('card_type', ''),
                         tx_dict.get('account_number', ''),
@@ -241,15 +268,14 @@ def insert_transactions(transactions: list, batch_id: int = None,
                         now,
                     ))
 
-                    if cursor.rowcount > 0:
-                        inserted += 1
-                    else:
-                        duplicates += 1
+                    inserted += 1
+                    existing_ids.add(tx_id)
 
                 except sqlite3.IntegrityError:
                     duplicates += 1
+                    existing_ids.add(tx_id)
                 except Exception as e:
-                    logger.warning('插入交易记录失败: %s - %s', tx_dict.get('id'), e)
+                    logger.warning('插入交易记录失败: %s - %s', tx_id, e)
 
         logger.info('交易记录插入完成: 新增 %d 条，重复 %d 条', inserted, duplicates)
         return inserted, duplicates
