@@ -27,6 +27,20 @@ from enum import Enum
 from datetime import datetime
 
 
+try:
+    from bank_knowledge_base import (
+        get_knowledge_base,
+        diagnose_from_knowledge_base,
+        SearchResult,
+    )
+    HAS_KNOWLEDGE_BASE = True
+except ImportError:
+    HAS_KNOWLEDGE_BASE = False
+    get_knowledge_base = None
+    diagnose_from_knowledge_base = None
+    SearchResult = None
+
+
 def get_script_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
@@ -73,6 +87,7 @@ class TroubleshootingReport:
     total_issues: int = 0
     issues: List[TroubleshootingIssue] = field(default_factory=list)
     summary: str = ''
+    knowledge_base_matches: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -81,6 +96,7 @@ class TroubleshootingReport:
             'total_issues': self.total_issues,
             'issues': [issue.to_dict() for issue in self.issues],
             'summary': self.summary,
+            'knowledge_base_matches': self.knowledge_base_matches,
         }
 
 
@@ -138,6 +154,12 @@ class RuleEngine:
                 'title': '文件权限不足',
                 'severity': SeverityLevel.ERROR,
                 'check_func': self._check_permission_error,
+            },
+            {
+                'id': 'knowledge_base_match',
+                'title': '知识库已知问题匹配',
+                'severity': SeverityLevel.INFO,
+                'check_func': self._check_knowledge_base,
             },
         ]
 
@@ -515,6 +537,56 @@ class RuleEngine:
             confidence=confidence,
         )
 
+    def _check_knowledge_base(self, log_lines: List[str],
+                               processing_result: Optional[Any]) -> Optional[TroubleshootingIssue]:
+        if not HAS_KNOWLEDGE_BASE or diagnose_from_knowledge_base is None:
+            return None
+
+        bank_name = None
+        if processing_result is not None:
+            bank_name = getattr(processing_result, 'bank_name', None)
+            if not bank_name:
+                bank_name = getattr(processing_result, 'last_bank_name', None)
+
+        try:
+            results = diagnose_from_knowledge_base(log_lines, bank_name)
+        except Exception:
+            return None
+
+        if not results:
+            return None
+
+        evidence = []
+        fix_steps = []
+        best_score = 0.0
+
+        for r in results[:5]:
+            best_score = max(best_score, r.match_score)
+            evidence.append(
+                f'[{r.bank_name}] {r.issue.title} (匹配度:{int(r.match_score * 100)}%)'
+            )
+            if r.issue.root_cause:
+                evidence.append(f'  根因: {r.issue.root_cause}')
+            for step_idx, step in enumerate(r.issue.fix_steps, 1):
+                step_text = f'[{r.bank_name}] {step}'
+                if step_text not in fix_steps:
+                    fix_steps.append(step_text)
+
+        if not evidence:
+            return None
+
+        confidence = min(best_score * 0.8 + 0.2, 1.0)
+
+        return TroubleshootingIssue(
+            issue_id='knowledge_base_match',
+            title=f'知识库匹配到 {len(results)} 个已知问题',
+            severity=SeverityLevel.INFO,
+            description='从银行格式知识库中检索到与当前错误匹配的已知问题和解决方案。',
+            evidence=evidence,
+            fix_steps=fix_steps,
+            confidence=confidence,
+        )
+
     def analyze(self, log_lines: List[str],
                 processing_result: Optional[Any] = None) -> List[TroubleshootingIssue]:
         issues = []
@@ -644,11 +716,25 @@ def run_troubleshooting(log_path: Optional[str] = None,
     engine = RuleEngine()
     issues = engine.analyze(log_lines, processing_result)
 
+    kb_matches = []
+    if HAS_KNOWLEDGE_BASE and diagnose_from_knowledge_base is not None and log_lines:
+        try:
+            bank_name = None
+            if processing_result is not None:
+                bank_name = getattr(processing_result, 'bank_name', None)
+                if not bank_name:
+                    bank_name = getattr(processing_result, 'last_bank_name', None)
+            kb_results = diagnose_from_knowledge_base(log_lines, bank_name)
+            kb_matches = [r.to_dict() for r in kb_results]
+        except Exception as e:
+            logger.warning('知识库检索失败: %s', e)
+
     report = TroubleshootingReport(
         timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         log_file=log_path or '',
         total_issues=len(issues),
         issues=issues,
+        knowledge_base_matches=kb_matches,
     )
 
     if not issues:
@@ -705,4 +791,20 @@ def print_report(report: TroubleshootingReport):
 
     print('\n' + '-' * 60)
     print(f'  总结: {report.summary}')
+
+    if report.knowledge_base_matches:
+        print('\n' + '-' * 60)
+        print(f'  📚 知识库匹配 ({len(report.knowledge_base_matches)} 条)')
+        print('-' * 60)
+        for idx, match in enumerate(report.knowledge_base_matches[:5], 1):
+            issue_data = match.get('issue', {})
+            print(f'\n  {idx}. [{match.get("bank_name", "")}] {issue_data.get("title", "")}')
+            print(f'     匹配度: {int(match.get("match_score", 0) * 100)}%')
+            if issue_data.get('root_cause'):
+                print(f'     根因: {issue_data["root_cause"]}')
+            if issue_data.get('fix_steps'):
+                print(f'     修复步骤:')
+                for step_idx, step in enumerate(issue_data['fix_steps'], 1):
+                    print(f'       {step_idx}. {step}')
+
     print('=' * 60 + '\n')

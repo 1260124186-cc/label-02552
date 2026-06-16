@@ -1,0 +1,554 @@
+banks:
+- bank_name: 北京银行
+  display_name: 北京银行
+  description: 北京银行企业网银导出的对账单，默认 xlsx 格式，表头在第4行，账号位于B2单元格。
+  config_version: '1.0'
+  last_verified_date: '2026-06-01'
+  verified_by: ''
+  template_screenshots:
+  - name: 北京银行标准模板
+    description: 北京银行企业网银标准导出格式截图
+    file_path: screenshots/beijing_bank_template.png
+    upload_date: ''
+    config_version: '1.0'
+    notes: ''
+  column_descriptions:
+  - field_key: trade_date
+    display_name: 交易日期
+    description: 交易发生日期，格式通常为 YYYY-MM-DD 或 YYYY/MM/DD
+    example_values:
+    - '2024-01-15'
+    - '2024/01/15'
+    pitfalls:
+    - 部分导出可能包含时间部分，需截取日期
+  - field_key: payment
+    display_name: 支出金额
+    description: 资金流出的交易金额，正数表示
+    example_values:
+    - '5000.00'
+    - '12000.50'
+    pitfalls:
+    - 金额不含千分位逗号
+    - 零值可能显示为空或0
+  - field_key: receipt
+    display_name: 收入金额
+    description: 资金流入的交易金额，正数表示
+    example_values:
+    - '3000.00'
+    - '150000.00'
+    pitfalls: []
+  - field_key: summary
+    display_name: 摘要
+    description: 交易摘要信息，包含交易用途和备注
+    example_values:
+    - 转账
+    - 工资发放
+    pitfalls:
+    - 摘要内容可能被截断
+  - field_key: counterpart
+    display_name: 对方户名
+    description: 交易对方的账户名称
+    example_values:
+    - 某某公司
+    - 张三
+    pitfalls:
+    - 部分交易可能不显示对方户名
+  - field_key: balance
+    display_name: 余额
+    description: 交易后的账户余额
+    example_values:
+    - '125000.00'
+    pitfalls: []
+  - field_key: transaction_id
+    display_name: 交易流水号
+    description: 唯一标识该笔交易的流水号
+    example_values:
+    - '202401150001'
+    pitfalls:
+    - 流水号可能包含字母和数字混合
+  known_issues:
+  - issue_id: bj_header_shift
+    title: 北京银行表头行偏移
+    description: 部分北京银行导出文件表头不在第4行，可能在第3行或第5行，导致列映射错位
+    symptoms:
+    - 数据解析后金额列显示为日期
+    - 交易日期列出现金额值
+    - 大量空行或解析异常
+    root_cause: 北京银行网银系统升级后导出模板略有变化，表头行位置不固定
+    fix_steps:
+    - 打开流水文件确认实际表头行位置
+    - 修改 bank_rules.yaml 中北京银行的 start_row 配置
+    - 如果表头在第3行，将 start_row 改为 3
+    - 如果表头在第5行，将 start_row 改为 5
+    - 重新运行流水处理
+    error_patterns:
+    - 表头.*不匹配.*北京银行
+    - 北京银行.*start_row
+    - header.*mismatch.*beijing
+    severity: warning
+    config_version: '1.0'
+    last_seen_date: '2026-05-20'
+    tags:
+    - 表头偏移
+    - 北京银行
+  - issue_id: bj_encoding_garbled
+    title: 北京银行导出文件中文乱码
+    description: 部分北京银行导出的 CSV 文件使用 GBK 编码，而程序默认按 UTF-8 解析导致中文乱码
+    symptoms:
+    - 摘要列显示为乱码
+    - 对方户名显示为乱码
+    - 表头识别失败
+    root_cause: 北京银行网银系统默认导出编码为 GBK，与程序默认的 UTF-8 不兼容
+    fix_steps:
+    - 将 CSV 文件用文本编辑器打开另存为 UTF-8 编码
+    - 或将文件另存为 xlsx 格式后重新处理
+    - 程序已内置编码自动检测，如仍出错请反馈
+    error_patterns:
+    - 乱码
+    - encoding.*error
+    - UnicodeDecodeError.*北京银行
+    - gbk.*utf
+    severity: warning
+    config_version: '1.0'
+    last_seen_date: '2026-04-15'
+    tags:
+    - 编码
+    - 乱码
+  general_pitfalls:
+  - 北京银行导出的 xls 格式较老，建议优先使用 xlsx 格式
+  - 账号位于 B2 单元格，如果文件格式变更需确认账号位置
+  - 交易流水号列位于第16列（较靠后），部分简版导出可能不含此列
+  notes: ''
+  tags:
+  - 企业网银
+  - xlsx
+
+- bank_name: 东亚银行
+  display_name: 东亚银行
+  description: 东亚银行企业网银导出的对账单，默认 xlsx 格式，表头在第5行，账号位于B1单元格。
+  config_version: '1.0'
+  last_verified_date: '2026-06-01'
+  verified_by: ''
+  template_screenshots:
+  - name: 东亚银行标准模板
+    description: 东亚银行企业网银标准导出格式截图
+    file_path: screenshots/east_asia_bank_template.png
+    upload_date: ''
+    config_version: '1.0'
+    notes: ''
+  column_descriptions:
+  - field_key: trade_date
+    display_name: 交易日期
+    description: 交易发生日期
+    example_values:
+    - '2024-01-15'
+    pitfalls: []
+  - field_key: payment
+    display_name: 支出金额
+    description: 资金流出的交易金额
+    example_values:
+    - '5000.00'
+    pitfalls: []
+  - field_key: receipt
+    display_name: 收入金额
+    description: 资金流入的交易金额
+    example_values:
+    - '3000.00'
+    pitfalls: []
+  - field_key: summary
+    display_name: 摘要/交易描述
+    description: 摘要和对方信息可能合并在同一列（交易描述/对方）
+    example_values:
+    - 转账-某某公司
+    pitfalls:
+    - 东亚银行的摘要列和对方户名列可能是同一列
+    - 该列内容格式为"摘要-对方户名"
+  - field_key: counterpart
+    display_name: 对方户名/交易描述
+    description: 与摘要列可能为同一列（交易描述/对方），需注意区分
+    example_values:
+    - 某某公司
+    pitfalls:
+    - 可能与摘要列合并显示
+  - field_key: balance
+    display_name: 余额
+    description: 交易后的账户余额
+    example_values:
+    - '125000.00'
+    pitfalls: []
+  - field_key: transaction_id
+    display_name: 交易流水号
+    description: 唯一标识该笔交易的流水号
+    example_values:
+    - 'EA202401150001'
+    pitfalls: []
+  known_issues:
+  - issue_id: ea_summary_counterpart_merged
+    title: 东亚银行摘要与对方户名合并列
+    description: 东亚银行部分导出模板中，摘要和对方户名合并在同一列（交易描述/对方），
+      导致摘要和对方户名两个字段映射到相同列
+    symptoms:
+    - 摘要列和对方户名列内容完全相同
+    - 对方户名中包含摘要信息
+    - 无法单独提取对方户名
+    root_cause: 东亚银行网银系统导出模板将摘要和对方信息合并为一列
+    fix_steps:
+    - 这是已知模板特性，不影响流水处理
+    - 如需拆分，可在处理后将"交易描述/对方"列按分隔符拆分
+    - 银行配置中已将 summary 和 counterpart 均映射到第12列
+    - 程序会自动处理合并列的情况
+    error_patterns:
+    - 摘要.*对方.*合并
+    - 东亚银行.*摘要.*对方户名
+    - counterpart.*same.*summary
+    severity: info
+    config_version: '1.0'
+    last_seen_date: '2026-05-10'
+    tags:
+    - 合并列
+    - 东亚银行
+  - issue_id: ea_account_not_in_b1
+    title: 东亚银行账号单元格位置变化
+    description: 东亚银行部分导出文件账号不在 B1 单元格，可能在 A1 或 C1，
+      导致无法自动提取账号
+    symptoms:
+    - 账号列为空
+    - 账号提取失败
+    - 主体匹配异常
+    root_cause: 东亚银行不同版本的网银系统导出模板中账号位置不固定
+    fix_steps:
+    - 打开流水文件确认实际账号位置
+    - 修改 bank_rules.yaml 中东亚银行的 account_cell 配置
+    - 重新运行流水处理
+    error_patterns:
+    - 账号.*提取.*失败.*东亚
+    - account.*not.*found.*eastasia
+    severity: warning
+    config_version: '1.0'
+    last_seen_date: '2026-03-20'
+    tags:
+    - 账号位置
+    - 东亚银行
+  general_pitfalls:
+  - 东亚银行摘要和对方户名可能合并在同一列
+  - 账号位于 B1 单元格，需确认文件格式未变
+  - 数据起始行在第5行，比其他银行多一行
+  notes: ''
+  tags:
+  - 企业网银
+  - xlsx
+
+- bank_name: 工商银行
+  display_name: 工商银行
+  description: 工商银行企业网银导出的对账单，默认 xlsx 格式，表头在第6行，账号位于B4单元格。
+  config_version: '1.0'
+  last_verified_date: '2026-06-01'
+  verified_by: ''
+  template_screenshots:
+  - name: 工商银行标准模板
+    description: 工商银行企业网银标准导出格式截图
+    file_path: screenshots/icbc_template.png
+    upload_date: ''
+    config_version: '1.0'
+    notes: ''
+  column_descriptions:
+  - field_key: trade_date
+    display_name: 交易日期
+    description: 交易发生日期
+    example_values:
+    - '2024-01-15'
+    pitfalls: []
+  - field_key: payment
+    display_name: 支出金额
+    description: 资金流出的交易金额
+    example_values:
+    - '5000.00'
+    pitfalls:
+    - 工商银行支出和收入列的顺序与部分银行相反（先收入后支出）
+  - field_key: receipt
+    display_name: 收入金额
+    description: 资金流入的交易金额
+    example_values:
+    - '3000.00'
+    pitfalls:
+    - 收入列在第4列，支出列在第5列，注意不要混淆
+  - field_key: summary
+    display_name: 摘要
+    description: 交易摘要信息
+    example_values:
+    - 转账
+    pitfalls: []
+  - field_key: counterpart
+    display_name: 对方户名
+    description: 交易对方的账户名称
+    example_values:
+    - 某某公司
+    pitfalls: []
+  - field_key: balance
+    display_name: 余额
+    description: 交易后的账户余额
+    example_values:
+    - '125000.00'
+    pitfalls: []
+  - field_key: transaction_id
+    display_name: 交易流水号
+    description: 唯一标识该笔交易的流水号
+    example_values:
+    - 'ICBC202401150001'
+    pitfalls: []
+  known_issues:
+  - issue_id: icbc_payment_receipt_swap
+    title: 工商银行收入支出列顺序反直觉
+    description: 工商银行导出模板中收入金额在第4列、支出金额在第5列，
+      与常见的先支出后收入顺序相反，容易在手动配置时混淆
+    symptoms:
+    - 收入金额全为0或负数
+    - 支出金额全为0或负数
+    - 余额计算异常
+    root_cause: 工商银行导出模板列顺序为先收入后支出，与部分银行相反
+    fix_steps:
+    - 检查 bank_rules.yaml 中工商银行的列映射
+    - 确认 receipt 映射到第4列、payment 映射到第5列
+    - 不要手动交换列映射，程序已正确处理
+    error_patterns:
+    - 收入.*支出.*反.*工商
+    - 金额.*负数.*工商银行
+    - payment.*receipt.*swap
+    severity: info
+    config_version: '1.0'
+    last_seen_date: '2026-05-15'
+    tags:
+    - 列顺序
+    - 工商银行
+  - issue_id: icbc_multi_sheet
+    title: 工商银行多工作表文件
+    description: 工商银行部分导出文件包含多个工作表，数据可能不在第一个工作表中
+    symptoms:
+    - 解析结果为空
+    - 提示"未检测到有效数据"
+    - 总表行数为0
+    root_cause: 工商银行网银系统可能在同一文件中导出多个账户的数据到不同工作表
+    fix_steps:
+    - 打开文件检查工作表列表
+    - 确认数据所在的工作表名称
+    - 如需处理多工作表，配置 multi_account 或 skip_sheets 选项
+    - 重新运行流水处理
+    error_patterns:
+    - 工商银行.*空.*工作表
+    - multi.*sheet.*icbc
+    - 数据为空.*工商
+    severity: warning
+    config_version: '1.0'
+    last_seen_date: '2026-04-20'
+    tags:
+    - 多工作表
+    - 工商银行
+  general_pitfalls:
+  - 工商银行收入列在第4列，支出列在第5列，顺序与常见模板相反
+  - 数据起始行在第6行，需注意前面的行不要被当作数据处理
+  - 账号位于B4单元格，位置偏下
+  notes: ''
+  tags:
+  - 企业网银
+  - xlsx
+
+- bank_name: 建设银行
+  display_name: 建设银行
+  description: 建设银行企业网银导出的对账单，默认 xlsx 格式，表头在第4行，账号位于A2单元格。
+  config_version: '1.0'
+  last_verified_date: '2026-06-01'
+  verified_by: ''
+  template_screenshots:
+  - name: 建设银行标准模板
+    description: 建设银行企业网银标准导出格式截图
+    file_path: screenshots/ccb_template.png
+    upload_date: ''
+    config_version: '1.0'
+    notes: ''
+  column_descriptions:
+  - field_key: trade_date
+    display_name: 交易日期
+    description: 交易发生日期
+    example_values:
+    - '2024-01-15'
+    pitfalls: []
+  - field_key: payment
+    display_name: 支出金额
+    description: 资金流出的交易金额
+    example_values:
+    - '5000.00'
+    pitfalls: []
+  - field_key: receipt
+    display_name: 收入金额
+    description: 资金流入的交易金额
+    example_values:
+    - '3000.00'
+    pitfalls:
+    - 建设银行也是收入在前支出在后
+  - field_key: summary
+    display_name: 摘要
+    description: 交易摘要信息
+    example_values:
+    - 转账
+    pitfalls: []
+  - field_key: counterpart
+    display_name: 对方户名
+    description: 交易对方的账户名称
+    example_values:
+    - 某某公司
+    pitfalls: []
+  - field_key: balance
+    display_name: 余额
+    description: 交易后的账户余额
+    example_values:
+    - '125000.00'
+    pitfalls: []
+  - field_key: transaction_id
+    display_name: 交易流水号
+    description: 唯一标识该笔交易的流水号
+    example_values:
+    - 'CCB202401150001'
+    pitfalls: []
+  known_issues:
+  - issue_id: ccb_account_in_a2
+    title: 建设银行账号在A2单元格
+    description: 建设银行的账号位置在A2而非常见的B列，且A1单元格为"账号"标签，
+      若模板变更可能识别失败
+    symptoms:
+    - 账号提取为空
+    - 账号提取到标签文字"账号"而非实际号码
+    root_cause: 建设银行导出模板将账号放在A2，A1为"账号"标签
+    fix_steps:
+    - 确认 bank_rules.yaml 中建设银行的 account_cell 配置为 A2
+    - 如果模板变更，更新 account_cell 到正确的单元格
+    - 重新运行流水处理
+    error_patterns:
+    - 账号.*提取.*失败.*建设
+    - account.*a2.*ccb
+    severity: info
+    config_version: '1.0'
+    last_seen_date: '2026-05-05'
+    tags:
+    - 账号位置
+    - 建设银行
+  general_pitfalls:
+  - 建设银行账号在A2而非B列
+  - 收入列也在支出列前面
+  notes: ''
+  tags:
+  - 企业网银
+  - xlsx
+
+- bank_name: 招商银行
+  display_name: 招商银行
+  description: 招商银行企业网银导出的对账单，默认 xlsx 格式，表头在第6行，账号位于B3单元格。
+  config_version: '1.0'
+  last_verified_date: '2026-06-01'
+  verified_by: ''
+  template_screenshots:
+  - name: 招商银行标准模板
+    description: 招商银行企业网银标准导出格式截图
+    file_path: screenshots/cmb_template.png
+    upload_date: ''
+    config_version: '1.0'
+    notes: ''
+  column_descriptions:
+  - field_key: trade_date
+    display_name: 交易日期
+    description: 交易发生日期
+    example_values:
+    - '2024-01-15'
+    pitfalls: []
+  - field_key: payment
+    display_name: 支出金额
+    description: 资金流出的交易金额
+    example_values:
+    - '5000.00'
+    pitfalls: []
+  - field_key: receipt
+    display_name: 收入金额
+    description: 资金流入的交易金额，招商银行收入列在第3列，支出列在第4列
+    example_values:
+    - '3000.00'
+    pitfalls:
+    - 收入在第3列、支出在第4列，与部分银行顺序相反
+  - field_key: summary
+    display_name: 摘要
+    description: 交易摘要信息
+    example_values:
+    - 转账
+    pitfalls: []
+  - field_key: counterpart
+    display_name: 对方户名
+    description: 交易对方的账户名称
+    example_values:
+    - 某某公司
+    pitfalls: []
+  - field_key: balance
+    display_name: 余额
+    description: 交易后的账户余额
+    example_values:
+    - '125000.00'
+    pitfalls: []
+  - field_key: transaction_id
+    display_name: 交易流水号
+    description: 唯一标识该笔交易的流水号
+    example_values:
+    - 'CMB202401150001'
+    pitfalls: []
+  known_issues:
+  - issue_id: cmb_receipt_before_payment
+    title: 招商银行收入列在支出列前面
+    description: 招商银行导出模板中收入金额在第3列、支出金额在第4列，
+      与常见的先支出后收入顺序不同
+    symptoms:
+    - 收入和支出金额对调
+    - 余额计算异常
+    root_cause: 招商银行导出模板列顺序为先收入后支出
+    fix_steps:
+    - 检查 bank_rules.yaml 中招商银行的列映射
+    - 确认 receipt 映射到第3列、payment 映射到第4列
+    - 不要手动交换列映射
+    error_patterns:
+    - 收入.*支出.*反.*招商
+    - 金额.*对调.*招商银行
+    severity: info
+    config_version: '1.0'
+    last_seen_date: '2026-05-10'
+    tags:
+    - 列顺序
+    - 招商银行
+  - issue_id: cmb_start_row_shift
+    title: 招商银行数据起始行偏移
+    description: 招商银行不同版本的网银导出模板数据起始行可能不同，
+      标准为第6行，但部分版本为第5行或第7行
+    symptoms:
+    - 第一行或最后一行数据为空或异常
+    - 表头行检测失败
+    - 列映射错位
+    root_cause: 招商银行网银版本更新导致导出格式微调
+    fix_steps:
+    - 打开流水文件确认实际数据起始行
+    - 修改 bank_rules.yaml 中招商银行的 start_row 配置
+    - 重新运行流水处理
+    error_patterns:
+    - 招商银行.*start_row
+    - 表头.*偏移.*招商
+    severity: warning
+    config_version: '1.0'
+    last_seen_date: '2026-04-25'
+    tags:
+    - 起始行
+    - 招商银行
+  general_pitfalls:
+  - 招商银行收入列在第3列，支出列在第4列，顺序与常见模板相反
+  - 数据起始行在第6行
+  - 账号位于B3单元格
+  notes: ''
+  tags:
+  - 企业网银
+  - xlsx
+
+metadata:
+  last_updated: '2026-06-16 10:00:00'
+  version: '1.0'

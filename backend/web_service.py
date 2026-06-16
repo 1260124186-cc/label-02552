@@ -2739,6 +2739,265 @@ def api_workflow_stats():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+try:
+    from bank_knowledge_base import (
+        get_knowledge_base,
+        BankWikiEntry,
+        KnownIssue,
+        ColumnDescription,
+        TemplateScreenshot,
+        SearchResult,
+    )
+    HAS_KNOWLEDGE_BASE = True
+except ImportError:
+    HAS_KNOWLEDGE_BASE = False
+
+
+@app.route('/api/knowledge-base/banks', methods=['GET'])
+def api_knowledge_base_banks():
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        kb = get_knowledge_base()
+        bank_names = kb.get_all_bank_names()
+        entries = kb.get_all_entries()
+        banks_info = []
+        for name in bank_names:
+            entry = entries[name]
+            banks_info.append({
+                'bank_name': name,
+                'display_name': entry.display_name,
+                'config_version': entry.config_version,
+                'last_verified_date': entry.last_verified_date,
+                'known_issues_count': len(entry.known_issues),
+                'screenshots_count': len(entry.template_screenshots),
+                'columns_count': len(entry.column_descriptions),
+                'pitfalls_count': len(entry.general_pitfalls),
+            })
+        return jsonify({'success': True, 'data': banks_info})
+    except Exception as e:
+        logger.error('获取知识库银行列表失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/banks/<bank_name>', methods=['GET'])
+def api_knowledge_base_bank_detail(bank_name):
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        kb = get_knowledge_base()
+        entry = kb.get_entry(bank_name)
+        if entry is None:
+            return jsonify({'success': False, 'message': f'未找到银行「{bank_name}」的知识库条目'}), 404
+        return jsonify({'success': True, 'data': entry.to_dict()})
+    except Exception as e:
+        logger.error('获取知识库银行详情失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/search', methods=['GET'])
+def api_knowledge_base_search():
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        query = request.args.get('q', '').strip()
+        bank_name = request.args.get('bank', '').strip() or None
+        min_score = float(request.args.get('min_score', '0.3'))
+
+        if not query:
+            return jsonify({'success': False, 'message': '搜索关键词不能为空'}), 400
+
+        kb = get_knowledge_base()
+        results = kb.search_all(query, bank_name=bank_name, min_score=min_score)
+        return jsonify({
+            'success': True,
+            'data': [r.to_dict() for r in results],
+            'total': len(results),
+        })
+    except Exception as e:
+        logger.error('知识库搜索失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/banks/<bank_name>/issues', methods=['GET'])
+def api_knowledge_base_issues(bank_name):
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        kb = get_knowledge_base()
+        issues = kb.get_issues_for_bank(bank_name)
+        return jsonify({
+            'success': True,
+            'data': [i.to_dict() for i in issues],
+            'total': len(issues),
+        })
+    except Exception as e:
+        logger.error('获取知识库已知问题失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/banks/<bank_name>/columns', methods=['GET'])
+def api_knowledge_base_columns(bank_name):
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        kb = get_knowledge_base()
+        columns = kb.get_column_descriptions(bank_name)
+        return jsonify({
+            'success': True,
+            'data': [c.to_dict() for c in columns],
+            'total': len(columns),
+        })
+    except Exception as e:
+        logger.error('获取知识库列说明失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/banks/<bank_name>/screenshots', methods=['GET'])
+def api_knowledge_base_screenshots(bank_name):
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        kb = get_knowledge_base()
+        screenshots = kb.get_template_screenshots(bank_name)
+        return jsonify({
+            'success': True,
+            'data': [s.to_dict() for s in screenshots],
+            'total': len(screenshots),
+        })
+    except Exception as e:
+        logger.error('获取知识库模板截图失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/banks/<bank_name>/pitfalls', methods=['GET'])
+def api_knowledge_base_pitfalls(bank_name):
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        kb = get_knowledge_base()
+        pitfalls = kb.get_general_pitfalls(bank_name)
+        return jsonify({
+            'success': True,
+            'data': pitfalls,
+            'total': len(pitfalls),
+        })
+    except Exception as e:
+        logger.error('获取知识库常见坑失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/banks', methods=['POST'])
+def api_knowledge_base_add_bank():
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        data = request.get_json(force=True)
+        bank_name = data.get('bank_name', '').strip()
+        if not bank_name:
+            return jsonify({'success': False, 'message': '银行名称不能为空'}), 400
+
+        kb = get_knowledge_base()
+        entry = BankWikiEntry(
+            bank_name=bank_name,
+            display_name=data.get('display_name', bank_name),
+            description=data.get('description', ''),
+            config_version=data.get('config_version', '1.0'),
+            last_verified_date=data.get('last_verified_date', ''),
+            verified_by=data.get('verified_by', ''),
+            general_pitfalls=data.get('general_pitfalls', []),
+            notes=data.get('notes', ''),
+            tags=data.get('tags', []),
+        )
+        ok = kb.add_or_update_entry(entry)
+        if ok:
+            return jsonify({'success': True, 'message': f'银行「{bank_name}」知识库条目已保存'})
+        return jsonify({'success': False, 'message': '保存失败'}), 500
+    except Exception as e:
+        logger.error('添加知识库银行条目失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/banks/<bank_name>/issues', methods=['POST'])
+def api_knowledge_base_add_issue(bank_name):
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        data = request.get_json(force=True)
+        issue = KnownIssue(
+            issue_id=data.get('issue_id', ''),
+            title=data.get('title', ''),
+            description=data.get('description', ''),
+            symptoms=data.get('symptoms', []),
+            root_cause=data.get('root_cause', ''),
+            fix_steps=data.get('fix_steps', []),
+            error_patterns=data.get('error_patterns', []),
+            severity=data.get('severity', 'warning'),
+            config_version=data.get('config_version', ''),
+            last_seen_date=data.get('last_seen_date', ''),
+            tags=data.get('tags', []),
+        )
+        if not issue.issue_id or not issue.title:
+            return jsonify({'success': False, 'message': 'issue_id 和 title 不能为空'}), 400
+
+        kb = get_knowledge_base()
+        ok = kb.add_known_issue(bank_name, issue)
+        if ok:
+            return jsonify({'success': True, 'message': f'已知问题「{issue.issue_id}」已保存'})
+        return jsonify({'success': False, 'message': '保存失败'}), 500
+    except Exception as e:
+        logger.error('添加知识库已知问题失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/statistics', methods=['GET'])
+def api_knowledge_base_statistics():
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        kb = get_knowledge_base()
+        stats = kb.get_statistics()
+        return jsonify({'success': True, 'data': stats})
+    except Exception as e:
+        logger.error('获取知识库统计失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/knowledge-base/diagnose', methods=['POST'])
+def api_knowledge_base_diagnose():
+    if not HAS_KNOWLEDGE_BASE:
+        return jsonify({'success': False, 'message': '知识库模块未安装'}), 501
+
+    try:
+        data = request.get_json(force=True)
+        error_message = data.get('error_message', '').strip()
+        bank_name = data.get('bank_name', '').strip() or None
+
+        if not error_message:
+            return jsonify({'success': False, 'message': '错误信息不能为空'}), 400
+
+        kb = get_knowledge_base()
+        results = kb.search_all(error_message, bank_name=bank_name)
+        return jsonify({
+            'success': True,
+            'data': [r.to_dict() for r in results],
+            'total': len(results),
+        })
+    except Exception as e:
+        logger.error('知识库诊断失败: %s', e, exc_info=True)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 def main():
     try:
         from self_check import self_check_and_exit_if_failed
